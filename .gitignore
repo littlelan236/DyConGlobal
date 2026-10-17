@@ -58,10 +58,12 @@ desktop.ini
 /hidden/evaluation/outputs/**
 
 # Estimator/action source stays tracked; generated datasets and models do not
-/difficulty/datasets/*/
+/difficulty/datasets/*
+!/difficulty/datasets/*.py
 /difficulty/checkpoints/**
 /difficulty/evaluation/outputs/**
-/action/datasets/*/
+/action/datasets/*
+!/action/datasets/*.py
 /action/evaluation/outputs/**
 /action/checkpoints/**
 
@@ -69,7 +71,11 @@ desktop.ini
 /runtime/cache/**
 /runtime/reports/**
 /runtime/model-identities/**
-/runtime/serving/**
+/runtime/serving/*.json
+/runtime/serving/*.jsonl
+/runtime/serving/*.lock
+/runtime/serving/outputs/
+/runtime/serving/logs/
 
 # Checkpoints and package/image archives are assets, not source
 *.pt
@@ -85,6 +91,7 @@ desktop.ini
 *.tmp
 *.part
 *.npy
+*.npz
 *.pickle
 *.pkl
 *.sqlite
@@ -105,13 +112,3 @@ desktop.ini
 # Online capture queues and diagnostic process state
 /capture/**
 /online/**
-
-# Generated capture indexes and intermediate export state
-/hidden/online/**
-/hidden/evaluation/outputs/**
-/difficulty/datasets/**
-/difficulty/evaluation/outputs/**
-/action/datasets/**
-/action/evaluation/outputs/**
-/runtime/serving/**
-/runtime/cache/**
