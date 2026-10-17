@@ -159,7 +159,10 @@ class DyConCapturePlugin:
         await asyncio.to_thread(self._post, "/dycon/capture/session/start", {"metadata": metadata})
         token = REQUEST_CONTEXT.set(metadata)
         try:
-            async for _ in self.engine.generate({"prompt_token_ids": [248068, 198]},
+            # Token 0 is valid for the supported causal tokenizers; warmup must
+            # not assume Qwen3.5's private <think> IDs when validating another
+            # dense checkpoint.
+            async for _ in self.engine.generate({"prompt_token_ids": [0, 0]},
                 SamplingParams(temperature=0, max_tokens=1, ignore_eos=True,
                                output_kind=RequestOutputKind.FINAL_ONLY), "engine-warmup"):
                 pass
