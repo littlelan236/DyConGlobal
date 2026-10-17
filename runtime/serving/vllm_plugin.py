@@ -154,7 +154,7 @@ class DyConCapturePlugin:
 
         from hidden.backends.vllm.online import capture_request_metadata
         metadata = capture_request_metadata("engine-warmup", "engine-warmup", "engine-warmup",
-                                           "engine-warmup", 0, ["think_open", "reasoning_newline", "think_close"],
+                                           "engine-warmup", 0, ["reasoning_newline", "think_close"],
                                            newline_token_ids=sorted(self.newline_ids), close_token_ids=sorted(self.close_ids))
         await asyncio.to_thread(self._post, "/dycon/capture/session/start", {"metadata": metadata})
         token = REQUEST_CONTEXT.set(metadata)

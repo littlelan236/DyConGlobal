@@ -124,17 +124,15 @@ class ServingManager:
                     root / capture_cfg.get("export", {}).get("root", "hidden/online") / "staging"
                 )
                 env["DYCON_CAPTURE_LAYERS"] = json.dumps(capture_cfg["layers"])
-                env["DYCON_CAPTURE_SELECT"] = json.dumps(
-                    {
-                        "tact_states": {
-                            "prompt_positions": [-2],
-                            "generation_tokens": sorted(
-                                set(self.capture_token_inventory.get("newline_token_ids", []))
-                                | set(self.capture_token_inventory.get("close_token_ids", []))
-                            ),
-                        }
-                    }
-                )
+                selector = {
+                    "generation_tokens": sorted(
+                        set(self.capture_token_inventory.get("newline_token_ids", []))
+                        | set(self.capture_token_inventory.get("close_token_ids", []))
+                    )
+                }
+                if "think_open" in capture_cfg.get("anchors", []):
+                    selector["prompt_positions"] = [-2]
+                env["DYCON_CAPTURE_SELECT"] = json.dumps({"tact_states": selector})
                 env["DYCON_CAPTURE_NEWLINE_IDS"] = json.dumps(
                     self.capture_token_inventory.get("newline_token_ids", [])
                 )
