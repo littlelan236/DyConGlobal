@@ -54,6 +54,7 @@ class Serving(Strict):
     tool_parser: str | None
     reasoning_parser: str | None
     language_model_only: bool
+    dtype: Literal["float16", "bfloat16"] = "float16"
 
 
 class Generation(Strict):
@@ -150,6 +151,34 @@ class Benchmark(Strict):
     profile: str | None
 
 
+class CaptureExport(Strict):
+    enabled: bool = True
+    root: str = "hidden/online"
+    format: Literal["npz"] = "npz"
+    queue_size: int = Field(default=256, gt=0)
+    flush_interval_ms: int = Field(default=100, ge=0)
+
+
+class Capture(Strict):
+    enabled: bool = False
+    backend: Literal["easysteer"] = "easysteer"
+    mode: Literal["online"] = "online"
+    graph_mode: Literal["FULL"] = "FULL"
+    anchors: list[Literal["think_open", "reasoning_newline", "think_close"]] = [
+        "think_open", "reasoning_newline", "think_close"
+    ]
+    newline_policy: Literal["all", "double_only"] = "all"
+    newline_token_source: Literal["tokenizer"] = "tokenizer"
+    layers: list[int] = []
+    dtype: Literal["float32", "float16", "bfloat16"] = "float16"
+    prefix_cache_policy: Literal["safe_boundary"] = "safe_boundary"
+    capture_stage: Literal["post_steering"] = "post_steering"
+    failure_policy: Literal["record_and_continue", "block_rollout"] = "record_and_continue"
+    control_host: str = "127.0.0.1"
+    control_port: int = Field(default=0, ge=0, le=65535)
+    export: CaptureExport = Field(default_factory=CaptureExport)
+
+
 class Steering(Strict):
     backend: Literal["easysteer"]
     enabled: bool
@@ -185,6 +214,7 @@ class Config(Strict):
     difficulty: Difficulty
     action: Action
     steering: Steering
+    capture: Capture = Field(default_factory=Capture)
 
     @model_validator(mode="after")
     def cross_fields(self):
@@ -194,6 +224,12 @@ class Config(Strict):
             raise ValueError("Bootstrap must fit container lifetime")
         if len(set(self.hidden.layers)) != len(self.hidden.layers) or any(x < 0 for x in self.hidden.layers):
             raise ValueError("Hidden layers must be unique nonnegative indices")
+        if len(set(self.capture.layers)) != len(self.capture.layers) or any(x < 0 for x in self.capture.layers):
+            raise ValueError("Capture layers must be unique nonnegative indices")
+        if self.capture.enabled and self.capture.prefix_cache_policy != "safe_boundary":
+            raise ValueError("Online capture requires the safe_boundary cache policy")
+        if self.capture.enabled and self.serving.management != "managed":
+            raise ValueError("Online capture requires managed serving")
         return self
 
 

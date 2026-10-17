@@ -28,6 +28,8 @@ def main(argv=None):
     p.add_argument("eval_id")
     p.add_argument("--gold", action="store_true")
     sub.add_parser("enrich").add_argument("dataset_id")
+    sub.add_parser("token-trace").add_argument("dataset_id")
+    sub.add_parser("trajectory-token-audit").add_argument("dataset_id")
     p = sub.add_parser("hidden")
     p.add_argument("dataset_id")
     p.add_argument("capture_id")
@@ -37,6 +39,11 @@ def main(argv=None):
     p.add_argument("profile")
     p.add_argument("task_key")
     p.add_argument("rollout_id")
+    p = sub.add_parser("token-join")
+    p.add_argument("dataset_id")
+    p.add_argument("capture_id")
+    p.add_argument("index_id")
+    sub.add_parser("hidden-token-join-audit").add_argument("index_id")
     p = sub.add_parser("dataset-index")
     p.add_argument("dataset_id")
     p.add_argument("capture_id")
@@ -107,6 +114,19 @@ def main(argv=None):
             cfg["model"]["path"], local_files_only=True, trust_remote_code=cfg["model"]["trust_remote_code"]
         )
         result = str(enrich(cfg, a.dataset_id, tokenizer))
+    elif a.command == "token-trace":
+        from transformers import AutoTokenizer
+
+        from enrichment.token_trace import build_token_traces
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            cfg["model"]["path"], local_files_only=True, trust_remote_code=cfg["model"]["trust_remote_code"]
+        )
+        result = [str(path) for path in build_token_traces(cfg, a.dataset_id, tokenizer)]
+    elif a.command == "trajectory-token-audit":
+        from enrichment.token_trace import audit_token_traces
+
+        result = audit_token_traces(cfg, a.dataset_id)
     elif a.command == "hidden":
         if cfg["hidden"]["adapter"] == "vllm_eager":
             import subprocess
@@ -139,6 +159,14 @@ def main(argv=None):
     elif a.command == "baseline-select":
         catalog.select_baseline(a.profile, a.task_key, a.rollout_id)
         result = {"selected": a.rollout_id}
+    elif a.command == "token-join":
+        from difficulty.datasets.token_join import build_token_hidden_index
+
+        result = str(build_token_hidden_index(cfg, a.dataset_id, a.capture_id, a.index_id))
+    elif a.command == "hidden-token-join-audit":
+        from difficulty.datasets.token_join import audit_token_hidden_index
+
+        result = audit_token_hidden_index(cfg, a.index_id)
     elif a.command == "dataset-index":
         from difficulty.datasets.index import build_index
 

@@ -119,7 +119,9 @@ class ContainerFactory:
         return self._image_manager
 
     def policy_for(self, instance: dict) -> EnvironmentPolicy:
-        overrides = instance.get("environment_overrides")
+        from runtime.containers.repairs import environment_overrides
+
+        overrides = environment_overrides(self.cfg, instance)
         if not overrides:
             return self.policy
         from core.config import Environment
@@ -177,7 +179,7 @@ class ContainerFactory:
             "image_id": self.images[instance["instance_id"]]["image_id"],
             "user": e["user"],
             "platform": e["platform"],
-            "network_mode": self.cfg["environment"].get("network_mode", "none"),
+            "network_mode": e.get("network_mode", "none"),
             "cwd": e["cwd"],
             "environment": policy.variables(),
             "volumes": {e["wheelhouse"]: {"bind": "/opt/dycon-wheels", "mode": "ro"}}
@@ -211,7 +213,8 @@ class ContainerFactory:
                 except (requests.exceptions.ConnectionError, docker.errors.APIError) as exc:
                     message = str(exc).lower()
                     transient = isinstance(exc, requests.exceptions.ConnectionError) or any(
-                        marker in message for marker in ["connection reset", "broken pipe", "internal server error"]
+                        marker in message
+                        for marker in ["connection reset", "broken pipe", "internal server error"]
                     )
                     if not transient or attempt + 1 >= attempts:
                         raise

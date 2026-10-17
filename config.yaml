@@ -15,6 +15,7 @@ serving:
   api_key_env: DYCON_API_KEY
   management: external
   python: .venvs/easysteer/bin/python
+  dtype: float16
   gpus: []
   tensor_parallel_size: 1
   gpu_memory_utilization: 0.8
@@ -98,3 +99,25 @@ steering:
   backend: easysteer
   enabled: false
   payload: null
+
+capture:
+  enabled: false
+  backend: easysteer
+  mode: online
+  graph_mode: FULL
+  anchors: [think_open, reasoning_newline, think_close]
+  newline_policy: all
+  newline_token_source: tokenizer
+  layers: []
+  dtype: float16
+  prefix_cache_policy: safe_boundary
+  capture_stage: post_steering
+  failure_policy: record_and_continue
+  control_host: 127.0.0.1
+  control_port: 0
+  export:
+    enabled: true
+    root: hidden/online
+    format: npz
+    queue_size: 256
+    flush_interval_ms: 100

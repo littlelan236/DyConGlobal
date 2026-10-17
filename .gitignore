@@ -82,6 +82,13 @@ desktop.ini
 *.tar
 *.tar.gz
 *.tgz
+*.tmp
+*.part
+*.npy
+*.pickle
+*.pkl
+*.sqlite
+*.sqlite3
 
 # EasySteer uses the separate pinned vendor/easysteer-vllm overlay.
 # Its upstream checkout contains a redundant embedded vLLM source tree.
@@ -98,3 +105,13 @@ desktop.ini
 # Online capture queues and diagnostic process state
 /capture/**
 /online/**
+
+# Generated capture indexes and intermediate export state
+/hidden/online/**
+/hidden/evaluation/outputs/**
+/difficulty/datasets/**
+/difficulty/evaluation/outputs/**
+/action/datasets/**
+/action/evaluation/outputs/**
+/runtime/serving/**
+/runtime/cache/**

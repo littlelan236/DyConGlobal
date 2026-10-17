@@ -38,6 +38,7 @@ def run_task(cfg, run_id, task_key, task, factory):
     os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
     from baseline.rollout.agent import DurableAgent
     from baseline.rollout.model import make_model
+    from hidden.backends.vllm.online import CaptureClient, capture_request_metadata
     from runtime.containers.factory import TaskContext
     from runtime.containers.rollout_adapter import RolloutEnvironment
 
@@ -65,11 +66,39 @@ def run_task(cfg, run_id, task_key, task, factory):
             path = out / "raw.traj.json"
             ctx = TaskContext(run_id, iid, attempt_id, "rollout", out)
             env = agent = None
+            capture_client = None
+            capture_session_id = None
             status, patch, error, started = "Interrupted", "", None, now()
             try:
                 env = RolloutEnvironment(factory, task["instance"], ctx)
+                capture_context = None
+                if cfg.get("capture", {}).get("enabled"):
+                    control_url = cfg.get("capture_control_url")
+                    if not control_url:
+                        raise RuntimeError("capture control plane is not available")
+                    capture_context = capture_request_metadata(
+                        f"cap-{run_id}-{iid}-{attempt_id}",
+                        iid,
+                        run_id,
+                        f"pending-{iid}-{attempt_id}",
+                        0,
+                        cfg["capture"]["anchors"],
+                        newline_token_ids=cfg.get("capture_token_inventory", {}).get(
+                            "newline_token_ids", [198, 271, 1358]
+                        ),
+                        close_token_ids=cfg.get("capture_token_inventory", {}).get(
+                            "close_token_ids", [248069]
+                        ),
+                        tokenizer_fingerprint=cfg.get("capture_token_inventory", {}).get(
+                            "tokenizer_fingerprint"
+                        ),
+                        newline_policy=cfg["capture"].get("newline_policy", "all"),
+                    )
+                    capture_client = CaptureClient(control_url)
+                    capture_session_id = capture_context["session_id"]
+                    capture_client.start(capture_context, graph_mode="FULL", prefix_cache_policy="safe_boundary")
                 agent = DurableAgent(
-                    make_model(cfg, factory.deadline),
+                    make_model(cfg, factory.deadline, capture_context),
                     env,
                     system_template=cfg["agent"]["system_template"],
                     instance_template=cfg["agent"]["instance_template"],
@@ -108,6 +137,11 @@ def run_task(cfg, run_id, task_key, task, factory):
                             },
                         )
                 finally:
+                    if capture_client is not None and capture_session_id is not None:
+                        try:
+                            capture_client.stop(capture_session_id)
+                        except Exception:
+                            pass
                     if env is not None:
                         env.close()
             rid = import_rollout(
@@ -172,7 +206,10 @@ def run_manifest(cfg, run_id, resume=False, factory=None):
     update_status(run / "status.json", "rollout")
     try:
         factory.lock_images([t["instance"] for t in selection["tasks"].values()])
-        with ServingManager(cfg, run / "serving"):
+        with ServingManager(cfg, run / "serving") as serving:
+            if cfg.get("capture", {}).get("enabled"):
+                cfg["capture_control_url"] = serving.capture_server.base_url
+                cfg["capture_token_inventory"] = serving.capture_token_inventory
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=cfg["execution"]["rollout_workers"]
             ) as pool:

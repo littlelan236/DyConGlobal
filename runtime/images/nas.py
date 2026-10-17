@@ -111,6 +111,15 @@ class ImageLeaseManager:
         self.state = self.state / self.daemon_key
         self.state.mkdir(exist_ok=True)
 
+    def lifecycle_event(self, event, image_id, **extra):
+        path = self.cfg.get("image_events_path")
+        if path:
+            from core.io import now
+
+            with file_lock(Path(path).with_suffix(".lock")):
+                with Path(path).open("a") as out:
+                    out.write(json.dumps({"at": now(), "event": event, "image_id": image_id, **extra}) + "\n")
+
     def _read(self):
         p = self.state / "journal.json"
         return read_json(p) if p.exists() else {"images": {}, "reservations": {}}
@@ -205,19 +214,29 @@ class ImageLeaseManager:
                 store.write_archive(proc.stdin)
                 proc.stdin.close()
                 code = proc.wait()
-                write_json(log.with_suffix(".load.timing.json"), {
-                    "image_id": store.image_id,
-                    "seconds": time.perf_counter() - started,
-                    "returncode": code,
-                    "compressed_bytes": store.record.get("compressed_bytes"),
-                    "log": str(log),
-                })
+                write_json(
+                    log.with_suffix(".load.timing.json"),
+                    {
+                        "image_id": store.image_id,
+                        "seconds": time.perf_counter() - started,
+                        "returncode": code,
+                        "compressed_bytes": store.record.get("compressed_bytes"),
+                        "log": str(log),
+                    },
+                )
             except BaseException:
                 proc.kill()
                 proc.wait()
                 raise
             finally:
                 timer.cancel()
+        self.lifecycle_event(
+            "loaded",
+            store.image_id,
+            seconds=time.perf_counter() - started,
+            returncode=code,
+            compressed_bytes=store.record.get("compressed_bytes"),
+        )
         if code or not self._exists(store.image_id):
             raise RuntimeError(f"docker load failed; see {log}")
 
@@ -229,7 +248,11 @@ class ImageLeaseManager:
             with (self.state / (name + ".lease")).open("a+") as lifetime:
                 fcntl.flock(lifetime, fcntl.LOCK_SH)
                 with file_lock(self.state / (name + ".load.lock")):
-                    if not self._exists(image_id):
+                    present = self._exists(image_id)
+                    self.lifecycle_event("lease", image_id, present_before=present)
+                    if present and self.cfg.get("require_cold_images"):
+                        raise RuntimeError(f"Cold-start audit found an existing image: {image_id}")
+                    if not present:
                         estimate = max(
                             int(store.record["compressed_bytes"] * self.options["expansion_factor"]),
                             self.options["minimum_load_bytes"],
@@ -275,6 +298,8 @@ class ImageLeaseManager:
                 results[image_id] = "leased"
             except (docker.errors.APIError, RuntimeError, OSError) as exc:
                 results[image_id] = f"deferred: {exc}"
+        for image_id, result in results.items():
+            self.lifecycle_event("cleanup", image_id, result=result)
         return results
 
 

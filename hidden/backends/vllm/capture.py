@@ -112,3 +112,62 @@ def capture_window(llm, rows, layers, layer_count, hidden_size, options):
     else:
         rpc("stop_capture", STREAM)
     return values, metrics
+
+
+def online_capture_spec(
+    layers,
+    *,
+    anchor="all",
+    cache_boundary=None,
+    close_token_count=1,
+    newline_token_ids=None,
+    close_token_ids=None,
+):
+    """Build the native EasySteer capture request for a rollout forward.
+
+    The opening marker is deliberately selected at prompt position ``-2``
+    because Qwen chat templates append ``<think>\n``.  The close marker is
+    selected only by the subsequent input forward and must be supplied by the
+    caller after it is observed.
+    """
+    from vllm.capture import SelectSpec
+
+    if anchor == "all":
+        from hidden.backends.vllm.online import build_capture_select
+
+        select = build_capture_select(newline_token_ids or [], close_token_ids or [])["tact_states"]
+    elif anchor == "think_open":
+        select = SelectSpec(prompt_positions=[-2]).to_wire()
+    elif anchor == "reasoning_newline":
+        select = SelectSpec(generation_tokens=list(newline_token_ids or [])).to_wire()
+    elif anchor == "think_close":
+        if close_token_ids:
+            select = SelectSpec(generation_tokens=list(close_token_ids)).to_wire()
+        else:
+            if type(close_token_count) is not int or close_token_count <= 0:
+                raise ValueError("close_token_count must be a positive integer")
+            select = SelectSpec(prompt_positions=[-close_token_count]).to_wire()
+    else:
+        raise ValueError(f"Unknown online capture anchor: {anchor}")
+    result = {"layers": list(layers), "select": select, "graph_mode": "FULL"}
+    if cache_boundary is not None:
+        if type(cache_boundary) is not int or cache_boundary < 0:
+            raise ValueError("cache_boundary must be a nonnegative integer")
+        result["capture_cache_boundary"] = cache_boundary
+    return result
+
+
+def start_online_capture(llm, stream, layers, *, anchor="think_open", cache_boundary=None, close_token_count=1, **options):
+    """Ask every vLLM worker to use EasySteer's FULL capture graph.
+
+    Scheduler, KV/GDN state, TP assembly and page fetching remain in the
+    pinned runtime; this function only forwards the control request.
+    """
+    spec = online_capture_spec(
+        layers, anchor=anchor, cache_boundary=cache_boundary, close_token_count=close_token_count
+    )
+    kwargs = {**options, **spec}
+    results = llm.collective_rpc("start_capture", args=(stream,), kwargs=kwargs)
+    if not results or not all(value is True for value in results):
+        raise RuntimeError("online capture worker admission failed")
+    return spec
