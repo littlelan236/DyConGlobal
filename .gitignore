@@ -54,6 +54,8 @@ desktop.ini
 /enrichment/reports/**
 /hidden/outputs/**
 /hidden/reports/**
+/hidden/online/**
+/hidden/evaluation/outputs/**
 
 # Estimator/action source stays tracked; generated datasets and models do not
 /difficulty/datasets/*/
@@ -67,6 +69,7 @@ desktop.ini
 /runtime/cache/**
 /runtime/reports/**
 /runtime/model-identities/**
+/runtime/serving/**
 
 # Checkpoints and package/image archives are assets, not source
 *.pt
@@ -91,3 +94,7 @@ desktop.ini
 
 # Preserve deliberate placeholders in otherwise empty functional directories
 !.gitkeep
+
+# Online capture queues and diagnostic process state
+/capture/**
+/online/**

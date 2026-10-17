@@ -82,8 +82,13 @@ def reconstruct(step, reader, tokenizer, cfg):
     rebuilt = tokenizer.apply_chat_template(
         messages, tools=tools, tokenize=True, add_generation_prompt=True, **kwargs
     )
+    # Transformers 5 tokenizers may return BatchEncoding even for one chat.
+    if hasattr(rebuilt, "keys") and "input_ids" in rebuilt:
+        rebuilt = rebuilt["input_ids"]
     if hasattr(rebuilt, "tolist"):
         rebuilt = rebuilt.tolist()
+    if isinstance(rebuilt, list) and len(rebuilt) == 1 and isinstance(rebuilt[0], list):
+        rebuilt = rebuilt[0]
     if not isinstance(rebuilt, list) or not all(type(x) is int for x in rebuilt):
         raise ValueError("Tokenizer must return a single list of token IDs")
     actual = response.get("prompt_token_ids")

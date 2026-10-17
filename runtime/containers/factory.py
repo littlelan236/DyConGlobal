@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 import docker
+import requests
 
 from core.io import hash_json, now, write_json
 from runtime.containers.policy import EnvironmentPolicy, parse_probe, probe_command
@@ -175,6 +177,7 @@ class ContainerFactory:
             "image_id": self.images[instance["instance_id"]]["image_id"],
             "user": e["user"],
             "platform": e["platform"],
+            "network_mode": self.cfg["environment"].get("network_mode", "none"),
             "cwd": e["cwd"],
             "environment": policy.variables(),
             "volumes": {e["wheelhouse"]: {"bind": "/opt/dycon-wheels", "mode": "ro"}}
@@ -194,10 +197,26 @@ class ContainerFactory:
         lease = self.image_manager.lease(store)
         lease.__enter__()
         try:
-            container = self._create(instance, context)
-            with self._lock:
-                self._leases[container.id] = lease
-            return container
+            # Docker rootless may reset the API connection while concurrently
+            # creating containers (especially immediately after image loads).
+            # All callers share this entry point, so retry creation here rather
+            # than adding divergent retry logic to rollout or harness paths.
+            attempts = 1 + self.cfg["execution"].get("infrastructure_retry_limit", 0)
+            for attempt in range(attempts):
+                try:
+                    container = self._create(instance, context)
+                    with self._lock:
+                        self._leases[container.id] = lease
+                    return container
+                except (requests.exceptions.ConnectionError, docker.errors.APIError) as exc:
+                    message = str(exc).lower()
+                    transient = isinstance(exc, requests.exceptions.ConnectionError) or any(
+                        marker in message for marker in ["connection reset", "broken pipe", "internal server error"]
+                    )
+                    if not transient or attempt + 1 >= attempts:
+                        raise
+                    self.event(context, "create_retry", attempt=attempt + 1, error=repr(exc))
+                    time.sleep(min(2.0 * (attempt + 1), 5.0))
         except BaseException:
             lease.__exit__(*__import__("sys").exc_info())
             raise
@@ -214,6 +233,7 @@ class ContainerFactory:
             image=spec["image_id"],
             user=spec["user"],
             platform=spec["platform"],
+            network_mode=spec["network_mode"],
             working_dir=spec["cwd"],
             environment=spec["environment"],
             volumes=spec["volumes"],

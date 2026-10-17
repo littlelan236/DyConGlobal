@@ -29,6 +29,7 @@ class Environment(Strict):
     repo_pins: dict[str, list[str]]
     variables: dict[str, str]
     network_fallback: bool
+    network_mode: str = "none"
     requirements_cache: str
 
 
@@ -109,13 +110,38 @@ class Enrichment(Strict):
     token_evidence: Literal["exact", "reconstructed"]
 
 
+class VLLMHidden(Strict):
+    python: str = ".venvs/latent-vllm/bin/python"
+    gpus: list[int] = []
+    tensor_parallel_size: int = Field(default=1, gt=0)
+    max_num_seqs: int = Field(default=16, gt=0)
+    max_num_batched_tokens: int = Field(default=4096, gt=0)
+    max_model_len: int = Field(default=32768, gt=1)
+    max_inflight_requests: int = Field(default=32, gt=0)
+    gpu_memory_utilization: float = Field(default=0.8, gt=0, le=1)
+    enable_chunked_prefill: bool = True
+    enable_prefix_caching: bool = True
+    moe_backend: Literal["auto", "triton"] = "auto"
+    capture_budget_bytes: int = Field(default=268435456, gt=0)
+    fetch_bytes: int = Field(default=16777216, gt=0)
+
+    @model_validator(mode="after")
+    def unique_devices(self):
+        if len(set(self.gpus)) != len(self.gpus) or any(g < 0 for g in self.gpus):
+            raise ValueError("vLLM GPUs must be unique nonnegative physical indices")
+        if self.max_num_batched_tokens < self.max_num_seqs:
+            raise ValueError("vLLM token budget must accommodate max_num_seqs")
+        return self
+
+
 class Hidden(Strict):
     python: str
     dtype: Literal["float32", "float16", "bfloat16"]
     device: str
     chunk_size: int = Field(gt=0)
     layers: list[int]
-    adapter: Literal["hf_causal"]
+    adapter: Literal["hf_causal", "vllm_eager"]
+    vllm: VLLMHidden = Field(default_factory=VLLMHidden)
 
 
 class Benchmark(Strict):
@@ -191,6 +217,13 @@ UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, uni
 def resolve(path, overrides=()):
     path = Path(path).resolve()
     raw = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueLoader)
+    explicit_vllm = "vllm" in raw.get("hidden", {})
+    # Optional defaults preserve old config files while allowing dotted overrides.
+    # Existing keys still undergo strict validation; unknown keys are not discarded.
+    hidden = raw.get("hidden", {})
+    options = VLLMHidden().model_dump()
+    options.update(hidden.get("vllm", {}))
+    hidden["vllm"] = options
     for item in overrides:
         dotted, value = item.split("=", 1)
         target = raw
@@ -202,6 +235,15 @@ def resolve(path, overrides=()):
         target[keys[-1]] = yaml.safe_load(value)
     cfg = Config.model_validate(raw).model_dump()
     root = path.parent
+    if (
+        cfg["hidden"]["adapter"] == "hf_causal"
+        and not explicit_vllm
+        and not any(item.startswith("hidden.vllm.") for item in overrides)
+    ):
+        # Preserve legacy HF config hashes and immutable artifact identities.
+        cfg["hidden"].pop("vllm")
+    else:
+        cfg["hidden"]["vllm"]["python"] = str((root / cfg["hidden"]["vllm"]["python"]).absolute())
     for section, field in [
         ("model", "path"),
         ("environment", "wheelhouse"),

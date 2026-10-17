@@ -185,6 +185,7 @@ class ImageLeaseManager:
 
     def _load(self, store):
         log = self.state / (store.image_id[7:] + ".load.log")
+        started = time.perf_counter()
         with log.open("wb") as out:
             proc = subprocess.Popen(
                 [
@@ -204,6 +205,13 @@ class ImageLeaseManager:
                 store.write_archive(proc.stdin)
                 proc.stdin.close()
                 code = proc.wait()
+                write_json(log.with_suffix(".load.timing.json"), {
+                    "image_id": store.image_id,
+                    "seconds": time.perf_counter() - started,
+                    "returncode": code,
+                    "compressed_bytes": store.record.get("compressed_bytes"),
+                    "log": str(log),
+                })
             except BaseException:
                 proc.kill()
                 proc.wait()

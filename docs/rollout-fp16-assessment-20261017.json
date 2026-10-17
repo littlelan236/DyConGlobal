@@ -1,0 +1,170 @@
+{
+  "model": "Qwen3.5-9B",
+  "scope": "12 real coding prefixes (1400-8212 tokens), fixed 512 output tokens, 3 rounds, TP4 native graph APC, no tool execution; precision uses 4 generated continuations x sites 0/15/final_norm",
+  "latency": {
+    "1": {
+      "bf16_seconds": 3.730546663980931,
+      "fp16_seconds": 3.7704822109662928,
+      "model_time_change_percent": 1.0705012048487728,
+      "conditional_loop_time_change_percent_bounds": [
+        0.4665432959576842,
+        0.5476612441018283
+      ]
+    },
+    "4": {
+      "bf16_seconds": 5.214234912011307,
+      "fp16_seconds": 5.075223927968182,
+      "model_time_change_percent": -2.6659900520190405,
+      "conditional_loop_time_change_percent_bounds": [
+        -1.363902648627196,
+        -1.161885460965053
+      ]
+    },
+    "12": {
+      "bf16_seconds": 6.639978122024331,
+      "fp16_seconds": 6.454245320986956,
+      "model_time_change_percent": -2.797189954908319,
+      "conditional_loop_time_change_percent_bounds": [
+        -1.4310236399132654,
+        -1.2190646914470396
+      ]
+    }
+  },
+  "eager_tp1_replay": {
+    "think_open": {
+      "bf16_relative_l2_median": 0.012527175134403476,
+      "fp16_relative_l2_median": 0.0018347861160803022,
+      "bf16_relative_l2_max": 0.04223738857320877,
+      "fp16_relative_l2_max": 0.005519364933185148,
+      "median_error_reduction_factor": 6.827594249059167,
+      "max_error_reduction_factor": 7.652581245218401
+    },
+    "think_close": {
+      "bf16_relative_l2_median": 0.010995724182342372,
+      "fp16_relative_l2_median": 0.0019834931990984324,
+      "bf16_relative_l2_max": 0.04845044443703619,
+      "fp16_relative_l2_max": 0.007423987078008734,
+      "median_error_reduction_factor": 5.543615772083472,
+      "max_error_reduction_factor": 6.5262026897319965
+    },
+    "all": {
+      "bf16_relative_l2_median": 0.01146132400009198,
+      "fp16_relative_l2_median": 0.0014145188028705149,
+      "bf16_relative_l2_max": 0.06649564993267047,
+      "fp16_relative_l2_max": 0.010022055725296523,
+      "median_error_reduction_factor": 8.10263106918993,
+      "max_error_reduction_factor": 6.6349311713394075
+    }
+  },
+  "limitations": [
+    "single paired BF16 then FP16 run, order/thermal/load effects not eliminated",
+    "replay precision per dtype uses its own generated continuation; lengths differ",
+    "not a full SWE-bench task/outcome experiment",
+    "no estimator downstream accuracy measured",
+    "other checkpoint families not benchmarked",
+    "current production serving config has no explicit dtype setting; benchmark uses independent engine only"
+  ],
+  "historical_model_wall_fraction": {
+    "rollouts": 48,
+    "calls": 4835,
+    "model_wall_fraction_lower": 0.4358176280834655,
+    "model_wall_fraction_upper": 0.5115933000553653
+  },
+  "online_generation_lengths": {
+    "bf16": [
+      143,
+      71,
+      311,
+      245
+    ],
+    "fp16": [
+      190,
+      71,
+      311,
+      245
+    ]
+  },
+  "startup_seconds": {
+    "bf16": 102.51372528303182,
+    "fp16": 108.42013562197099,
+    "note": "first-run compile/cache conditions differ; not a stable startup penalty estimate"
+  },
+  "matched_exact_prefix_subset": {
+    "bfloat16": {
+      "all": {
+        "samples": 13,
+        "site_vectors": 39,
+        "cosine_min": 0.99779122916911,
+        "cosine_p50": 0.9999381940781099,
+        "relative_l2_max": 0.06649564993267047,
+        "relative_l2_p50": 0.011432829057108672,
+        "relative_l2_p95": 0.03133485479875678
+      },
+      "decode_token": {
+        "samples": 7,
+        "site_vectors": 21,
+        "cosine_min": 0.99779122916911,
+        "cosine_p50": 0.9999613217716361,
+        "relative_l2_max": 0.06649564993267047,
+        "relative_l2_p50": 0.009381200436837472,
+        "relative_l2_p95": 0.03012346215715098
+      },
+      "think_close": {
+        "samples": 2,
+        "site_vectors": 6,
+        "cosine_min": 0.9996568107416461,
+        "cosine_p50": 0.9999426207683954,
+        "relative_l2_max": 0.02625302161146876,
+        "relative_l2_p50": 0.010890392785800326,
+        "relative_l2_p95": 0.02559778500293101
+      },
+      "think_open": {
+        "samples": 4,
+        "site_vectors": 12,
+        "cosine_min": 0.9991082003689115,
+        "cosine_p50": 0.9999224976573611,
+        "relative_l2_max": 0.04223738857320877,
+        "relative_l2_p50": 0.012527175134403476,
+        "relative_l2_p95": 0.029135901736754764
+      }
+    },
+    "float16": {
+      "all": {
+        "samples": 13,
+        "site_vectors": 39,
+        "cosine_min": 0.9999498089412018,
+        "cosine_p50": 0.9999988269020443,
+        "relative_l2_max": 0.010022055725296523,
+        "relative_l2_p50": 0.0015476846603197777,
+        "relative_l2_p95": 0.004208444759737493
+      },
+      "decode_token": {
+        "samples": 7,
+        "site_vectors": 21,
+        "cosine_min": 0.9999498089412018,
+        "cosine_p50": 0.9999991715634734,
+        "relative_l2_max": 0.010022055725296523,
+        "relative_l2_p50": 0.0013012541055436152,
+        "relative_l2_p95": 0.004062786962687751
+      },
+      "think_close": {
+        "samples": 2,
+        "site_vectors": 6,
+        "cosine_min": 0.9999949940934831,
+        "cosine_p50": 0.99999881284959,
+        "relative_l2_max": 0.0031781887637184047,
+        "relative_l2_p50": 0.0015685884418400475,
+        "relative_l2_p95": 0.0031364802506555307
+      },
+      "think_open": {
+        "samples": 4,
+        "site_vectors": 12,
+        "cosine_min": 0.9999847764543505,
+        "cosine_p50": 0.9999983330091045,
+        "relative_l2_max": 0.005519364933185148,
+        "relative_l2_p50": 0.0018347861160803022,
+        "relative_l2_p95": 0.003831740900224151
+      }
+    }
+  }
+}

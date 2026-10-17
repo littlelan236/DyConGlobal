@@ -108,10 +108,25 @@ def main(argv=None):
         )
         result = str(enrich(cfg, a.dataset_id, tokenizer))
     elif a.command == "hidden":
-        from hidden.adapters.hf import load_adapter
-        from hidden.extract import extract_hidden
+        if cfg["hidden"]["adapter"] == "vllm_eager":
+            import subprocess
 
-        result = str(extract_hidden(cfg, a.dataset_id, a.capture_id, load_adapter(cfg)))
+            args = [
+                cfg["hidden"]["vllm"]["python"],
+                "-m",
+                "hidden.scripts.extract_vllm",
+                "--config",
+                cfg["config_source"],
+            ]
+            for override in a.set:
+                args += ["--set", override]
+            subprocess.run([*args, a.dataset_id, a.capture_id], cwd=cfg["project_root"], check=True)
+            return
+        else:
+            from hidden.adapters.hf import load_adapter
+            from hidden.extract import extract_hidden
+
+            result = str(extract_hidden(cfg, a.dataset_id, a.capture_id, load_adapter(cfg)))
     elif a.command == "images-check":
         from runtime.images.nas import NasImageStore
 
