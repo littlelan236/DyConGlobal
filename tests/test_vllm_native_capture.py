@@ -88,3 +88,28 @@ def test_native_cache_policy_keeps_final_token_recomputable():
         "start_capture", ("tact_states",), {"select": SelectSpec(prompt_positions=[-1]).to_wire()}
     )
     assert not policy.skip_prefix_read(list(range(4097)), None)
+
+
+def test_shared_capture_boundary_limits_native_lookup_before_hybrid_restore():
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+
+    from runtime.serving.cache_boundary import install
+
+    install()
+    seen = []
+    def lookup(block_hashes, maximum):
+        seen.append(maximum)
+        return (["native-blocks"], maximum // 16 * 16, 0)
+    coordinator = SimpleNamespace(find_longest_cache_hit=lookup)
+    manager = SimpleNamespace(
+        coordinator=coordinator, prefix_cache_lookup_enabled=lambda request: True,
+        create_kv_cache_blocks=lambda blocks: blocks, enable_kv_cache_events=False,
+    )
+    request = SimpleNamespace(num_tokens=129, block_hashes=["native-hash"],
+                              sampling_params=SimpleNamespace(extra_args={"dycon_capture_cache_boundary": 95}))
+    blocks, tokens, _ = KVCacheManager.get_computed_blocks(manager, request)
+    assert seen == [95] and tokens == 80 and blocks == ["native-blocks"]
+    assert coordinator.find_longest_cache_hit is lookup
+    request.sampling_params.extra_args = {}
+    KVCacheManager.get_computed_blocks(manager, request)
+    assert seen[-1] == 128

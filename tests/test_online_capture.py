@@ -167,3 +167,31 @@ def test_native_capture_rows_keep_vllm_coordinates(tmp_path):
     assert len(published) == 3
     assert [call[1]["anchor"] for call in client.calls] == ["think_open", "reasoning_newline", "think_close"]
     assert [call[1]["absolute_position"] for call in client.calls] == [1, 3, 4]
+
+
+def test_http_staging_binds_explicit_native_request(tmp_path):
+    from core.io import read_json
+    from hidden.backends.vllm.online import CaptureClient
+
+    controller = OnlineCaptureController(tmp_path, {"export": {"root": "hidden/online"}})
+    server = CaptureControlServer(controller).start()
+    client = CaptureClient(server.base_url)
+    try:
+        for step in [0, 1]:
+            metadata = capture_request_metadata(f"session-{step}", "task", "run", f"rollout-{step}", step,
+                                                ["reasoning_newline"], newline_token_ids=[271])
+            metadata.update(prompt_token_ids=[1, 248068, 198], message_index=step + 2)
+            client.start(metadata)
+            client.bind(f"native-{step}", metadata)
+            client.submit_staged(controller.export_root / "staging", f"native-{step}",
+                                 {"hidden": np.ones((2, 4))}, anchor="reasoning_newline",
+                                 token_id=271, position=4, absolute_position=4)
+        controller.queue.queue.join()
+        rows = [read_json(p) for p in (controller.export_root / "raw").glob("*.json")]
+        assert len(rows) == 2
+        for row in rows:
+            assert row["token_ref"] == [f"rollout-{row['step_id']}", row["step_id"], "generation_input", 4, 271]
+            assert row["generation_index"] == 1
+        assert not list((controller.export_root / "staging").glob("*.npz"))
+    finally:
+        server.close()

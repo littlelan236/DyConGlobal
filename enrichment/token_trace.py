@@ -1,4 +1,4 @@
-﻿"""Build exact per-token trajectory traces and reasoning-block labels."""
+"""Build exact per-token trajectory traces and reasoning-block labels."""
 from __future__ import annotations
 
 import json
@@ -187,7 +187,7 @@ def trace_rollout(cfg, rollout_id, tokenizer, dataset_id=None):
             kind, newline_count, offset, length = 0, 0, -1, -1
             if content_start <= i < content_end:
                 text = _token_text(tokenizer, token_id)
-                newline_count = text.count("\\n")
+                newline_count = text.count("\n")
                 kind = 2 if newline_count else 0
                 offset, length = i - content_start, content_count
             elif close_start is not None and close_start <= i < close_start + len(close_ids):

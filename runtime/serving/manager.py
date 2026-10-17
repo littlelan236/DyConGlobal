@@ -32,6 +32,12 @@ class ServingManager:
 
     def __enter__(self):
         cfg, s = self.cfg, self.cfg["serving"]
+        # ``resolve`` canonicalizes ordinary paths, which would turn a venv's
+        # python symlink into the shared interpreter.  Managed serving must use
+        # the pinned EasySteer venv, so retain the authoritative raw path.
+        from hidden.backends.vllm.engine import serving_interpreter
+
+        serving_python = str(serving_interpreter(cfg))
         self.output.mkdir(parents=True, exist_ok=True)
         capture_cfg = cfg.get("capture", {})
         if capture_cfg.get("enabled") and s["management"] != "managed":
@@ -44,11 +50,14 @@ class ServingManager:
                 raise ValueError("Managed service must bind a local HTTP endpoint")
             port = endpoint.port or 80
             with socket.socket() as check:
+                check.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 check.bind((endpoint.hostname, port))
             root = Path(cfg["project_root"])
             verify = root / "runtime/scripts/verify_easysteer_runtime.py"
-            subprocess.run([s["python"], str(verify)], check=True, capture_output=True, text=True)
+            subprocess.run([serving_python, str(verify)], check=True, capture_output=True, text=True)
             if capture_cfg.get("enabled"):
+                if not capture_cfg.get("layers"):
+                    raise ValueError("Online capture requires capture.layers to be configured")
                 inventory_code = (
                     "import json,sys; from transformers import AutoTokenizer; "
                     "t=AutoTokenizer.from_pretrained(sys.argv[1], local_files_only=True, trust_remote_code=True); "
@@ -58,7 +67,7 @@ class ServingManager:
                 )
                 try:
                     raw_inventory = subprocess.check_output(
-                        [s["python"], "-c", inventory_code, cfg["model"]["path"]], text=True, cwd=root
+                        [serving_python, "-c", inventory_code, cfg["model"]["path"]], text=True, cwd=root
                     )
                     self.capture_token_inventory = json.loads(raw_inventory.strip().splitlines()[-1])
                     self.capture_token_inventory["tokenizer_fingerprint"] = hash_json(
@@ -78,16 +87,52 @@ class ServingManager:
                     capture_cfg.get("control_port", 0),
                 ).start()
             env = dict(os.environ)
+            if capture_cfg.get("enabled"):
+                # FULL graph compilation invokes ninja from the process PATH.
+                # The managed venv may be pip-less while uv has already
+                # materialized a compatible ninja binary in its cache.
+                import shutil
+
+                if shutil.which("ninja", path=env.get("PATH")) is None:
+                    candidates = sorted(
+                        Path.home().glob(".cache/uv/archive-v0/*/ninja-*.data/scripts/ninja"),
+                        key=lambda p: p.stat().st_mtime if p.exists() else 0,
+                        reverse=True,
+                    )
+                    if candidates:
+                        env["PATH"] = str(candidates[0].parent) + os.pathsep + env.get("PATH", "")
             env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, s["gpus"]))
-            env["VLLM_PLUGINS"] = ""
+            env["VLLM_PLUGINS"] = "dycon_capture" if capture_cfg.get("enabled") else ""
             env["VLLM_USE_V2_MODEL_RUNNER"] = "1"
             env["VLLM_CACHE_ROOT"] = str(root / "runtime/cache/vllm")
             if self.capture_server is not None:
                 env["DYCON_CAPTURE_CONTROL_URL"] = self.capture_server.base_url
                 env["DYCON_CAPTURE_GRAPH_MODE"] = "FULL"
                 env["DYCON_CAPTURE_CACHE_POLICY"] = "safe_boundary"
+                env["DYCON_CAPTURE_STAGING_ROOT"] = str(
+                    root / capture_cfg.get("export", {}).get("root", "hidden/online") / "staging"
+                )
+                env["DYCON_CAPTURE_LAYERS"] = json.dumps(capture_cfg["layers"])
+                env["DYCON_CAPTURE_SELECT"] = json.dumps(
+                    {
+                        "tact_states": {
+                            "prompt_positions": [-2],
+                            "generation_tokens": sorted(
+                                set(self.capture_token_inventory.get("newline_token_ids", []))
+                                | set(self.capture_token_inventory.get("close_token_ids", []))
+                            ),
+                        }
+                    }
+                )
+                env["DYCON_CAPTURE_NEWLINE_IDS"] = json.dumps(
+                    self.capture_token_inventory.get("newline_token_ids", [])
+                )
+                env["DYCON_CAPTURE_CLOSE_IDS"] = json.dumps(
+                    self.capture_token_inventory.get("close_token_ids", [])
+                )
+                env["DYCON_CAPTURE_OPEN_IDS"] = json.dumps([248068])
             args = [
-                s["python"],
+                serving_python,
                 "-m",
                 "vllm.entrypoints.openai.api_server",
                 "--model",
@@ -116,9 +161,23 @@ class ServingManager:
                 "--no-async-scheduling",
             ]
             if capture_cfg.get("enabled"):
+                args += ["--max-num-seqs", str(s.get("max_num_seqs", 16)),
+                         "--max-num-batched-tokens", str(s.get("max_num_batched_tokens", 1024))]
+                args += ["--long-prefill-token-threshold", str(capture_cfg.get("prefill_token_chunk_size", 1))]
+            if s.get("kv_cache_memory_bytes") is not None:
+                args += ["--kv-cache-memory-bytes", str(s["kv_cache_memory_bytes"])]
+            if capture_cfg.get("enabled"):
                 # vLLM's normal path is unchanged; capture runs opt into the
                 # native FULL graph dispatcher for both prefill and decode.
-                args += ["--compilation-config", '{"cudagraph_mode":"FULL"}']
+                args += ["--compilation-config", json.dumps({
+                    "cudagraph_mode": "FULL",
+                    "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+                })]
+                # EasySteer installs the shared model-hook runner only when its
+                # steering extension is enabled.  A disabled vector payload is
+                # still a no-op; it activates the graph-safe hook path.
+                args += ["--enable-steer-vector", "--steer-algorithms", "direct",
+                         "--steer-graph-mode", "in_graph", "--steer-vector-dtype", "float32"]
             if s["language_model_only"]:
                 args.append("--language-model-only")
             if cfg["model"]["trust_remote_code"]:

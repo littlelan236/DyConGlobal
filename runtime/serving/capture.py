@@ -1,4 +1,4 @@
-﻿"""Online hidden-state capture control and asynchronous export primitives.
+"""Online hidden-state capture control and asynchronous export primitives.
 
 The controller is deliberately independent from vLLM's scheduler.  A managed
 EasySteer/vLLM integration can call ``record`` after its native capture hook,
@@ -70,6 +70,9 @@ class CaptureRequest:
     newline_policy: str = "all"
     capture_select: dict[str, Any] | None = None
     capture_select_sha256: str | None = None
+    message_index: int | None = None
+    prompt_token_ids: tuple[int, ...] = ()
+    request_sha256: str | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]):
@@ -105,6 +108,9 @@ class CaptureRequest:
             newline_policy=newline_policy,
             capture_select=selector,
             capture_select_sha256=selector_hash,
+            message_index=value.get("message_index"),
+            prompt_token_ids=tuple(value.get("prompt_token_ids") or ()),
+            request_sha256=value.get("request_sha256"),
         )
 
     def to_dict(self):
@@ -124,6 +130,9 @@ class CaptureRequest:
             "newline_policy": self.newline_policy,
             "capture_select": self.capture_select,
             "capture_select_sha256": self.capture_select_sha256,
+            "message_index": self.message_index,
+            "prompt_token_ids": list(self.prompt_token_ids),
+            "request_sha256": self.request_sha256,
         }
 
 
@@ -233,6 +242,7 @@ class AsyncExportQueue:
 class _Session:
     session_id: str
     options: dict[str, Any]
+    default_request: CaptureRequest | None = None
     created_at: str = field(default_factory=now)
     status: str = "active"
     requests: dict[str, CaptureRequest] = field(default_factory=dict)
@@ -250,6 +260,7 @@ class OnlineCaptureController:
         self.export_root = self.root / export.get("root", "hidden/online")
         self.queue = AsyncExportQueue(self.export_root, int(export.get("queue_size", 256)))
         self.sessions: dict[str, _Session] = {}
+        self.request_outputs = {}
         self.request_bindings: dict[str, tuple[str, CaptureRequest]] = {}
         self._lock = threading.RLock()
         self._manifest_lock = threading.Lock()
@@ -301,7 +312,7 @@ class OnlineCaptureController:
             merged = {**self.config, **options}
             if str(merged.get("graph_mode", "FULL")).upper() != "FULL":
                 raise ValueError("online capture requires graph_mode=FULL")
-            self.sessions[request.session_id] = _Session(request.session_id, merged)
+            self.sessions[request.session_id] = _Session(request.session_id, merged, request)
             session_dir = self.export_root / "sessions" / request.session_id
             session_dir.mkdir(parents=True, exist_ok=True)
             write_json(
@@ -395,19 +406,57 @@ class OnlineCaptureController:
         """
         candidate = Path(path)
         if not candidate.is_absolute():
-            candidate = self.export_root / candidate
+            candidate = self.export_root / "staging" / candidate
         candidate = candidate.resolve()
         staging = (self.export_root / "staging").resolve()
         if not candidate.is_relative_to(staging):
             raise ValueError("staged capture path escapes the capture staging directory")
         if not candidate.is_file():
             raise FileNotFoundError(candidate)
+        with self._lock:
+            if request_id not in self.request_bindings:
+                raise KeyError("request has no capture metadata binding")
+            _, request = self.request_bindings[request_id]
+            position = metadata.get("absolute_position", metadata.get("position"))
+            prompt_length = len(request.prompt_token_ids)
+            metadata.setdefault("message_index", request.message_index)
+            if prompt_length and position is not None:
+                metadata["phase"] = "prompt" if position < prompt_length else "generation_input"
+                metadata["generation_index"] = position - prompt_length if position >= prompt_length else -1
+            metadata["token_ref"] = [request.rollout_id, request.step_id, metadata.get("phase"), position, metadata.get("token_id")]
         try:
             with np.load(candidate, allow_pickle=False) as archive:
                 tensors = {name: np.asarray(archive[name]) for name in archive.files}
             return self.record(request_id, tensors, **metadata)
         finally:
             candidate.unlink(missing_ok=True)
+
+    def record_output(self, value):
+        request_id = value["request_id"]
+        with self._lock:
+            if request_id not in self.request_bindings:
+                # Some outputs expose the external ID; require a unique exact
+                # prefix match to the native randomized ID, never batch order.
+                matches = [rid for rid in self.request_bindings if rid.startswith(request_id + "-")]
+                if len(matches) != 1:
+                    raise KeyError("output has no unique native request binding")
+                request_id = matches[0]
+            session_id, request = self.request_bindings[request_id]
+            record = {**request.to_dict(), **value, "request_id": request_id}
+            self.request_outputs[request_id] = record
+            write_json(self.export_root / "sessions" / session_id / "requests" / (hash_json(request_id) + ".json"), record)
+            return {"recorded": True, "request_id": request_id}
+
+    def mark_behavior_failure(self, session_id, reason, *, expected=None, actual=None):
+        with self._lock:
+            session = self.sessions[session_id]
+            session.status = "failed_behavior"
+            session.metrics["fallbacks"] += 1
+            entry = {"session_id": session_id, "status": session.status,
+                     "failure_reason": reason, "expected": expected, "actual": actual,
+                     "at": now()}
+            write_json(self.export_root / "sessions" / session_id / "behavior-failure.json", entry)
+            return entry
 
     def stop(self, session_id: str):
         with self._lock:
@@ -505,6 +554,12 @@ class CaptureControlServer:
                     value = self._read()
                     if self.path == "/dycon/capture/session/start":
                         return self._json(200, controller_ref.start(value.pop("metadata", value), **value))
+                    if self.path == "/dycon/capture/request/output":
+                        return self._json(200, controller_ref.record_output(value))
+                    if self.path == "/dycon/capture/behavior-failure":
+                        return self._json(200, controller_ref.mark_behavior_failure(
+                            value["session_id"], value["reason"], expected=value.get("expected"), actual=value.get("actual")
+                        ))
                     if self.path == "/dycon/capture/request/bind":
                         return self._json(200, controller_ref.bind(value["request_id"], value["metadata"]))
                     if self.path == "/dycon/capture/sample":

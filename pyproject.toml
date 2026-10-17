@@ -17,6 +17,12 @@ test = ["pytest>=8", "ruff>=0.11"]
 [project.scripts]
 dycon = "core.cli:main"
 
+[project.entry-points."vllm.endpoint_plugins"]
+dycon_capture = "runtime.serving.vllm_plugin:plugin"
+
+[project.entry-points."vllm.general_plugins"]
+dycon_capture = "runtime.serving.cache_boundary:install"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["core*", "baseline*", "enrichment*", "hidden*", "difficulty*", "action*", "runtime*"]

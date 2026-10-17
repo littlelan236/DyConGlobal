@@ -16,6 +16,9 @@ serving:
   management: external
   python: .venvs/easysteer/bin/python
   dtype: float16
+  kv_cache_memory_bytes: null
+  max_num_seqs: 16
+  max_num_batched_tokens: 1024
   gpus: []
   tensor_parallel_size: 1
   gpu_memory_utilization: 0.8
@@ -105,6 +108,7 @@ capture:
   backend: easysteer
   mode: online
   graph_mode: FULL
+  prefill_token_chunk_size: 1
   anchors: [think_open, reasoning_newline, think_close]
   newline_policy: all
   newline_token_source: tokenizer

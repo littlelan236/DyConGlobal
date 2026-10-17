@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 from conftest import task
 
@@ -10,14 +10,14 @@ from enrichment.token_trace import trace_rollout
 class TraceTokenizer:
     name_or_path = "trace-fixture"
     vocab_size = 300
-    _text = {10: "<think>", 11: "</think>", 1: "system", 2: "\\n", 20: "a", 21: "b", 22: "c", 271: "\\n\\n"}
+    _text = {10: "<think>", 11: "</think>", 1: "system", 2: "\n", 20: "a", 21: "b", 22: "c", 271: "\n\n"}
 
     def encode(self, text, add_special_tokens=False, **kwargs):
         if text == "<think>":
             return [10]
         if text == "</think>":
             return [11]
-        if text == "a\\n\\nb":
+        if text == "a\n\nb":
             return [20, 271, 21]
         if text == "c":
             return [22]
@@ -40,7 +40,7 @@ def test_global_remaining_reasoning_label(cfg):
             "info": {"exit_status": "Submitted", "submission": "patch"},
             "messages": [
                 {"role": "user", "content": "task"},
-                {"role": "assistant", "reasoning_content": "a\\n\\nb", "content": "x", "extra": {"response": {"choices": [{"finish_reason": "tool_calls"}]}}},
+                {"role": "assistant", "reasoning_content": "a\n\nb", "content": "x", "extra": {"response": {"choices": [{"finish_reason": "tool_calls"}]}}},
                 {"role": "tool", "content": "obs"},
                 {"role": "assistant", "reasoning_content": "c", "content": "done", "extra": {"response": {"choices": [{"finish_reason": "stop"}]}}},
             ],

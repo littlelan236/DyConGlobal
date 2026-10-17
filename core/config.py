@@ -55,6 +55,9 @@ class Serving(Strict):
     reasoning_parser: str | None
     language_model_only: bool
     dtype: Literal["float16", "bfloat16"] = "float16"
+    kv_cache_memory_bytes: int | None = Field(default=None, gt=0)
+    max_num_seqs: int = Field(default=16, gt=0)
+    max_num_batched_tokens: int = Field(default=1024, gt=0)
 
 
 class Generation(Strict):
@@ -164,6 +167,7 @@ class Capture(Strict):
     backend: Literal["easysteer"] = "easysteer"
     mode: Literal["online"] = "online"
     graph_mode: Literal["FULL"] = "FULL"
+    prefill_token_chunk_size: int = Field(default=1, gt=0)
     anchors: list[Literal["think_open", "reasoning_newline", "think_close"]] = [
         "think_open", "reasoning_newline", "think_close"
     ]
