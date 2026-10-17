@@ -53,6 +53,17 @@ class ServingManager:
                 check.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 check.bind((endpoint.hostname, port))
             root = Path(cfg["project_root"])
+            if capture_cfg.get("enabled") and not capture_cfg.get("allow_unsupported_gdn", False):
+                model_config = json.loads((Path(cfg["model"]["path"]) / "config.json").read_text())
+                architectures = model_config.get("architectures", [])
+                if model_config.get("model_type") == "qwen3_5" or any(
+                    "Qwen3_5" in str(name) for name in architectures
+                ):
+                    raise ValueError(
+                        "Online FULL capture is blocked for Qwen3.5 GDN: the pinned "
+                        "EasySteer/vLLM capture hook changes generated token IDs. "
+                        "Set capture.allow_unsupported_gdn=true only for diagnostics."
+                    )
             verify = root / "runtime/scripts/verify_easysteer_runtime.py"
             subprocess.run([serving_python, str(verify)], check=True, capture_output=True, text=True)
             if capture_cfg.get("enabled"):

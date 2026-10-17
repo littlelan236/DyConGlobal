@@ -109,6 +109,7 @@ capture:
   mode: online
   graph_mode: FULL
   prefill_token_chunk_size: 1
+  allow_unsupported_gdn: false
   anchors: [think_open, reasoning_newline, think_close]
   newline_policy: all
   newline_token_source: tokenizer

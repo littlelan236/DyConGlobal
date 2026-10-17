@@ -168,6 +168,7 @@ class Capture(Strict):
     mode: Literal["online"] = "online"
     graph_mode: Literal["FULL"] = "FULL"
     prefill_token_chunk_size: int = Field(default=1, gt=0)
+    allow_unsupported_gdn: bool = False
     anchors: list[Literal["think_open", "reasoning_newline", "think_close"]] = [
         "think_open", "reasoning_newline", "think_close"
     ]

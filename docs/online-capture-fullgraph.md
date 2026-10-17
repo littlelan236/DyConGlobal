@@ -52,3 +52,7 @@ after the pinned runtime's graph replay/fetch step.
 On 2026-10-17 the managed FP16 Qwen3.5-9B service was started on GPUs 4--7 with TP=4 and an explicitly reserved KV cache. The service loaded the endpoint plugin, hooked three `tact_states` layers, and recorded native graph replays on all four TP workers.
 
 The rollout behavior gate failed: enabling the native `tact_states` capture stream changed generated token IDs. Fixed-token requests returned token 0 or 1023 instead of the requested token. The failure remained after disabling per-request selectors, disabling APC reads for capture requests, and setting the prefill chunk threshold to one. vLLM reports that Qwen GDN supports FULL graphs only for decode and downgrades prefill to FULL_AND_PIECEWISE; the capture hook path also changes logits in this pinned runtime. The online capture path must therefore block supervised rollout data for this runtime until the upstream EasySteer/vLLM GDN capture behavior is fixed and the FP16 behavior gate passes.
+`capture.allow_unsupported_gdn` defaults to `false`. Managed serving rejects
+Qwen3.5 GDN capture before starting a server, so an accidental experiment
+cannot append corrupted trajectories. Set it to `true` only when collecting a
+diagnostic failure report.
