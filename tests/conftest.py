@@ -1,0 +1,121 @@
+from pathlib import Path
+
+import pytest
+import yaml
+
+from baseline.catalog import empty_manifest
+from core.config import resolve
+from core.io import write_json
+
+
+@pytest.fixture
+def cfg(tmp_path):
+    raw = yaml.safe_load((Path(__file__).parents[1] / "config.yaml").read_text())
+    raw["model"].update(fingerprint="fixture-model", served_name="fixture")
+    raw["images"].update(
+        reserve_bytes=0,
+        minimum_load_bytes=1,
+        max_reserved_bytes=10000,
+        expansion_factor=1.0,
+        admission_seconds=2,
+    )
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(raw))
+    write_json(tmp_path / "baseline/manifest.json", empty_manifest())
+    return resolve(tmp_path / "config.yaml")
+
+
+class ToyTokenizer:
+    name_or_path = "fixture"
+
+    def encode(self, text, add_special_tokens=False, **kwargs):
+        return [ord(c) for c in text]
+
+    def decode(self, ids):
+        return "".join(chr(i) for i in ids)
+
+    def apply_chat_template(self, messages, **kwargs):
+        return self.encode(
+            "".join(
+                f"{m['role']}:{m.get('content') or ''}:{m.get('reasoning_content') or ''}" for m in messages
+            )
+            + "assistant:<think>\n"
+        )
+
+
+def task(iid="t-1", partition="train"):
+    return {
+        "benchmark": "fixture",
+        "revision": "v1",
+        "instance_id": iid,
+        "repo": "org/repo",
+        "base_commit": "abc",
+        "partition": partition,
+        "instance": {
+            "instance_id": iid,
+            "repo": "org/repo",
+            "base_commit": "abc",
+            "problem_statement": "Fix issue",
+        },
+    }
+
+
+def import_fixture(cfg, *, resolved=None, iid="t-1"):
+    from baseline.catalog import Catalog
+    from baseline.importers.legacy import import_rollout
+
+    root = Path(cfg["project_root"])
+    raw = root / (iid + ".traj.json")
+    write_json(
+        raw,
+        {
+            "instance_id": iid,
+            "info": {"exit_status": "Submitted", "submission": "patch"},
+            "messages": [
+                {"role": "system", "content": "agent"},
+                {"role": "user", "content": "question"},
+                {
+                    "role": "assistant",
+                    "reasoning_content": "reason-1",
+                    "content": "FUTURE_ACTION_SECRET",
+                    "tool_calls": [],
+                    "extra": {
+                        "response": {
+                            "choices": [{"finish_reason": "tool_calls"}],
+                            "usage": {"completion_tokens_details": {"reasoning_tokens": 3}},
+                        }
+                    },
+                },
+                {"role": "tool", "content": "OBSERVATION_SECRET"},
+                {
+                    "role": "assistant",
+                    "reasoning_content": "reason-2",
+                    "content": "submit",
+                    "tool_calls": [],
+                    "extra": {
+                        "response": {
+                            "choices": [{"finish_reason": "stop"}],
+                            "usage": {"completion_tokens_details": {"reasoning_tokens": 2}},
+                        }
+                    },
+                },
+            ],
+        },
+    )
+    rid = import_rollout(
+        root,
+        {
+            "source": str(raw),
+            "task": task(iid),
+            "run_id": "source",
+            "attempt_id": "a0",
+            "purposes": ["training", "baseline"],
+            "model_fingerprint": "fixture-model",
+        },
+    )
+    if resolved is not None:
+        row = Catalog(root).read()["rollouts"][rid]
+        report = root / f"baseline/evaluations/e-{iid}/summary.json"
+        outcomes = {rid: {"patch_sha256": row["patch_sha256"], "status": "completed", "resolved": resolved}}
+        write_json(report, outcomes)
+        Catalog(root).record_evaluation("e-" + iid, report, outcomes, {"fixture": True})
+    return rid

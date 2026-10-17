@@ -1,0 +1,93 @@
+# Python environments, generated packages and caches
+.venvs/
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
+
+# Local credentials and editor/OS state
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.p12
+*.pfx
+.ssh/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local migration inputs and all generated run/state artifacts
+/.migration/
+/state/**
+/runs/**
+/assets/
+/tmp/
+*.log
+*.pid
+
+# Keep the canonical baseline manifest and source; exclude rollout payloads
+/baseline/trajectories/**
+/baseline/patches/**
+/baseline/evaluations/**
+/baseline/provenance/**
+
+# Enrichment and hidden-state products belong to local/NAS storage
+/enrichment/outputs/**
+/enrichment/reports/**
+/hidden/outputs/**
+/hidden/reports/**
+
+# Estimator/action source stays tracked; generated datasets and models do not
+/difficulty/datasets/*/
+/difficulty/checkpoints/**
+/difficulty/evaluation/outputs/**
+/action/datasets/*/
+/action/evaluation/outputs/**
+/action/checkpoints/**
+
+# Runtime caches and machine-specific observations
+/runtime/cache/**
+/runtime/reports/**
+/runtime/model-identities/**
+
+# Checkpoints and package/image archives are assets, not source
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.gguf
+*.onnx
+*.whl
+*.tar
+*.tar.gz
+*.tgz
+
+# EasySteer uses the separate pinned vendor/easysteer-vllm overlay.
+# Its upstream checkout contains a redundant embedded vLLM source tree.
+/vendor/EasySteer/vllm-steer/
+/vendor/**/.git/
+/vendor/**/.git
+/vendor/**/node_modules/
+/vendor/**/build/
+/vendor/**/dist/
+
+# Preserve deliberate placeholders in otherwise empty functional directories
+!.gitkeep

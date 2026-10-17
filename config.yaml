@@ -1,0 +1,100 @@
+schema_version: 1
+paths:
+  nas_root: /VM/wangtianyi/DyConGlobal
+benchmark:
+  partition: null
+  purposes: []
+  profile: null
+model:
+  path: null
+  fingerprint: null
+  served_name: null
+  trust_remote_code: false
+serving:
+  base_url: http://127.0.0.1:8100/v1
+  api_key_env: DYCON_API_KEY
+  management: external
+  python: .venvs/easysteer/bin/python
+  gpus: []
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.8
+  max_model_len: 32768
+  startup_seconds: 600
+  shutdown_seconds: 30
+  tool_parser: null
+  reasoning_parser: null
+  language_model_only: true
+generation:
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 20
+  max_tokens: 8192
+  seed: 42
+  enable_thinking: true
+  preserve_thinking: true
+agent:
+  step_limit: 100
+  cost_limit: 0.0
+  max_consecutive_format_errors: 3
+  system_template: You are a software engineer fixing the reported issue using the bash tool.
+  instance_template: |-
+    {{task}}
+
+    Work in /testbed. Inspect the repository, implement the fix and verify it.
+    Submit the patch with: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT; git diff
+  observation_template: '<returncode>{{output.returncode}}</returncode>\n<output>{{output.output}}</output>'
+  format_error_template: Please provide a valid bash tool call.
+environment:
+  docker_host: unix:///run/user/1002/docker.sock
+  docker_executable: /home/wangtianyi/.local/bin/docker
+  wheelhouse: null
+  cwd: /testbed
+  user: root
+  platform: linux/amd64
+  locale: C.UTF-8
+  constraints: []
+  repo_pins: {}
+  variables: {}
+  network_fallback: false
+  requirements_cache: runtime/cache/requirements
+images:
+  load_workers: 4
+  reserve_bytes: 107374182400
+  expansion_factor: 6.0
+  minimum_load_bytes: 8589934592
+  max_reserved_bytes: 171798691840
+  load_seconds: 1800
+  admission_seconds: 1800
+  cleanup: true
+execution:
+  rollout_workers: 4
+  harness_workers: 4
+  infrastructure_retry_limit: 1
+  pipeline_wall_seconds: 0
+timeouts:
+  container_start_seconds: 120
+  container_lifetime_seconds: 28800
+  bootstrap_seconds: 900
+  tool_command_seconds: 300
+  model_seconds: 1200
+  evaluation_seconds: 900
+  metadata_request_seconds: 30
+enrichment:
+  anchors: [think_open, think_close]
+  close_occurrence: first
+  token_evidence: reconstructed
+hidden:
+  python: .venvs/analysis/bin/python
+  dtype: bfloat16
+  device: cpu
+  chunk_size: 1024
+  layers: []
+  adapter: hf_causal
+difficulty:
+  estimator: null
+action:
+  taxonomy: null
+steering:
+  backend: easysteer
+  enabled: false
+  payload: null

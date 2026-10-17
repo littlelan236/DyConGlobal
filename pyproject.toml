@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dycon-global"
+version = "0.1.0"
+description = "Causal trajectory and latent analysis infrastructure for coding agents"
+requires-python = ">=3.12"
+dependencies = ["PyYAML==6.0.3", "pydantic>=2,<3", "requests>=2,<3", "numpy>=2,<3"]
+
+[project.optional-dependencies]
+runner = ["docker>=7,<8", "mini-swe-agent==2.4.5", "swebench==4.1.0"]
+analysis = ["torch>=2.7", "transformers>=5,<6", "accelerate>=1", "matplotlib>=3.9", "safetensors>=0.5"]
+test = ["pytest>=8", "ruff>=0.11"]
+
+[project.scripts]
+dycon = "core.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "baseline*", "enrichment*", "hidden*", "difficulty*", "action*", "runtime*"]
+exclude = ["tests*", "vendor*"]
+namespaces = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/test_images.py" = ["E402"]
