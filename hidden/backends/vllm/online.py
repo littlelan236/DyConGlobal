@@ -86,7 +86,9 @@ def capture_request_metadata(
     close_token_ids = sorted({int(x) for x in (close_token_ids or [])})
     if any(x < 0 for x in [*newline_token_ids, *close_token_ids]):
         raise ValueError("capture token IDs must be nonnegative")
-    selector = capture_select or build_capture_select(newline_token_ids, close_token_ids)
+    selector = capture_select or build_capture_select(
+        newline_token_ids, close_token_ids, include_open="think_open" in anchors
+    )
     return {
         "session_id": session_id,
         "task_id": task_id,

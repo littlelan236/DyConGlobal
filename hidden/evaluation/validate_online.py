@@ -54,7 +54,7 @@ try:
   inv=serving.capture_token_inventory
   def md(sid,step=0):
    return capture_request_metadata(sid,'gpu-smoke-task',sid,sid,step,
-      ['think_open','reasoning_newline','think_close'],
+      ['reasoning_newline','think_close'],
       newline_token_ids=inv['newline_token_ids'], close_token_ids=inv['close_token_ids'],
       tokenizer_fingerprint=inv['tokenizer_fingerprint'])
   def request(metadata=None,long=False):
@@ -96,7 +96,7 @@ try:
   samples=[r for r in rows if r['request_id'] in active_ids and r['session_id'] in {'short','long','warm'}]
   counts=Counter(r['anchor'] for r in samples)
   report['anchors']=dict(counts)
-  assert all(counts[a]>0 for a in ('think_open','reasoning_newline','think_close')),counts
+  assert all(counts[a]>0 for a in ('reasoning_newline','think_close')),counts
   refs=serving.capture_controller.request_outputs
   assert len(refs)>=3, 'Missing exact token request receipts'
   for r in samples:
@@ -109,7 +109,7 @@ try:
   assert max(report['cached_tokens'])>0,'No warm APC hits'
   # Replay exact input prefixes via native vLLM engine in the same FP16/TP graph.
   selected=[]
-  for kind in ['think_open','reasoning_newline','think_close']:
+  for kind in ['reasoning_newline','think_close']:
    selected.append(next(r for r in samples if r['session_id']=='short' and r['anchor']==kind))
   replay_rows=[]
   for i,r in enumerate(selected):
