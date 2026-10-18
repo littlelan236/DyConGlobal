@@ -1,8 +1,9 @@
 # Online FULL-graph hidden capture
 
 The optional online path is controlled by the `capture` block in `config.yaml`.
-`capture.enabled: false` is the default and leaves the OpenAI data plane, rollout
-request body, EasySteer steering and ordinary vLLM startup unchanged. Enabling
+Set `capture.enabled: false` for an ordinary rollout; the checked-in remote configuration
+currently enables capture. The four modes share the same official CLI and common
+model, parser, generation, agent and container configuration. Enabling capture
 it requires managed serving and starts a localhost control plane alongside the
 managed vLLM process.
 
@@ -22,8 +23,11 @@ feature is enabled.
 
 ## Anchor and cache semantics
 
-For the current Qwen templates, `<think>\n` is validated as token IDs
-`[248068, 198]`, so the opening marker is selected at prompt position `-2`.
+The supported Qwen3.5 online configuration selects generated reasoning newline
+tokens and `</think>`. `<think>` is excluded because it is part of the prompt
+and the current GDN backend supports FULL capture graphs only for decode.
+For experiments requesting an opening anchor, `<think>\n` is validated as token
+IDs `[248068, 198]`, with the opening marker at prompt position `-2`.
 `</think>` is accepted only when it is an input suffix of a later forward; an
 immediate response termination is recorded as `no_followup_forward`.
 
@@ -35,24 +39,68 @@ the native capture RPC.
 
 ## Asynchronous export
 
-The capture hook stages CPU arrays into a bounded queue. A background writer
-atomically writes compressed NPZ tensors, JSON sidecars and a queue journal
-under `hidden/online/<session>/` (the configured root is respected). Queue
-backpressure records `export_backpressure` and continues rollout by default.
+The native plugin hands off uncompressed temporary NPZ files on local storage.
+The bounded asynchronous writer compresses each tensor exactly once under
+`hidden/spool/<run>/`; a project-wide byte ledger includes handoff, queue,
+temporary archive and metadata reservations and shares disk admission with
+Docker image loading. The default budget is 50 GiB, with 80%/60% admission watermarks.
+
+Complete prompt/output IDs are stored once per native request in an immutable
+`requests/<request_key>.json` ledger. Trajectories and events reference that ledger
+and its SHA, together with query/API attempt/native IDs and exact token coordinates.
+Both successful responses and FormatError responses participate in final alignment.
+
+Existing compressed NPZ bytes are sealed into standard uncompressed tar shards
+(about 128 MiB; session end seals a short final shard). Two bounded, independent
+uploader processes copy to NAS `.part` files, verify SHA/size, rename atomically,
+and acknowledge publication before local tensor bytes are released. Sealed event
+indices are uploaded per shard, rather than as per-token NAS sidecars. Final data is
+under `<nas_root>/hidden/online/<run>/`; no NAS path is required to complete a model query.
+`hidden.artifacts` reads both legacy loose NPZ and new shard/member locators.
+
+Upload failures retain local data as `pending_upload`; `capture-recover RUN` uses
+the immutable run snapshot to retry publication without new model requests.
+Hard-mounted NFS stalls occupy their existing upload slots; parent shutdown is bounded
+and recovery refuses to replace a still-running uploader. A session is `complete`
+only after exact token coverage and publication of its ledgers, indices and finalization.
+`export.enabled=false` drains native buffers but creates no hidden dataset.
+Queue/storage failures use the configured `record_and_continue` or `block_rollout`
+policy; agent outcome and capture outcome remain separate.
 `enrichment/manifest.json` and `hidden/manifest.json` receive an
 `online_captures` entry containing the task/run/rollout binding, anchor, graph
 execution, cache boundary evidence and export state.
 
-This implementation provides the tested control and export contract and the
-native FULL capture request adapter. The final EasySteer worker hook must call
-`OnlineCaptureController.bind()` and `.record()` with its captured tensor pages
-after the pinned runtime's graph replay/fetch step.
-## Qwen3.5 GDN acceptance result
+Run all four modes through `python -m core.cli --config config.yaml rollout RUN`.
+Change the two independent feature switches in the same config; do not launch
+production via historical speed-test scripts. Startup verifies a real bash call
+in a NAS-loaded container and, for capture, both configured anchors, finite layers,
+FULL decode evidence and NAS artifact readback before admitting the task cohort.
+## Qwen3.5 decode capture and prefill scheduling
 
-On 2026-10-17 the managed FP16 Qwen3.5-9B service was started on GPUs 4--7 with TP=4 and an explicitly reserved KV cache. The service loaded the endpoint plugin, hooked three `tact_states` layers, and recorded native graph replays on all four TP workers.
+The earlier attribution of token-0 output to GDN capture in general was not
+supported by an isolated control. FP16 native tests on 2026-10-18 demonstrated
+working Qwen3.5 decode capture, including 92 FULL capture graph replays, finite
+raw logits, and identical 48-token natural continuations with capture on/off.
 
-The rollout behavior gate failed: enabling the native `tact_states` capture stream changed generated token IDs. Fixed-token requests returned token 0 or 1023 instead of the requested token. The failure remained for decode-only newline/close selectors, after disabling per-request selectors, disabling APC reads for capture requests, and setting the prefill chunk threshold to one. vLLM reports that Qwen GDN supports FULL graphs only for decode and downgrades prefill to FULL_AND_PIECEWISE; the capture hook path also changes logits in this pinned runtime. The online capture path must therefore block supervised rollout data for this runtime until the upstream EasySteer/vLLM GDN capture behavior is fixed and the FP16 behavior gate passes.
-`capture.allow_unsupported_gdn` defaults to `false`. Managed serving rejects
-Qwen3.5 GDN capture before starting a server, so an accidental experiment
-cannot append corrupted trajectories. Set it to `true` only when collecting a
-diagnostic failure report.
+The reproduced failure requires forcing single-token prompt chunks via
+`--long-prefill-token-threshold=1`. This is a request-wide scheduling option,
+not an instruction to process only `<think>` separately. The GDN metadata
+builder classifies one-token chunks as decode; the decode kernel consumes
+existing recurrent/conv state while normal fresh-prefill initialization is in
+the prefill branch. Failing tests showed all-NaN hidden states and raw logits.
+The allowed-token mask was present, but the remaining allowed logit was NaN;
+the sampler returned token 0. No APC reads or asynchronous exporter were
+needed to reproduce this failure. The first individual kernel producing NaN
+was not instrumented.
+
+`capture.prefill_token_chunk_size: 0` now delegates prefill scheduling to vLLM
+and omits the threshold override. The project no longer changes CUDA graph
+dispatch to treat prompt chunks as uniform decode. Decode-only anchors use
+`FULL_DECODE_ONLY`: ordinary model-supported prefill followed by FULL decode
+capture. Decode capture preserves native APC reads and explicit caller skips.
+
+Managed serving rejects the known-invalid single-token Qwen configuration.
+The `allow_unsupported_gdn` diagnostic flag applies to prompt-anchor FULL
+experiments, not to normal decode capture. See
+[the diagnostic report](capture-zero-token-diagnosis-20261018.md) for controls
+and the limits of the current acceptance results.

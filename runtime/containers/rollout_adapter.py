@@ -28,6 +28,23 @@ class RolloutEnvironment:
         result = self.factory.execute(
             self.container, action.get("command", ""), timeout or self.config.timeout, cwd or self.config.cwd
         )
+        from core.io import hash_json, now, write_json
+
+        receipt = self.context.output_dir / "first-tool.json"
+        if not receipt.exists():
+            write_json(
+                receipt,
+                {
+                    "at": now(),
+                    "run_id": self.context.run_id,
+                    "task_id": self.context.instance_id,
+                    "attempt_id": self.context.attempt_id,
+                    "action_sha256": hash_json(action),
+                    "returncode": result["returncode"],
+                    "observation_sha256": hash_json(result["output"]),
+                    "container_id": self.container.id,
+                },
+            )
         DockerEnvironment._check_finished(self, result)
         return result
 

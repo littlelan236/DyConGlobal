@@ -24,11 +24,79 @@ class ServingManager:
         self.log = None
         self.capture_controller = None
         self.capture_server = None
-        self.capture_token_inventory = {
-            "newline_token_ids": [198, 271, 1358],
-            "close_token_ids": [248069],
-            "source": "qwen_verified_fallback",
-        }
+        self.capture_token_inventory = {}
+        self.runtime = {}
+
+    def build_args(self, serving_python, host, port):
+        cfg, s = self.cfg, self.cfg["serving"]
+        cap = cfg.get("capture", {})
+        args = [
+            serving_python,
+            "-m",
+            "vllm.entrypoints.openai.api_server",
+            "--model",
+            cfg["model"]["path"],
+            "--served-model-name",
+            cfg["model"]["served_name"],
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--tensor-parallel-size",
+            str(s["tensor_parallel_size"]),
+            "--gpu-memory-utilization",
+            str(s["gpu_memory_utilization"]),
+            "--max-model-len",
+            str(s["max_model_len"]),
+            "--dtype",
+            s["dtype"],
+            "--enable-auto-tool-choice",
+            "--tool-call-parser",
+            s["tool_parser"],
+            "--reasoning-parser",
+            s["reasoning_parser"],
+            "--generation-config",
+            "vllm",
+            "--no-async-scheduling",
+            "--max-num-seqs",
+            str(s["max_num_seqs"]),
+            "--max-num-batched-tokens",
+            str(s["max_num_batched_tokens"]),
+        ]
+        if s.get("kv_cache_memory_bytes") is not None:
+            args += ["--kv-cache-memory-bytes", str(s["kv_cache_memory_bytes"])]
+        algorithms = set()
+        if cfg["steering"]["enabled"]:
+            from runtime.steering.easysteer.payload import steering_payload
+
+            algorithms.update(v["algorithm"] for v in steering_payload(cfg)["vectors"])
+        if cap.get("enabled"):
+            algorithms.add("direct")
+            sizes = sorted(
+                {n for n in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024] if n <= s["max_num_seqs"]}
+                | {s["max_num_seqs"]}
+            )
+            args += [
+                "--compilation-config",
+                json.dumps({"cudagraph_mode": "FULL_AND_PIECEWISE", "cudagraph_capture_sizes": sizes}),
+                "--worker-extension-cls",
+                "runtime.serving.capture_worker.CaptureWorkerExtension",
+            ]
+        if algorithms:
+            args += [
+                "--enable-steer-vector",
+                "--steer-algorithms",
+                ",".join(sorted(algorithms)),
+                "--steer-graph-mode",
+                "in_graph",
+                "--steer-vector-dtype",
+                "float32",
+            ]
+        if s["language_model_only"]:
+            args.append("--language-model-only")
+        if cfg["model"]["trust_remote_code"]:
+            args.append("--trust-remote-code")
+        return args
 
     def __enter__(self):
         cfg, s = self.cfg, self.cfg["serving"]
@@ -53,17 +121,36 @@ class ServingManager:
                 check.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 check.bind((endpoint.hostname, port))
             root = Path(cfg["project_root"])
-            if capture_cfg.get("enabled") and not capture_cfg.get("allow_unsupported_gdn", False):
+            if capture_cfg.get("enabled"):
                 model_config = json.loads((Path(cfg["model"]["path"]) / "config.json").read_text())
                 architectures = model_config.get("architectures", [])
-                if model_config.get("model_type") == "qwen3_5" or any(
-                    "Qwen3_5" in str(name) for name in architectures
+                is_qwen_gdn = model_config.get("model_type") in {
+                    "qwen3_5",
+                    "qwen3_5_moe",
+                    "qwen3_next",
+                } or any("Qwen3_5" in str(name) for name in architectures)
+                if is_qwen_gdn and capture_cfg.get("prefill_token_chunk_size", 0) == 1:
+                    raise ValueError(
+                        "Qwen GDN cannot start with capture.prefill_token_chunk_size=1: "
+                        "a fresh prompt can enter the decode path without state initialization, "
+                        "producing NaN logits and token 0. Use 0 for native prefill scheduling."
+                    )
+                if (
+                    is_qwen_gdn
+                    and "think_open" in capture_cfg.get("anchors", [])
+                    and not capture_cfg.get("allow_unsupported_gdn", False)
                 ):
                     raise ValueError(
-                        "Online FULL capture is blocked for Qwen3.5 GDN: the pinned "
-                        "EasySteer/vLLM capture hook changes generated token IDs. "
-                        "Set capture.allow_unsupported_gdn=true only for diagnostics."
+                        "Qwen GDN FULL graphs support decode capture only. Remove think_open "
+                        "from capture.anchors; allow_unsupported_gdn is only for prefill diagnostics."
                     )
+            model_type = json.loads((Path(cfg["model"]["path"]) / "config.json").read_text()).get(
+                "model_type", ""
+            )
+            if model_type in {"qwen3_5", "qwen3_5_moe", "qwen3_next"} and (
+                s["tool_parser"] not in {"qwen3_xml", "qwen3_coder"} or s["reasoning_parser"] != "qwen3"
+            ):
+                raise ValueError("Current Qwen requires explicit qwen3_xml/qwen3_coder and qwen3 parsers")
             verify = root / "runtime/scripts/verify_easysteer_runtime.py"
             subprocess.run([serving_python, str(verify)], check=True, capture_output=True, text=True)
             if capture_cfg.get("enabled"):
@@ -71,47 +158,59 @@ class ServingManager:
                     raise ValueError("Online capture requires capture.layers to be configured")
                 inventory_code = (
                     "import json,sys; from transformers import AutoTokenizer; "
-                    "t=AutoTokenizer.from_pretrained(sys.argv[1], local_files_only=True, trust_remote_code=True); "
-                    "ids=[]; texts={}; "
-                    "[ (ids.append(i), texts.__setitem__(str(i), t.decode([i], clean_up_tokenization_spaces=False))) for i in range(len(t)) if \"\\n\" in t.decode([i], clean_up_tokenization_spaces=False) ]; "
-                    "print(json.dumps({'newline_token_ids':ids,'newline_token_texts':texts,'close_token_ids':t.encode('</think>', add_special_tokens=False),'source':'active_tokenizer'}))"
+                    "from hidden.backends.vllm.online import tokenizer_newline_inventory; "
+                    "t=AutoTokenizer.from_pretrained(sys.argv[1],local_files_only=True,trust_remote_code=True); "
+                    "ids,texts=tokenizer_newline_inventory(t,policy=sys.argv[2]); "
+                    "print(json.dumps(dict(newline_token_ids=ids,newline_token_texts=texts,"
+                    "close_token_ids=t.encode('</think>',add_special_tokens=False),open_token_ids=t.encode('<think>',add_special_tokens=False),source='active_tokenizer')))"
                 )
-                try:
-                    raw_inventory = subprocess.check_output(
-                        [serving_python, "-c", inventory_code, cfg["model"]["path"]], text=True, cwd=root
-                    )
-                    self.capture_token_inventory = json.loads(raw_inventory.strip().splitlines()[-1])
-                    self.capture_token_inventory["tokenizer_fingerprint"] = hash_json(
-                        self.capture_token_inventory
-                    )
-                except (subprocess.CalledProcessError, json.JSONDecodeError, IndexError):
-                    # Preserve the verified current-Qwen fallback and record it
-                    # in launch.json; capture admission can reject unknown IDs.
-                    self.capture_token_inventory["source"] = "qwen_verified_fallback"
-                    self.capture_token_inventory["tokenizer_fingerprint"] = hash_json(
-                        self.capture_token_inventory
-                    )
-                self.capture_controller = OnlineCaptureController(cfg["project_root"], capture_cfg)
+                raw_inventory = subprocess.check_output(
+                    [
+                        serving_python,
+                        "-c",
+                        inventory_code,
+                        cfg["model"]["path"],
+                        capture_cfg["newline_policy"],
+                    ],
+                    text=True,
+                    cwd=root,
+                )
+                self.capture_token_inventory = json.loads(raw_inventory.strip().splitlines()[-1])
+                self.capture_token_inventory["tokenizer_fingerprint"] = hash_json(
+                    self.capture_token_inventory
+                )
+                self.capture_controller = OnlineCaptureController(
+                    cfg["project_root"],
+                    {
+                        **capture_cfg,
+                        "run_id": self.output.parent.name,
+                        "nas_root": cfg["paths"]["nas_root"],
+                        "reserve_bytes": cfg["images"]["reserve_bytes"],
+                        "open_token_ids": self.capture_token_inventory["open_token_ids"],
+                        "model_fingerprint": cfg["model"]["fingerprint"],
+                        "serving_dtype": s.get("dtype", "float16"),
+                        "tensor_parallel_size": s["tensor_parallel_size"],
+                    },
+                )
                 self.capture_server = CaptureControlServer(
                     self.capture_controller,
                     capture_cfg.get("control_host", "127.0.0.1"),
                     capture_cfg.get("control_port", 0),
                 ).start()
             env = dict(os.environ)
-            if capture_cfg.get("enabled"):
-                # FULL graph compilation invokes ninja from the process PATH.
-                # The managed venv may be pip-less while uv has already
-                # materialized a compatible ninja binary in its cache.
-                import shutil
+            # Both native FULL graphs and online capture compile CUDA graphs
+            # through ninja. The managed venv may be pip-less while uv has
+            # already materialized a compatible binary in its cache.
+            import shutil
 
-                if shutil.which("ninja", path=env.get("PATH")) is None:
-                    candidates = sorted(
-                        Path.home().glob(".cache/uv/archive-v0/*/ninja-*.data/scripts/ninja"),
-                        key=lambda p: p.stat().st_mtime if p.exists() else 0,
-                        reverse=True,
-                    )
-                    if candidates:
-                        env["PATH"] = str(candidates[0].parent) + os.pathsep + env.get("PATH", "")
+            if shutil.which("ninja", path=env.get("PATH")) is None:
+                candidates = sorted(
+                    Path.home().glob(".cache/uv/archive-v0/*/ninja-*.data/scripts/ninja"),
+                    key=lambda p: p.stat().st_mtime if p.exists() else 0,
+                    reverse=True,
+                )
+                if candidates:
+                    env["PATH"] = str(candidates[0].parent) + os.pathsep + env.get("PATH", "")
             env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, s["gpus"]))
             env["VLLM_PLUGINS"] = "dycon_capture" if capture_cfg.get("enabled") else ""
             env["VLLM_USE_V2_MODEL_RUNNER"] = "1"
@@ -120,96 +219,49 @@ class ServingManager:
                 env["DYCON_CAPTURE_CONTROL_URL"] = self.capture_server.base_url
                 env["DYCON_CAPTURE_GRAPH_MODE"] = "FULL"
                 env["DYCON_CAPTURE_CACHE_POLICY"] = "safe_boundary"
-                env["DYCON_CAPTURE_STAGING_ROOT"] = str(
-                    root / capture_cfg.get("export", {}).get("root", "hidden/online") / "staging"
-                )
+                env["DYCON_CAPTURE_STAGING_ROOT"] = str(self.capture_controller.export_root / "staging")
                 env["DYCON_CAPTURE_LAYERS"] = json.dumps(capture_cfg["layers"])
-                selector = {
-                    "generation_tokens": sorted(
-                        set(self.capture_token_inventory.get("newline_token_ids", []))
-                        | set(self.capture_token_inventory.get("close_token_ids", []))
-                    )
+                from hidden.backends.vllm.online import build_capture_select
+
+                selector = build_capture_select(
+                    self.capture_token_inventory["newline_token_ids"]
+                    if "reasoning_newline" in capture_cfg["anchors"]
+                    else [],
+                    self.capture_token_inventory["close_token_ids"]
+                    if "think_close" in capture_cfg["anchors"]
+                    else [],
+                    include_open="think_open" in capture_cfg["anchors"],
+                )
+                self.capture_token_inventory["capture_select"] = selector
+                env["DYCON_CAPTURE_SELECT"] = json.dumps(selector)
+                env["DYCON_CAPTURE_FAILURE_POLICY"] = capture_cfg["failure_policy"]
+                env["DYCON_CAPTURE_FLUSH_SECONDS"] = str(capture_cfg["export"]["flush_interval_ms"] / 1000)
+                env["DYCON_CAPTURE_CONTROL_SECONDS"] = str(capture_cfg["control_seconds"])
+                env["DYCON_CAPTURE_PROJECT"] = str(root)
+                env["DYCON_CAPTURE_EXPORT_OPTIONS"] = json.dumps(capture_cfg["export"])
+                env["DYCON_CAPTURE_RESERVE_BYTES"] = str(cfg["images"]["reserve_bytes"])
+                self.capture_controller._write("inventory.json", self.capture_token_inventory)
+                self.capture_controller._write("capture-config.json", self.capture_controller.config)
+                self.runtime = {
+                    "capture_control_url": self.capture_server.base_url,
+                    "capture_token_inventory": self.capture_token_inventory,
+                    "capture_controller": self.capture_controller,
                 }
-                if "think_open" in capture_cfg.get("anchors", []):
-                    selector["prompt_positions"] = [-2]
-                env["DYCON_CAPTURE_SELECT"] = json.dumps({"tact_states": selector})
                 env["DYCON_CAPTURE_NEWLINE_IDS"] = json.dumps(
                     self.capture_token_inventory.get("newline_token_ids", [])
                 )
                 env["DYCON_CAPTURE_CLOSE_IDS"] = json.dumps(
                     self.capture_token_inventory.get("close_token_ids", [])
                 )
-                env["DYCON_CAPTURE_OPEN_IDS"] = json.dumps([248068])
-            args = [
-                serving_python,
-                "-m",
-                "vllm.entrypoints.openai.api_server",
-                "--model",
-                cfg["model"]["path"],
-                "--served-model-name",
-                cfg["model"]["served_name"],
-                "--host",
-                endpoint.hostname,
-                "--port",
-                str(port),
-                "--tensor-parallel-size",
-                str(s["tensor_parallel_size"]),
-                "--gpu-memory-utilization",
-                str(s["gpu_memory_utilization"]),
-                "--max-model-len",
-                str(s["max_model_len"]),
-                "--dtype",
-                s.get("dtype", "float16"),
-                "--enable-auto-tool-choice",
-                "--tool-call-parser",
-                s["tool_parser"],
-                "--reasoning-parser",
-                s["reasoning_parser"],
-                "--generation-config",
-                "vllm",
-                "--no-async-scheduling",
-            ]
-            if capture_cfg.get("enabled"):
-                args += ["--max-num-seqs", str(s.get("max_num_seqs", 16)),
-                         "--max-num-batched-tokens", str(s.get("max_num_batched_tokens", 1024))]
-                args += ["--long-prefill-token-threshold", str(capture_cfg.get("prefill_token_chunk_size", 1))]
-            if s.get("kv_cache_memory_bytes") is not None:
-                args += ["--kv-cache-memory-bytes", str(s["kv_cache_memory_bytes"])]
-            if capture_cfg.get("enabled"):
-                # vLLM's normal path is unchanged; capture runs opt into the
-                # native FULL graph dispatcher for both prefill and decode.
-                args += ["--compilation-config", json.dumps({
-                    "cudagraph_mode": "FULL",
-                    "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
-                })]
-                # EasySteer installs the shared model-hook runner only when its
-                # steering extension is enabled.  A disabled vector payload is
-                # still a no-op; it activates the graph-safe hook path.
-                args += ["--enable-steer-vector", "--steer-algorithms", "direct",
-                         "--steer-graph-mode", "in_graph", "--steer-vector-dtype", "float32"]
-            if s["language_model_only"]:
-                args.append("--language-model-only")
-            if cfg["model"]["trust_remote_code"]:
-                args.append("--trust-remote-code")
-            if cfg["steering"]["enabled"]:
-                from runtime.steering.easysteer.payload import steering_payload
-
-                payload = steering_payload(cfg)
-                algorithms = sorted({v["algorithm"] for v in payload["vectors"]})
-                args += [
-                    "--enable-steer-vector",
-                    "--steer-algorithms",
-                    ",".join(algorithms),
-                    "--steer-graph-mode",
-                    "in_graph",
-                    "--steer-vector-dtype",
-                    "float32",
-                ]
+                env["DYCON_CAPTURE_OPEN_IDS"] = json.dumps(self.capture_token_inventory["open_token_ids"])
+            args = self.build_args(serving_python, endpoint.hostname, port)
             write_json(
                 self.output / "launch.json",
                 {
                     "args": args,
                     "config_hash": cfg["config_hash"],
+                    "config_source": cfg["config_source"],
+                    "config_source_sha256": cfg.get("config_source_sha256"),
                     "serving_dtype": s.get("dtype", "float16"),
                     "runtime_sha256": sha256(root / "vendor/easysteer-runtime.json"),
                     "capture": {

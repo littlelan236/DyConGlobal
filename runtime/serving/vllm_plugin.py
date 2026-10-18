@@ -47,6 +47,27 @@ class DyConCapturePlugin:
         self.drain_lock = asyncio.Lock()
         self.stream_options = {}
         self.behavior_failures = []
+        self.execution_intervals = {}
+        self.request_metadata = {}
+        self.request_prompt_lengths = {}
+        self.request_last_position = {}
+        self.request_close_seen = set()
+        self.filtered_events = {"prompt": 0, "after_close": 0, "duplicate": 0, "unknown": 0}
+        self.failure_policy = os.environ.get("DYCON_CAPTURE_FAILURE_POLICY", "record_and_continue")
+        self.control_seconds = float(os.environ.get("DYCON_CAPTURE_CONTROL_SECONDS", "30"))
+        self.flush_seconds = max(0.001, float(os.environ.get("DYCON_CAPTURE_FLUSH_SECONDS", "0.1")))
+        self.export_options = json.loads(os.environ.get("DYCON_CAPTURE_EXPORT_OPTIONS", "{}"))
+        self.budget = None
+        if self.export_options.get("enabled", True) and self.export_options.get("spool_root"):
+            from core.disk_budget import DiskBudget
+
+            project = os.environ["DYCON_CAPTURE_PROJECT"]
+            self.budget = DiskBudget(
+                project,
+                Path(project) / self.export_options["spool_root"],
+                self.export_options["spool_max_bytes"],
+                int(os.environ.get("DYCON_CAPTURE_RESERVE_BYTES", "0")),
+            )
 
     def attach_router(self, app):
         @app.middleware("http")
@@ -76,31 +97,45 @@ class DyConCapturePlugin:
         async def mode(request: Request):
             body = await request.json()
             method = "start_capture" if body["enabled"] else "stop_capture"
-            results = await self.engine.collective_rpc(method, args=(STREAM,),
-                kwargs=self.stream_options if body["enabled"] else {})
+            results = await self.engine.collective_rpc(
+                method, args=(STREAM,), kwargs=self.stream_options if body["enabled"] else {}
+            )
             return {"enabled": body["enabled"], "acknowledged": all(results)}
 
         @app.post("/dycon/capture/engine/replay")
         async def replay(request: Request):
             from vllm import SamplingParams
             from vllm.sampling_params import RequestOutputKind
+
             body = await request.json()
+
             async def one(row):
-                metadata = {**row["metadata"], "replay": True,
-                            "capture_select": {STREAM: {"prompt_positions": [-1]}}}
+                metadata = {
+                    **row["metadata"],
+                    "replay": True,
+                    "capture_select": {STREAM: {"prompt_positions": [-1]}},
+                }
                 from core.io import hash_json
+
                 metadata["capture_select_sha256"] = hash_json(metadata["capture_select"])
                 token = REQUEST_CONTEXT.set(metadata)
                 try:
                     result = None
                     async for output in self.engine.generate(
                         {"prompt_token_ids": row["prefix_token_ids"]},
-                        SamplingParams(temperature=0, max_tokens=1, ignore_eos=True,
-                                       output_kind=RequestOutputKind.FINAL_ONLY), row["request_id"]):
+                        SamplingParams(
+                            temperature=0,
+                            max_tokens=1,
+                            ignore_eos=True,
+                            output_kind=RequestOutputKind.FINAL_ONLY,
+                        ),
+                        row["request_id"],
+                    ):
                         result = output
                     return {"request_id": result.request_id, "cached_tokens": result.num_cached_tokens}
                 finally:
                     REQUEST_CONTEXT.reset(token)
+
             outputs = await asyncio.gather(*(one(row) for row in body["rows"]))
             await self.drain_once()
             return {"outputs": outputs, "failures": self.failures}
@@ -109,9 +144,15 @@ class DyConCapturePlugin:
         async def status():
             if self.engine is not None:
                 self.worker_statuses = await self.engine.collective_rpc("capture_status", args=(STREAM,))
-            return {"enabled": self.engine is not None, "layers": self.layers, "stream": STREAM,
-                    "rows_published": self.rows_published, "failures": self.failures,
-                    "workers": self.worker_statuses}
+            return {
+                "enabled": self.engine is not None,
+                "layers": self.layers,
+                "stream": STREAM,
+                "rows_published": self.rows_published,
+                "filtered_events": self.filtered_events,
+                "failures": self.failures,
+                "workers": self.worker_statuses,
+            }
 
         @app.post("/dycon/capture/behavior-failure")
         async def behavior_failure(request: Request):
@@ -134,37 +175,51 @@ class DyConCapturePlugin:
         self.layers = native_layers(self.layers, text_config.num_hidden_layers)
         spec = self.select.get(STREAM, self.select)
         self.stream_options = {
-                "layers": self.layers,
-                "dtype": "float32",
-                "select": SelectSpec(**spec).to_wire() if "phase" not in spec else spec,
-                "budget_bytes": int(os.environ.get("DYCON_CAPTURE_BUDGET_BYTES", "268435456")),
-                "device_budget_bytes": int(os.environ.get("DYCON_CAPTURE_BUDGET_BYTES", "268435456")),
-            }
-        results = await engine_client.collective_rpc("start_capture", args=(STREAM,), kwargs=self.stream_options)
+            "layers": self.layers,
+            "dtype": "float32",
+            "select": SelectSpec(**spec).to_wire() if "phase" not in spec else spec,
+            "budget_bytes": int(os.environ.get("DYCON_CAPTURE_BUDGET_BYTES", "268435456")),
+            "device_budget_bytes": int(os.environ.get("DYCON_CAPTURE_BUDGET_BYTES", "268435456")),
+        }
+        await engine_client.collective_rpc("configure_capture_execution")
+        results = await engine_client.collective_rpc(
+            "start_capture", args=(STREAM,), kwargs=self.stream_options
+        )
         if not results or not all(results):
             raise RuntimeError("native vLLM capture stream failed to start")
         self.staging.mkdir(parents=True, exist_ok=True)
         self._attach_admission()
         self.task = asyncio.create_task(self._drain_loop(), name="dycon-capture-drain")
-        # Build the native capture graph while no rollout request owns live
-        # GDN state. Lazy graph warmup during a partially computed prompt may
-        # reuse dummy cache slots and damage that request's recurrent state.
+        # Initialize the native capture graphs with a dedicated request before
+        # rollout traffic. Normal multi-token prefill initializes model state.
         from vllm import SamplingParams
         from vllm.sampling_params import RequestOutputKind
 
         from hidden.backends.vllm.online import capture_request_metadata
-        metadata = capture_request_metadata("engine-warmup", "engine-warmup", "engine-warmup",
-                                           "engine-warmup", 0, ["reasoning_newline", "think_close"],
-                                           newline_token_ids=sorted(self.newline_ids), close_token_ids=sorted(self.close_ids))
+
+        metadata = capture_request_metadata(
+            "engine-warmup",
+            "engine-warmup",
+            "engine-warmup",
+            "engine-warmup",
+            0,
+            ["reasoning_newline", "think_close"],
+            newline_token_ids=sorted(self.newline_ids),
+            close_token_ids=sorted(self.close_ids),
+        )
         await asyncio.to_thread(self._post, "/dycon/capture/session/start", {"metadata": metadata})
         token = REQUEST_CONTEXT.set(metadata)
         try:
             # Token 0 is valid for the supported causal tokenizers; warmup must
             # not assume Qwen3.5's private <think> IDs when validating another
             # dense checkpoint.
-            async for _ in self.engine.generate({"prompt_token_ids": [0, 0]},
-                SamplingParams(temperature=0, max_tokens=1, ignore_eos=True,
-                               output_kind=RequestOutputKind.FINAL_ONLY), "engine-warmup"):
+            async for _ in self.engine.generate(
+                {"prompt_token_ids": [0, 0]},
+                SamplingParams(
+                    temperature=0, max_tokens=1, ignore_eos=True, output_kind=RequestOutputKind.FINAL_ONLY
+                ),
+                "engine-warmup",
+            ):
                 pass
             await self.drain_once()
         finally:
@@ -174,10 +229,30 @@ class DyConCapturePlugin:
     def _post(self, route, value):
         import requests
 
-        response = requests.post(self.control_url.rstrip("/") + route, json=value, timeout=30)
+        response = requests.post(
+            self.control_url.rstrip("/") + route, json=value, timeout=self.control_seconds
+        )
         if not response.ok:
             raise RuntimeError(f"capture control {route}: {response.status_code}: {response.text[:500]}")
         return response.json()
+
+    def _safe_post(self, route, value, metadata):
+        try:
+            return self._post(route, value)
+        except Exception as exc:
+            failure = {"session_id": metadata.get("session_id"), "reason": f"{route}: {exc!r}"}
+            self.failures.append(failure)
+            from core.io import hash_json, write_json
+
+            write_json(self.staging.parent / "failures" / (hash_json(failure) + ".json"), failure)
+            try:
+                self._post("/dycon/capture/failure", failure)
+            except Exception:
+                pass
+            # Preserve the native completion even for block_rollout. The common
+            # client raises CaptureError after recording this response, outside
+            # mini-swe-agent's API retry loop; a 500 here would resample it.
+            return None
 
     def _attach_admission(self):
         # Adapt this engine instance only. vLLM retains rendering, sampling,
@@ -190,35 +265,43 @@ class DyConCapturePlugin:
         @wraps(original_process)
         def process(*args, **kwargs):
             metadata = REQUEST_CONTEXT.get()
-            # The stream-wide native selector is authoritative. A request-level
-            # selector changes GDN FULL-graph input handling and can corrupt
-            # decode outputs; provenance is kept in REQUEST_CONTEXT instead.
+            # Keep provenance separate from the native stream-wide selector.
             request = original_process(*args, **kwargs)
             if metadata is not None and request.sampling_params is not None:
+                if metadata.get("replay"):
+                    # Native input admission owns prompt-target cache policy.
+                    from vllm.capture import SelectSpec
+
+                    request.capture_select = {STREAM: SelectSpec(prompt_positions=[-1]).to_wire()}
                 ids = list(request.prompt_token_ids or [])
-                if not metadata.get("replay") and (len(ids) < 2 or ids[-2:] != [248068, 198]):
+                if (
+                    "think_open" in metadata.get("anchors", [])
+                    and not metadata.get("replay")
+                    and (len(ids) < 2 or ids[-2:] != [248068, 198])
+                ):
                     raise ValueError("capture prompt must end with the active <think>\\n boundary")
-                params = request.sampling_params
-                # Preserve explicit skip requests (e.g. prompt logprobs). Only
-                # replace the capture policy's blanket skip by the native bound.
-                if params.prompt_logprobs is None:
-                    # Shared GDN state is not yet numerically qualified when
-                    # a capture request reuses another request's APC prefix.
-                    # Disable the read for correctness; the cache-boundary
-                    # hook remains available for a separately accepted gate.
-                    params.skip_reading_prefix_cache = True
+                # Decode capture targets are generated after the prompt: APC
+                # can read the entire reusable prompt. Native capture policy
+                # preserves explicit skips and prompt-target restrictions.
             return request
 
         @wraps(original_add)
         async def add(request, *args, **kwargs):
             metadata = REQUEST_CONTEXT.get()
             if metadata is not None:
+                self.request_metadata[request.request_id] = dict(metadata)
+                self.request_prompt_lengths[request.request_id] = len(request.prompt_token_ids or [])
                 from core.io import hash_json
+
                 binding = dict(metadata)
                 binding["prompt_token_ids"] = list(request.prompt_token_ids or [])
                 binding["request_sha256"] = hash_json(binding["prompt_token_ids"])
-                await asyncio.to_thread(self._post, "/dycon/capture/request/bind",
-                                        {"request_id": request.request_id, "metadata": binding})
+                await asyncio.to_thread(
+                    self._safe_post,
+                    "/dycon/capture/request/bind",
+                    {"request_id": request.request_id, "metadata": binding},
+                    binding,
+                )
             return await original_add(request, *args, **kwargs)
 
         @wraps(original_generate)
@@ -236,13 +319,19 @@ class DyConCapturePlugin:
                     generated = list(output.outputs[0].token_ids)
                 yield output
             if metadata is not None and final is not None:
-                await asyncio.to_thread(self._post, "/dycon/capture/request/output", {
-                    "metadata": metadata, "request_id": final.request_id,
-                    "prompt_token_ids": list(final.prompt_token_ids or []),
-                    "output_token_ids": generated,
-                    "finish_reason": final.outputs[0].finish_reason,
-                    "num_cached_tokens": getattr(final, "num_cached_tokens", 0) or 0,
-                })
+                await asyncio.to_thread(
+                    self._safe_post,
+                    "/dycon/capture/request/output",
+                    {
+                        "metadata": metadata,
+                        "request_id": final.request_id,
+                        "prompt_token_ids": list(final.prompt_token_ids or []),
+                        "output_token_ids": generated,
+                        "finish_reason": final.outputs[0].finish_reason,
+                        "num_cached_tokens": getattr(final, "num_cached_tokens", 0) or 0,
+                    },
+                    metadata,
+                )
 
         self.engine.input_processor.process_inputs = process
         self.engine._add_request = add
@@ -251,8 +340,12 @@ class DyConCapturePlugin:
     async def drain_once(self):
         async with self.drain_lock:
             raw = await self.engine.collective_rpc("fetch_captured", args=(STREAM,), kwargs={"clear": True})
+            executions = await self.engine.collective_rpc("fetch_capture_execution")
+            for worker in executions:
+                for request_id, rows in worker.items():
+                    self.execution_intervals.setdefault(request_id, []).extend(rows)
             self.worker_statuses = await self.engine.collective_rpc("capture_status", args=(STREAM,))
-            if raw and any(raw):
+            if raw and any(raw) and self.export_options.get("enabled", True):
                 await asyncio.to_thread(self._publish, raw)
 
     async def _drain_loop(self):
@@ -264,10 +357,12 @@ class DyConCapturePlugin:
             except Exception as exc:
                 self.failures.append(repr(exc))
                 LOG.exception("DyCon capture drain failed")
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(self.flush_seconds)
 
     def _publish(self, raw):
         from vllm.model_hooks.capture.serialization import assemble_captured
+
+        from runtime.serving.capture_worker import execution_at
 
         tensors, metadata, _ = assemble_captured(raw, tp_size=self.tp_size)
         if not metadata:
@@ -275,9 +370,11 @@ class DyConCapturePlugin:
         first_layer = next(iter(metadata))
         labels = metadata[first_layer]
         LOG.info("DyCon capture assembled %d rows across %d layers", len(labels), len(tensors))
-        for row_number, (request_id, position, token_id) in enumerate(
-            zip(labels.req_ids, labels.positions.tolist(), labels.token_ids.tolist(), strict=True)
-        ):
+        events = list(zip(labels.req_ids, labels.positions.tolist(), labels.token_ids.tolist(), range(len(labels.req_ids)), strict=True))
+        # Native streams can be fetched in batches.  Sort only the small event
+        # metadata here; tensor rows remain indexed by the original row number.
+        events.sort(key=lambda row: (row[0], int(row[1]), row[3]))
+        for request_id, position, token_id, row_number in events:
             if token_id in self.open_ids:
                 anchor = "think_open"
             elif token_id in self.close_ids:
@@ -285,16 +382,23 @@ class DyConCapturePlugin:
             elif token_id in self.newline_ids:
                 anchor = "reasoning_newline"
             else:
+                self.filtered_events["unknown"] += 1
+                continue
+            if not self._accept_reasoning_event(request_id, int(position), int(token_id), anchor):
                 continue
             sample = {
                 f"layer_{layer}": tensor[row_number].detach().cpu().numpy()
                 for layer, tensor in tensors.items()
             }
+            execution = execution_at(self.execution_intervals, request_id, int(position))
             fd, name = tempfile.mkstemp(prefix=".dycon-", suffix=".npz", dir=self.staging)
             os.close(fd)
             path = Path(name)
+            reservation = "handoff:" + str(path)
             try:
-                np.savez_compressed(path, **sample)
+                if self.budget:
+                    self.budget.acquire(reservation, sum(v.nbytes + 4096 for v in sample.values()) + 4096)
+                np.savez(path, **sample)
                 import requests
 
                 response = requests.post(
@@ -307,23 +411,62 @@ class DyConCapturePlugin:
                         "token_id": int(token_id),
                         "absolute_position": int(position),
                         "phase": "prompt" if anchor == "think_open" else "generation_input",
-                        "graph_replays": int(all(x.get("graph_replays", 0) > 0 for x in self.worker_statuses)),
+                        "graph_replays": int(execution["graph_execution"] == "full"),
+                        **execution,
                     },
-                    timeout=5,
+                    timeout=self.control_seconds,
                 )
                 if not response.ok:
                     LOG.error("DyCon capture control rejected staged row: %s", response.text[:500])
                 response.raise_for_status()
-                LOG.info("DyCon capture staged anchor=%s request=%s position=%s", anchor, request_id, position)
+                LOG.info(
+                    "DyCon capture staged anchor=%s request=%s position=%s", anchor, request_id, position
+                )
                 self.rows_published += 1
+            except Exception as exc:
+                failure = {
+                    "request_id": request_id,
+                    "reason": repr(exc),
+                    "session_id": self.request_metadata.get(request_id, {}).get("session_id"),
+                }
+                self.failures.append(failure)
+                from core.io import hash_json, write_json
+
+                write_json(
+                    self.staging.parent / "failures" / (hash_json([request_id, position]) + ".json"),
+                    failure,
+                )
+                if self.failure_policy == "block_rollout":
+                    raise
             finally:
                 path.unlink(missing_ok=True)
+                if self.budget:
+                    self.budget.release(reservation)
+
+    def _accept_reasoning_event(self, request_id, position, token_id, anchor):
+        """Filter answer/prompt events before allocating an export handoff."""
+        from runtime.serving.capture import accept_reasoning_event
+
+        prompt_length = self.request_prompt_lengths.get(request_id)
+        if prompt_length is None:
+            prompt_length = len(self.request_metadata.get(request_id, {}).get("prompt_token_ids", ()))
+        state = {
+            "prompt_length": prompt_length,
+            "last_position": self.request_last_position.get(request_id, -1),
+            "close_seen": request_id in self.request_close_seen,
+        }
+        accepted = accept_reasoning_event(state, position, anchor, self.filtered_events)
+        self.request_last_position[request_id] = state["last_position"]
+        if state["close_seen"]:
+            self.request_close_seen.add(request_id)
+        return accepted
 
     async def shutdown(self):
         if self.task is not None:
             self.task.cancel()
             await self.task
         if self.engine is not None:
+            await self.drain_once()
             await self.engine.collective_rpc("stop_capture", args=(STREAM,), kwargs={})
 
 

@@ -16,12 +16,23 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     for cmd in ["config-check", "catalog-check", "runtime-check", "recover"]:
         sub.add_parser(cmd)
+    sub.add_parser("capture-recover").add_argument("run_id")
+    p = sub.add_parser("online-index")
+    p.add_argument("run_id")
+    p.add_argument("index_id")
     for cmd in ["tasks-import", "rollouts-import", "evaluations-import"]:
         sub.add_parser(cmd).add_argument("list")
     sub.add_parser("model-register").add_argument("checkpoint")
     p = sub.add_parser("rollout")
     p.add_argument("run_id")
     p.add_argument("--resume", action="store_true")
+    p.add_argument("--task-id", action="append", default=[])
+    p.add_argument("--unrolled", action="store_true")
+    p.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Run the real tool/capture startup gate without admitting tasks",
+    )
     sub.add_parser("prepare-evaluation").add_argument("run_id")
     p = sub.add_parser("evaluate")
     p.add_argument("run_id")
@@ -56,6 +67,10 @@ def main(argv=None):
     p.add_argument("predictions")
     p.add_argument("evaluation_id")
     a = parser.parse_args(argv)
+    if a.command == "rollout" and a.set:
+        parser.error("rollout rejects --set; edit the unique config.yaml or resume its immutable snapshot")
+    if a.command == "rollout" and a.resume and (a.task_id or a.unrolled):
+        parser.error("resume uses the immutable task selection")
     cfg = resolve(a.config, a.set)
     catalog = Catalog(cfg["project_root"])
     if a.command == "config-check":
@@ -67,6 +82,14 @@ def main(argv=None):
 
         assert_runtime_ready(cfg)
         result = {"ready": True}
+    elif a.command == "capture-recover":
+        from hidden.recover_online import recover_online
+
+        result = recover_online(cfg, a.run_id)
+    elif a.command == "online-index":
+        from difficulty.datasets.online import build_published_index
+
+        result = str(build_published_index(cfg, a.run_id, a.index_id))
     elif a.command == "tasks-import":
         result = catalog.register_tasks(read_json(a.list))
     elif a.command == "rollouts-import":
@@ -86,7 +109,9 @@ def main(argv=None):
             raise ValueError("Resume uses immutable snapshot; --set requires a new run")
         from baseline.rollout.runner import run_manifest
 
-        result = run_manifest(cfg, a.run_id, a.resume)
+        result = run_manifest(
+            cfg, a.run_id, a.resume, task_ids=a.task_id, unrolled=a.unrolled, check_only=a.check_only
+        )
     elif a.command == "prepare-evaluation":
         from baseline.workflow import prepare_run
 

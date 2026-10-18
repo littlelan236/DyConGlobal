@@ -56,18 +56,15 @@ class NasImageStore:
         return path
 
     def verify(self, deep=False):
-        descriptors = [
-            self.record["config"],
-            *self.record["layers"],
-            {"digest": self.image_id, "size": self.record["manifest_size"]},
-        ]
-        for d in descriptors:
-            path = self.blob(d["digest"])
-            if not path.is_file() or path.stat().st_size != d["size"]:
-                raise FileNotFoundError(path)
-            if deep and "sha256:" + sha256(path) != d["digest"]:
-                raise ValueError(f"Corrupt blob: {path}")
-        return descriptors
+        from runtime.images.oci import descriptor_graph
+
+        manifest = read_json(self.blob(self.image_id))
+        root = {
+            "digest": self.image_id,
+            "size": self.record["manifest_size"],
+            "mediaType": manifest["mediaType"],
+        }
+        return descriptor_graph(self.root / "blobs/sha256", root, deep=deep)
 
     def write_archive(self, stream):
         descriptors = self.verify(deep=True)
@@ -150,6 +147,12 @@ class ImageLeaseManager:
 
     @contextmanager
     def _reservation(self, estimate):
+        from core.disk_budget import DiskBudget
+
+        disk = DiskBudget(
+            self.cfg["project_root"], self.docker_root, 2**63 - 1, self.options["reserve_bytes"]
+        )
+        shared_token = "image:" + uuid.uuid4().hex
         token = uuid.uuid4().hex
         deadline = time.monotonic() + self.options["admission_seconds"]
         while True:
@@ -164,6 +167,13 @@ class ImageLeaseManager:
                     reserved + estimate <= self.options["max_reserved_bytes"]
                     and free >= self.options["reserve_bytes"] + reserved + estimate
                 ):
+                    try:
+                        disk.acquire(shared_token, estimate, kind="image")
+                    except BufferError:
+                        self._save(state)
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("Insufficient shared disk space for NAS image") from None
+                        continue
                     state["reservations"][token] = {
                         "bytes": estimate,
                         "pid": os.getpid(),
@@ -178,6 +188,7 @@ class ImageLeaseManager:
         try:
             yield
         finally:
+            disk.release(shared_token)
             with file_lock(self.state / "journal.lock"):
                 state = self._read()
                 state["reservations"].pop(token, None)

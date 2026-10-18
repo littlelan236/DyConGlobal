@@ -5,23 +5,6 @@ from functools import wraps
 
 def install():
     from vllm.v1.core.kv_cache_manager import KVCacheManager
-    from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
-
-    dispatch = CudaGraphManager.dispatch
-    if not getattr(dispatch, "_dycon_uniform_prompt", False):
-        @wraps(dispatch)
-        def uniform_prompt(manager, num_reqs, num_tokens, uniform_token_count,
-                           num_active_loras, max_query_len=None):
-            # A prompt chunk of one input token per request has the same
-            # geometry as uniform decode. GDN's native builder classifies it
-            # as decode already; supply the corresponding dispatch hint too.
-            if uniform_token_count is None and num_tokens == num_reqs and max_query_len == 1:
-                uniform_token_count = 1
-            return dispatch(manager, num_reqs, num_tokens, uniform_token_count,
-                            num_active_loras, max_query_len)
-
-        uniform_prompt._dycon_uniform_prompt = True
-        CudaGraphManager.dispatch = uniform_prompt
 
     original = KVCacheManager.get_computed_blocks
     if getattr(original, "_dycon_boundary", False):

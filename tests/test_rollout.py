@@ -53,6 +53,8 @@ def test_rollout_registers_canonical_artifacts_and_resumes(cfg, monkeypatch):
         def __exit__(self, *args):
             pass
 
+    import runtime.serving.startup
+    monkeypatch.setattr(runtime.serving.startup, "check_tool_chain", lambda *args: None)
     monkeypatch.setattr(core.model_identity, "verify_model", lambda cfg: None)
     monkeypatch.setattr(agent, "DurableAgent", FakeAgent)
     monkeypatch.setattr(model, "make_model", lambda *args: None)

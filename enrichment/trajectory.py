@@ -38,6 +38,18 @@ def occurrences(ids, marker):
 
 def reasoning_count(step, tokenizer):
     response = step.get("response") or {}
+    if isinstance(response.get("prompt_token_ids"), list) and isinstance(
+        response.get("output_token_ids"), list
+    ):
+        from enrichment.online_trace import reasoning_blocks
+
+        blocks = reasoning_blocks(
+            response["prompt_token_ids"],
+            response["output_token_ids"],
+            tokenizer.encode("<think>", add_special_tokens=False),
+            tokenizer.encode("</think>", add_special_tokens=False),
+        )
+        return sum(block["end"] - block["start"] for block in blocks), "exact_native_ids"
     usage = response.get("usage") or {}
     details = usage.get("completion_tokens_details") or {}
     n = details.get("reasoning_tokens")
@@ -215,14 +227,30 @@ def enrich(cfg, dataset_id, tokenizer):
         source = Path(cfg["project_root"]) / rollout["trajectory_path"]
         reader = TrajectoryReader(source)
         steps = list(reader.steps())
-        counts = [reasoning_count(s, tokenizer) for s in steps]
+        responses = list(reader.token_steps())
+        counts = [(s["message_index"], reasoning_count(s, tokenizer)) for s in responses]
         samples, missing = [], []
         for s, step in enumerate(steps):
             anchors, unavailable = reconstruct(step, reader, tokenizer, cfg)
             missing.extend({"step_id": s, **x} for x in unavailable)
             for anchor in anchors:
-                start = s if anchor["anchor"] == "think_open" else s + 1
-                tail = [n for n, _ in counts[start:]]
+                tail = [n for index, (n, _) in counts if index > step["message_index"]]
+                response = step.get("response") or {}
+                if isinstance(response.get("prompt_token_ids"), list) and isinstance(
+                    response.get("output_token_ids"), list
+                ):
+                    from enrichment.online_trace import reasoning_blocks
+
+                    blocks = reasoning_blocks(
+                        response["prompt_token_ids"],
+                        response["output_token_ids"],
+                        tokenizer.encode("<think>", add_special_tokens=False),
+                        tokenizer.encode("</think>", add_special_tokens=False),
+                    )
+                    gi = len(anchor["prefix_token_ids"]) - len(response["prompt_token_ids"]) - 1
+                    tail.append(sum(max(0, block["end"] - max(block["start"], gi + 1)) for block in blocks))
+                elif anchor["anchor"] == "think_open":
+                    tail.append(reasoning_count(step, tokenizer)[0])
                 tokens = sum(tail) if all(n is not None for n in tail) else None
                 success = rollout["resolved"] is True
                 prefix = anchor.pop("prefix_token_ids")
@@ -243,7 +271,17 @@ def enrich(cfg, dataset_id, tokenizer):
                         "terminal_remaining_steps": len(steps) - s,
                         "action_evidence": {"tool_calls": step["tool_calls"], "content": step["content"]},
                         "success_label_available": success,
-                        "token_count_sources": sorted(set(src for _, src in counts[start:])),
+                        "token_count_sources": sorted(
+                            {
+                                src
+                                for index, (_, src) in counts
+                                if index > step["message_index"]
+                                or (
+                                    index == step["message_index"]
+                                    and (anchor["anchor"] == "think_open" or src == "exact_native_ids")
+                                )
+                            }
+                        ),
                     }
                 )
         relative = f"{rid}.samples.json"

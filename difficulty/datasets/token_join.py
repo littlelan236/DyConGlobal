@@ -51,6 +51,8 @@ def build_token_hidden_index(cfg, dataset_id, capture_id, index_id):
         if rid not in trace_cache:
             trace_cache[rid] = _load_trace(cfg, dataset_id, rid)
         _, trace_meta, arrays = trace_cache[rid]
+        if trace_meta.get("alignment_evidence") != ["exact_prompt_and_output_ids"]:
+            raise ValueError("Exact hidden-token join rejects reconstructed/weak token evidence")
         candidates = _candidate_indices(trace_meta, arrays, hidden)
         if len(candidates) != 1:
             raise ValueError(

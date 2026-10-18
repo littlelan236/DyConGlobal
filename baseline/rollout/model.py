@@ -10,12 +10,15 @@ def model_config(cfg, capture_context=None):
     s, g, a = cfg["serving"], cfg["generation"], cfg["agent"]
     extra_body = {
         "top_k": g["top_k"],
+        "return_token_ids": bool(cfg.get("benchmark_metrics_dir")),
         "steering": steering_payload(cfg),
         "chat_template_kwargs": {k: g[k] for k in ["enable_thinking", "preserve_thinking"]},
     }
+    if g.get("thinking_token_budget") is not None:
+        extra_body["thinking_token_budget"] = g["thinking_token_budget"]
     # Ordinary rollout requests keep their exact historical body.  Metadata is
     # opt-in and is consumed only by the managed online capture plane.
-    if cfg.get("capture", {}).get("enabled"):
+    if cfg.get("capture", {}).get("enabled") and capture_context is not False:
         if not capture_context:
             raise ValueError("capture-enabled model requires request provenance context")
         extra_body["dycon_capture"] = {**capture_context, "anchors": list(cfg["capture"]["anchors"])}
@@ -24,7 +27,12 @@ def model_config(cfg, capture_context=None):
         newline_ids = capture_context.get("newline_token_ids") or [198, 271, 1358]
         close_ids = capture_context.get("close_token_ids") or [248069]
         extra_body["capture_select"] = capture_context.get(
-            "capture_select", build_capture_select(newline_ids, close_ids)
+            "capture_select",
+            build_capture_select(
+                newline_ids if "reasoning_newline" in cfg["capture"]["anchors"] else [],
+                close_ids if "think_close" in cfg["capture"]["anchors"] else [],
+                include_open="think_open" in cfg["capture"]["anchors"],
+            ),
         )
     return {
         "model_name": "openai/" + cfg["model"]["served_name"],
@@ -41,7 +49,10 @@ def model_config(cfg, capture_context=None):
     }
 
 
-def make_model(cfg, deadline, capture_context=None):
+def make_model(cfg, deadline, capture_context=None, runtime=None):
+    from uuid import uuid4
+
+    from minisweagent.exceptions import FormatError
     from minisweagent.models.litellm_model import LitellmModel
 
     from enrichment.trajectory import tools_schema
@@ -50,6 +61,7 @@ def make_model(cfg, deadline, capture_context=None):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self._dycon_capture_step = 0
+            self._dycon_metric_step = 0
 
         def serialize(self):
             import copy
@@ -68,25 +80,78 @@ def make_model(cfg, deadline, capture_context=None):
 
             return redact(value)
 
+        def _query(self, messages, **kwargs):
+            capture = self.config.model_kwargs.get("extra_body", {}).get("dycon_capture")
+            if capture is not None:
+                capture["api_attempt_id"] = uuid4().hex
+            return super()._query(messages, **kwargs)
+
         def query(self, messages, **kwargs):
+            from core.io import hash_json
+
             self.config.model_kwargs["timeout"] = deadline.remaining(cfg["timeouts"]["model_seconds"])
             capture = self.config.model_kwargs.get("extra_body", {}).get("dycon_capture")
             if capture is not None:
-                capture["step_id"] = self._dycon_capture_step
+                capture.update(step_id=self._dycon_capture_step, query_id=uuid4().hex)
                 self._dycon_capture_step += 1
-            message = super().query(messages, **kwargs)
-            request_record = {
-                "messages": self._prepare_messages_for_api(messages),
-                "tools": tools_schema(),
-                "chat_template_kwargs": {
-                    k: cfg["generation"][k] for k in ["enable_thinking", "preserve_thinking"]
-                },
-                "config_hash": cfg["config_hash"],
-                "model_fingerprint": cfg["model"]["fingerprint"],
-            }
-            if capture is not None:
-                request_record["dycon_capture"] = dict(capture)
-            message.setdefault("extra", {})["request"] = request_record
-            return message
+
+            def attach(message):
+                record = {
+                    "tools": tools_schema(),
+                    "chat_template_kwargs": {
+                        k: cfg["generation"][k] for k in ["enable_thinking", "preserve_thinking"]
+                    },
+                    "config_hash": cfg["config_hash"],
+                    "model_fingerprint": cfg["model"]["fingerprint"],
+                    "steering_payload_sha256": cfg["steering"].get("payload_sha256"),
+                }
+                prepared = self._prepare_messages_for_api(messages)
+                if capture is None:
+                    record["messages"] = prepared
+                else:
+                    record["messages_sha256"] = hash_json(prepared)
+                    record["dycon_capture"] = {
+                        k: v
+                        for k, v in capture.items()
+                        if k not in {"newline_token_ids", "close_token_ids", "capture_select"}
+                    }
+                message.setdefault("extra", {})["request"] = record
+                return message
+
+            def check_capture(message=None):
+                if capture is not None and cfg["capture"]["failure_policy"] == "block_rollout":
+                    controller = (runtime or {}).get("capture_controller")
+                    if controller:
+                        failures = controller.sessions[capture["session_id"]].options.get("failures", [])
+                        failures = list(failures)
+                        failures.extend(
+                            f["error"]
+                            for f in controller.queue.status()["failed"]
+                            if f.get("session_id") == capture["session_id"]
+                        )
+                        for path in (controller.export_root / "failures").glob("*.json"):
+                            from core.io import read_json
+
+                            record = read_json(path)
+                            if record.get("session_id") == capture["session_id"]:
+                                failures.append(record["reason"])
+                        if failures:
+                            from runtime.serving.errors import CaptureError
+
+                            error = CaptureError(str(failures))
+                            error.response_message = message
+                            raise error
+
+            check_capture()
+            try:
+                message = attach(super().query(messages, **kwargs))
+                check_capture(message)
+                return message
+            except FormatError as exc:
+                for message in exc.messages:
+                    if isinstance((message.get("extra") or {}).get("response"), dict):
+                        attach(message)
+                        check_capture(message)
+                raise
 
     return RecordingModel(**model_config(cfg, capture_context))

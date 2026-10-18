@@ -92,10 +92,13 @@ def test_native_cache_policy_keeps_final_token_recomputable():
 
 def test_shared_capture_boundary_limits_native_lookup_before_hybrid_restore():
     from vllm.v1.core.kv_cache_manager import KVCacheManager
+    from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
 
     from runtime.serving.cache_boundary import install
 
+    dispatch = CudaGraphManager.dispatch
     install()
+    assert CudaGraphManager.dispatch is dispatch, "Cache bounds must not reclassify prompt chunks as decode"
     seen = []
     def lookup(block_hashes, maximum):
         seen.append(maximum)

@@ -16,6 +16,66 @@ from runtime.serving.capture import (
 )
 
 
+@pytest.mark.parametrize("chunk,anchors,allow,error", [
+    (1, ["reasoning_newline", "think_close"], False, "prefill_token_chunk_size=1"),
+    (1, ["reasoning_newline", "think_close"], True, "prefill_token_chunk_size=1"),
+    (0, ["think_open"], False, "decode capture only"),
+    (0, ["reasoning_newline", "think_close"], False, "runtime verification reached"),
+])
+def test_qwen_capture_admission_keeps_native_prefill(cfg, tmp_path, monkeypatch, chunk, anchors, allow, error):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from core.io import write_json
+    from runtime.serving import manager
+
+    model = tmp_path / "qwen"
+    write_json(model / "config.json", {"model_type": "qwen3_5"})
+    cfg["model"]["path"] = str(model)
+    cfg["serving"].update(management="managed", tool_parser="qwen3_xml", reasoning_parser="qwen3")
+    cfg["capture"].update(enabled=True, prefill_token_chunk_size=chunk, anchors=anchors,
+                           allow_unsupported_gdn=allow)
+    monkeypatch.setattr(manager.socket, "socket", lambda *args: nullcontext(
+        SimpleNamespace(setsockopt=lambda *args: None, bind=lambda *args: None)))
+
+    def verification(*args, **kwargs):
+        raise ValueError("runtime verification reached")
+
+    monkeypatch.setattr(manager.subprocess, "run", verification)
+    with pytest.raises(ValueError, match=error):
+        with manager.ServingManager(cfg, tmp_path / "service"):
+            pass
+
+
+def test_decode_metadata_preserves_native_apc_and_accepts_warmup(monkeypatch):
+    from types import SimpleNamespace
+
+    pytest.importorskip("starlette")
+    from runtime.serving.vllm_plugin import REQUEST_CONTEXT, DyConCapturePlugin
+
+    request = SimpleNamespace(prompt_token_ids=[0, 0], sampling_params=SimpleNamespace(
+        skip_reading_prefix_cache=False, prompt_logprobs=None))
+
+    async def add(*args, **kwargs):
+        pass
+
+    async def generate(*args, **kwargs):
+        yield None
+
+    plugin = DyConCapturePlugin()
+    plugin.engine = SimpleNamespace(input_processor=SimpleNamespace(process_inputs=lambda: request),
+                                    _add_request=add, generate=generate)
+    plugin._attach_admission()
+    context = REQUEST_CONTEXT.set({"anchors": ["reasoning_newline", "think_close"]})
+    try:
+        assert plugin.engine.input_processor.process_inputs() is request
+        assert not request.sampling_params.skip_reading_prefix_cache
+        request.sampling_params.skip_reading_prefix_cache = True
+        assert plugin.engine.input_processor.process_inputs().sampling_params.skip_reading_prefix_cache
+    finally:
+        REQUEST_CONTEXT.reset(context)
+
+
 def test_qwen_open_anchor_and_close_requires_followup():
     assert validate_anchor([1, 248068, 198], "think_open")["position"] == 1
     with pytest.raises(AnchorError, match="think_open_unavailable"):
@@ -124,6 +184,14 @@ def test_async_export_writes_raw_sidecar_and_session_receipt(tmp_path):
     assert result["status"] == "queued"
     controller.queue.queue.join()
     controller.stop("raw-session")
+    from core.io import read_json
+
+    manifest = read_json(tmp_path / "hidden/manifest.json")
+    entry = manifest["online_captures"]["raw-session"]
+    assert entry["layout"] == "per_token_sidecars_v1"
+    assert entry["sample_count"] == 1
+    assert "samples" not in entry
+    assert entry["anchors"] == ["think_open"]
     assert list((tmp_path / "online" / "raw").glob("*.npz"))
     assert list((tmp_path / "online" / "raw").glob("*.json"))
     assert (tmp_path / "online" / "sessions" / "raw-session" / "receipt.json").exists()

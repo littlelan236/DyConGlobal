@@ -10,6 +10,33 @@ class TrajectoryReader:
         self.path = Path(path)
         self.data = read_json(self.path)
         self.messages = self.data.get("messages", [])
+        from hidden.artifacts import read_request, response_records
+
+        for _, message, response in response_records(self.data):
+            if response.get("ledger_ref"):
+                message["extra"]["response"] = read_request(response["ledger_root"], response)
+
+    def token_steps(self):
+        """Every completed response, including native FormatError evidence."""
+        from hidden.artifacts import response_records
+
+        action_step = 0
+        for query_index, (index, message, response) in enumerate(response_records(self.data)):
+            actual = (response.get("choices") or [{}])[0].get("message") or message
+            valid = message.get("role") == "assistant"
+            yield {
+                "step": action_step,
+                "query_index": query_index,
+                "message_index": index,
+                "reasoning": actual.get("reasoning_content") or "",
+                "content": actual.get("content") or "",
+                "message": message,
+                "tool_calls": actual.get("tool_calls") or [],
+                "observations": [],
+                "response": response,
+                "valid_action": valid,
+            }
+            action_step += int(valid)
 
     def steps(self):
         ordinal = 0

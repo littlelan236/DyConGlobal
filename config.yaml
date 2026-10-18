@@ -6,40 +6,41 @@ benchmark:
   purposes: []
   profile: null
 model:
-  path: null
-  fingerprint: null
-  served_name: null
+  path: /VM/wangtianyi/DyConGlobal/models/Qwen3.5-9B
+  fingerprint: f97643c15ea3cb04517379dd13482b48548458c3a3f6c3a7eb93dcaa6adf86a2
+  served_name: Qwen3.5-9B
   trust_remote_code: false
 serving:
   base_url: http://127.0.0.1:8100/v1
   api_key_env: DYCON_API_KEY
-  management: external
+  management: managed
   python: .venvs/easysteer/bin/python
   dtype: float16
   kv_cache_memory_bytes: null
-  max_num_seqs: 16
-  max_num_batched_tokens: 1024
-  gpus: []
-  tensor_parallel_size: 1
-  gpu_memory_utilization: 0.8
-  max_model_len: 32768
+  max_num_seqs: 12
+  max_num_batched_tokens: 8192
+  gpus: [4, 5, 6, 7]
+  tensor_parallel_size: 4
+  gpu_memory_utilization: 0.5
+  max_model_len: 262144
   startup_seconds: 600
   shutdown_seconds: 30
-  tool_parser: null
-  reasoning_parser: null
+  tool_parser: qwen3_xml
+  reasoning_parser: qwen3
   language_model_only: true
 generation:
   temperature: 0.6
   top_p: 0.95
   top_k: 20
-  max_tokens: 8192
+  max_tokens: 81920
   seed: 42
   enable_thinking: true
   preserve_thinking: true
+  thinking_token_budget: null
 agent:
-  step_limit: 100
+  step_limit: 250
   cost_limit: 0.0
-  max_consecutive_format_errors: 3
+  max_consecutive_format_errors: 10
   system_template: You are a software engineer fixing the reported issue using the bash tool.
   instance_template: |-
     {{task}}
@@ -71,8 +72,8 @@ images:
   admission_seconds: 1800
   cleanup: true
 execution:
-  rollout_workers: 4
-  harness_workers: 4
+  rollout_workers: 12
+  harness_workers: 8
   infrastructure_retry_limit: 1
   pipeline_wall_seconds: 0
 timeouts:
@@ -89,11 +90,19 @@ enrichment:
   token_evidence: reconstructed
 hidden:
   python: .venvs/analysis/bin/python
-  dtype: bfloat16
+  dtype: float16
   device: cpu
   chunk_size: 1024
-  layers: []
-  adapter: hf_causal
+  layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+  adapter: vllm_eager
+  vllm:
+    python: .venvs/latent-vllm/bin/python
+    gpus: [4, 5, 6, 7]
+    tensor_parallel_size: 4
+    max_num_seqs: 12
+    max_num_batched_tokens: 4096
+    max_model_len: 262144
+    gpu_memory_utilization: 0.75
 difficulty:
   estimator: null
 action:
@@ -104,16 +113,16 @@ steering:
   payload: null
 
 capture:
-  enabled: false
+  enabled: true
   backend: easysteer
   mode: online
   graph_mode: FULL
-  prefill_token_chunk_size: 1
+  prefill_token_chunk_size: 0
   allow_unsupported_gdn: false
   anchors: [reasoning_newline, think_close]
   newline_policy: all
   newline_token_source: tokenizer
-  layers: []
+  layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
   dtype: float16
   prefix_cache_policy: safe_boundary
   capture_stage: post_steering
@@ -126,3 +135,10 @@ capture:
     format: npz
     queue_size: 256
     flush_interval_ms: 100
+    spool_root: hidden/spool
+    spool_max_bytes: 53687091200
+    spool_high_watermark: 0.8
+    spool_low_watermark: 0.6
+    shard_max_bytes: 134217728
+    upload_workers: 2
+    upload_max_elapsed_seconds: 600

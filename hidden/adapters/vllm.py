@@ -50,7 +50,7 @@ class VLLMAdapter:
         self.llm.llm_engine.engine_core.shutdown()
 
 
-def load_adapter(cfg):
+def load_adapter(cfg, *, steering_replay=False):
     from core.model_identity import verify_model
     from hidden.backends.vllm.engine import engine_args, verify_runtime
 
@@ -66,5 +66,9 @@ def load_adapter(cfg):
     )
     text = getattr(config, "text_config", config)
     native_layers(cfg["hidden"]["layers"], text.num_hidden_layers)
-    llm = LLM(**engine_args(cfg))
+    args = engine_args(cfg)
+    if steering_replay:
+        args.update(enable_steer_vector=True, steer_algorithms="direct", steer_graph_mode="split",
+                    steer_vector_dtype="float32")
+    llm = LLM(**args)
     return VLLMAdapter(llm, cfg, text.num_hidden_layers, text.hidden_size, runtime)

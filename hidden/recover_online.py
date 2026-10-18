@@ -1,0 +1,52 @@
+"""Recover published artifacts from local bytes without any model requests."""
+
+from pathlib import Path
+
+from core.config import load_snapshot
+from core.io import read_json, sha256, write_json
+from core.locking import exclusive_run, file_lock
+from runtime.serving.spool import CaptureSpool
+
+
+@exclusive_run
+def recover_online(cfg, run_id):
+    frozen = load_snapshot(cfg["project_root"], run_id)
+    spool = CaptureSpool(
+        frozen["project_root"],
+        frozen["capture"]["export"],
+        run_id,
+        frozen["paths"]["nas_root"],
+        frozen["images"]["reserve_bytes"],
+    )
+    sessions = {}
+    try:
+        jobs = spool.recover()
+        for path in sorted((spool.root / "sessions").glob("*/finalization.json")):
+            sid = path.parent.name
+            finalization = read_json(path)
+            trajectory = Path(finalization["trajectory_path"])
+            if sha256(trajectory) != finalization["trajectory_sha256"]:
+                raise ValueError("Recovery trajectory hash mismatch")
+            coverage = read_json(path.parent / "coverage.json")
+            published = spool.publish_session(sid, frozen["capture"]["export"]["upload_max_elapsed_seconds"])
+            state = (
+                "complete"
+                if published and not coverage["missing"]
+                else "pending_upload"
+                if not published
+                else "partial"
+            )
+            sessions[sid] = state
+            with file_lock(Path(cfg["project_root"]) / "state/product-manifests.lock"):
+                for owner in ("hidden", "enrichment"):
+                    manifest_path = Path(cfg["project_root"]) / owner / "manifest.json"
+                    manifest = read_json(manifest_path)
+                    entry = manifest.get("online_captures", {}).get(sid)
+                    if entry:
+                        entry.update(status=state, published=state == "complete")
+                        write_json(manifest_path, manifest)
+            if state == "complete":
+                spool.release_session_metadata(sid)
+        return {"retried_jobs": jobs, "sessions": sessions}
+    finally:
+        spool.close(frozen["capture"]["export"]["upload_max_elapsed_seconds"])

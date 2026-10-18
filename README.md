@@ -3,8 +3,8 @@
 独立的 coding-agent 轨迹、剩余工作量与 latent 分析工程。远程根目录为
 `/home/wangtianyi/DyConGlobal`；NAS namespace 为 `/VM/wangtianyi/DyConGlobal`。
 
-**当前刻意留空**：baseline 数据范围、正式模型 checkpoint、剩余难度估计器架构与训练策略、action 分类体系。
-没有导入任何旧 benchmark 数据或运行正式 rollout/训练。已有基础设施代码可在这些输入到位后使用。
+已迁移历史训练轨迹并配置 Qwen3.5-9B FP16；数据范围与评测结果以 baseline manifest 为准。
+普通、capture、steering、steering+capture 共用正式 CLI。当前在线 anchor 为 reasoning 换行和 `</think>`。
 
 ## 当前检查
 
@@ -22,10 +22,13 @@ cd /home/wangtianyi/DyConGlobal
 
 ## 唯一配置与数据入口
 
-- `config.yaml` 是唯一可编辑配置；拒绝重复 YAML key、未知字段和非法组合。CLI 全局 `--set key=value` 会进入运行快照。
+- `config.yaml` 是唯一可编辑配置；拒绝重复 YAML key、未知字段和非法组合。正式 `rollout` 拒绝 `--set`；离线分析仍可使用显式覆盖。
 - `baseline/manifest.json` 是唯一任务分区、rollout 用途、来源和评测关系的事实来源；没有 `splits.json`。
 - `runs/<run>/resolved-config.json` 与 selection/hash 是只读运行证据。恢复运行使用原快照，不接受覆盖配置。
 - 同一 task 的全部轨迹共享分区。复用副本按原始内容去重；submitted、resolved、评测故障分别记录。
+- `rollout RUN --task-id TASK --unrolled` 从同一 manifest 筛选未正式运行的任务；`--check-only` 执行真实容器/工具/采集启动验收。
+- 在线产物采用本地有界 spool、单请求 token ledger、异步 NAS 分片发布；用 `capture-recover RUN` 恢复上传，不重复 rollout。
+  详见 [在线采集与存储](docs/online-capture-fullgraph.md) 和 [修复计划](docs/rollout-capture-steering-repair-plan-20261018.md)。
 - 正式对比可用 `baseline-select PROFILE TASK_KEY ROLLOUT_ID` 显式固定每个 task 的 baseline。已有 profile 不自动改选成功样本。
 
 ## 数据到位后的命令

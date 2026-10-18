@@ -10,7 +10,7 @@ from pathlib import Path
 from baseline.catalog import Catalog
 from baseline.importers.legacy import import_rollout
 from core.config import load_snapshot, snapshot
-from core.io import identifier, now, read_json, update_status, write_json
+from core.io import identifier, now, read_json, sha256, update_status, write_json
 from core.locking import exclusive_run, file_lock
 
 TERMINAL = {
@@ -34,7 +34,8 @@ INFRASTRUCTURE = {
 }
 
 
-def run_task(cfg, run_id, task_key, task, factory):
+def run_task(cfg, run_id, task_key, task, factory, runtime=None):
+    runtime = runtime or {}
     os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
     from baseline.rollout.agent import DurableAgent
     from baseline.rollout.model import make_model
@@ -68,37 +69,52 @@ def run_task(cfg, run_id, task_key, task, factory):
             env = agent = None
             capture_client = None
             capture_session_id = None
+            capture_errors = []
+            capture_status = "disabled"
+
+            def capture_failure(exc, *, abort=True):
+                capture_errors.append(repr(exc))
+                write_json(out / "capture-errors.json", capture_errors)
+                if abort and cfg["capture"]["failure_policy"] == "block_rollout":
+                    from runtime.serving.errors import CaptureError
+
+                    raise CaptureError(str(exc)) from exc
+
             status, patch, error, started = "Interrupted", "", None, now()
             try:
                 env = RolloutEnvironment(factory, task["instance"], ctx)
                 capture_context = None
                 if cfg.get("capture", {}).get("enabled"):
-                    control_url = cfg.get("capture_control_url")
-                    if not control_url:
-                        raise RuntimeError("capture control plane is not available")
-                    capture_context = capture_request_metadata(
-                        f"cap-{run_id}-{iid}-{attempt_id}",
-                        iid,
-                        run_id,
-                        f"pending-{iid}-{attempt_id}",
-                        0,
-                        cfg["capture"]["anchors"],
-                        newline_token_ids=cfg.get("capture_token_inventory", {}).get(
-                            "newline_token_ids", [198, 271, 1358]
-                        ),
-                        close_token_ids=cfg.get("capture_token_inventory", {}).get(
-                            "close_token_ids", [248069]
-                        ),
-                        tokenizer_fingerprint=cfg.get("capture_token_inventory", {}).get(
-                            "tokenizer_fingerprint"
-                        ),
-                        newline_policy=cfg["capture"].get("newline_policy", "all"),
-                    )
-                    capture_client = CaptureClient(control_url)
-                    capture_session_id = capture_context["session_id"]
-                    capture_client.start(capture_context, graph_mode="FULL", prefix_cache_policy="safe_boundary")
+                    capture_context = False
+                    capture_status = "collecting"
+                    try:
+                        inventory = runtime["capture_token_inventory"]
+                        capture_context = capture_request_metadata(
+                            f"cap-{run_id}-{iid}-{attempt_id}",
+                            iid,
+                            run_id,
+                            f"pending-{iid}-{attempt_id}",
+                            0,
+                            cfg["capture"]["anchors"],
+                            newline_token_ids=inventory["newline_token_ids"],
+                            close_token_ids=inventory["close_token_ids"],
+                            tokenizer_fingerprint=inventory["tokenizer_fingerprint"],
+                            newline_policy=cfg["capture"]["newline_policy"],
+                            capture_select=inventory["capture_select"],
+                        )
+                        capture_client = CaptureClient(
+                            runtime["capture_control_url"], timeout=cfg["capture"]["control_seconds"]
+                        )
+                        capture_session_id = capture_context["session_id"]
+                        capture_client.start(
+                            capture_context, graph_mode="FULL", prefix_cache_policy="safe_boundary"
+                        )
+                    except Exception as exc:
+                        capture_context = False
+                        capture_status = "failed"
+                        capture_failure(exc)
                 agent = DurableAgent(
-                    make_model(cfg, factory.deadline, capture_context),
+                    make_model(cfg, factory.deadline, capture_context, runtime),
                     env,
                     system_template=cfg["agent"]["system_template"],
                     instance_template=cfg["agent"]["instance_template"],
@@ -110,6 +126,8 @@ def run_task(cfg, run_id, task_key, task, factory):
                 info = agent.run(task["instance"]["problem_statement"])
                 status, patch = info.get("exit_status", "Unknown"), info.get("submission", "")
             except Exception as exc:  # noqa: BLE001 -- persist and classify a worker failure
+                if agent is not None and getattr(exc, "response_message", None) is not None:
+                    agent.messages.append(exc.response_message)
                 status = type(exc).__name__
                 error = {"error": str(exc), "traceback": traceback.format_exc()}
             finally:
@@ -139,9 +157,25 @@ def run_task(cfg, run_id, task_key, task, factory):
                 finally:
                     if capture_client is not None and capture_session_id is not None:
                         try:
+                            import requests
+
+                            endpoint = cfg["serving"]["base_url"].removesuffix("/v1").rstrip("/")
+                            flushed = requests.post(
+                                endpoint + "/dycon/capture/engine/flush",
+                                timeout=cfg["capture"]["finalize_seconds"],
+                            )
+                            flushed.raise_for_status()
+                            if flushed.json().get("failures"):
+                                raise RuntimeError(f"Capture drain failed: {flushed.json()['failures']}")
+                            # Stop only this session, after native rows have been drained.
+                            capture_client.timeout = (
+                                cfg["capture"]["finalize_seconds"] + cfg["capture"]["control_seconds"]
+                            )
                             capture_client.stop(capture_session_id)
-                        except Exception:
-                            pass
+                            capture_client.prepare(capture_session_id, path)
+                        except Exception as exc:
+                            capture_failure(exc, abort=False)
+                            capture_status = "partial"
                     if env is not None:
                         env.close()
             rid = import_rollout(
@@ -155,15 +189,40 @@ def run_task(cfg, run_id, task_key, task, factory):
                     "model_fingerprint": cfg["model"]["fingerprint"],
                 },
             )
+            if capture_client is not None and capture_session_id is not None:
+                canonical = root / Catalog(root).read()["rollouts"][rid]["trajectory_path"]
+                try:
+                    capture_client.timeout = (
+                        cfg["capture"]["export"]["upload_max_elapsed_seconds"]
+                        + cfg["capture"]["finalize_seconds"]
+                    )
+                    finalized = capture_client.finalize(
+                        capture_session_id,
+                        rollout_id=rid,
+                        trajectory_path=str(canonical),
+                        trajectory_sha256=sha256(canonical),
+                        model_fingerprint=cfg["model"]["fingerprint"],
+                    )
+                    capture_status = finalized["capture_status"]
+                    if capture_status not in {"complete", "not_exported"}:
+                        capture_failure(RuntimeError("Capture is " + capture_status), abort=False)
+                except Exception as exc:
+                    capture_status = "partial"
+                    capture_failure(exc, abort=False)
             path.unlink()  # canonical bytes now live under baseline/ only
             result = {
                 "instance_id": iid,
                 "rollout_id": rid,
                 "attempt_id": attempt_id,
-                "exit_status": status,
+                "exit_status": "CaptureError"
+                if capture_errors and cfg["capture"]["failure_policy"] == "block_rollout"
+                else status,
+                "agent_exit_status": status,
                 "started_at": started,
                 "finished_at": now(),
                 "error": error,
+                "capture_status": capture_status,
+                "capture_errors": capture_errors,
             }
             write_json(out / "attempt.json", result)
             write_json(work / "result.json", result)
@@ -175,7 +234,7 @@ def run_task(cfg, run_id, task_key, task, factory):
 
 
 @exclusive_run
-def run_manifest(cfg, run_id, resume=False, factory=None):
+def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), unrolled=False, check_only=False):
     # Prevent mini-swe-agent from loading the user's unrelated global .env.
     os.environ["MSWEA_GLOBAL_CONFIG_DIR"] = str(Path(cfg["project_root"]) / "state/miniswe-config")
     os.environ["MSWEA_SILENT_STARTUP"] = "1"
@@ -193,28 +252,39 @@ def run_manifest(cfg, run_id, resume=False, factory=None):
         cfg = load_snapshot(root, run_id)
         selection = cfg["selection"]
     else:
-        selection = Catalog(root).select_tasks(partition=cfg["benchmark"]["partition"])
+        selection = Catalog(root).select_tasks(
+            partition=cfg["benchmark"]["partition"], task_ids=task_ids, unrolled=unrolled
+        )
         if not selection["task_keys"]:
             raise ValueError("Baseline task scope is empty")
         verify_model(cfg)
         snapshot(cfg, run_id, selection)
         cfg = load_snapshot(root, run_id)
+    from core.config import assert_frozen
+
+    assert_frozen(cfg)
     verify_model(cfg)
     run = root / "runs" / run_id
+    write_json(run / "process.json", {"pid": os.getpid(), "supervisor_pid": os.getppid()})
     factory = factory or ContainerFactory(cfg)
     outcomes = {}
     update_status(run / "status.json", "rollout")
     try:
         factory.lock_images([t["instance"] for t in selection["tasks"].values()])
         with ServingManager(cfg, run / "serving") as serving:
-            if cfg.get("capture", {}).get("enabled"):
-                cfg["capture_control_url"] = serving.capture_server.base_url
-                cfg["capture_token_inventory"] = serving.capture_token_inventory
+            runtime = getattr(serving, "runtime", {})
+            runtime["validation_mixed"] = check_only
+            from runtime.serving.startup import check_tool_chain
+
+            check_tool_chain(cfg, run_id, next(iter(selection["tasks"].values())), factory, runtime)
+            if check_only:
+                update_status(run / "status.json", "validated")
+                return {"startup": "passed"}
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=cfg["execution"]["rollout_workers"]
             ) as pool:
                 futures = {
-                    pool.submit(run_task, cfg, run_id, key, task, factory): key
+                    pool.submit(admitted_task, cfg, run_id, key, task, factory, runtime): key
                     for key, task in selection["tasks"].items()
                 }
                 for future in concurrent.futures.as_completed(futures):
@@ -224,6 +294,26 @@ def run_manifest(cfg, run_id, resume=False, factory=None):
                     except Exception as exc:  # noqa: BLE001 -- retain cohort progress on worker errors
                         outcomes[key] = {"exit_status": "WorkerFailure", "error": repr(exc)}
                     write_json(run / "progress.json", outcomes)
+        if cfg["capture"]["enabled"] and cfg["capture"]["export"]["enabled"]:
+            from enrichment.online_trace import finalize_token_events
+
+            source = Path(cfg["paths"]["nas_root"]) / cfg["capture"]["export"]["root"] / run_id
+            target = root / "enrichment/outputs" / run_id
+            if not target.exists() and (source / "requests").exists():
+                try:
+                    inventory = read_json(source / "inventory.json")
+                    finalize_token_events(
+                        source,
+                        target,
+                        open_ids=inventory.get("open_token_ids", [248068]),
+                        close_ids=inventory["close_token_ids"],
+                    )
+                except Exception as exc:
+                    write_json(run / "capture-finalization-error.json", {"error": repr(exc)})
+                    if cfg["capture"]["failure_policy"] == "block_rollout":
+                        from runtime.serving.errors import CaptureError
+
+                        raise CaptureError(str(exc)) from exc
         failed = [k for k, v in outcomes.items() if v["exit_status"] not in TERMINAL]
         update_status(run / "status.json", "failed" if failed else "complete", failed=failed)
         return outcomes
@@ -232,3 +322,15 @@ def run_manifest(cfg, run_id, resume=False, factory=None):
         raise
     finally:
         factory.cleanup_owned(run_id)
+
+
+def admitted_task(cfg, run_id, key, task, factory, runtime):
+    controller = runtime.get("capture_controller")
+    if controller and controller.spool:
+        options = cfg["capture"]["export"]
+        controller.spool.budget.admit(
+            options["spool_high_watermark"],
+            options["spool_low_watermark"],
+            options["upload_max_elapsed_seconds"],
+        )
+    return run_task(cfg, run_id, key, task, factory, runtime)

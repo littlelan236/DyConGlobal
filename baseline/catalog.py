@@ -141,6 +141,7 @@ class Catalog:
                 else data["tasks"][r["task_key"]]["partition"] == partition
             )
             and (not purposes or set(purposes).intersection(r["purposes"]))
+            and not r["provenance"].get("quarantined")
             and (profile is None or data["baseline_selections"][profile].get(r["task_key"]) == rid)
         ]
         return {
@@ -151,12 +152,18 @@ class Catalog:
             "rollouts": {rid: copy.deepcopy(data["rollouts"][rid]) for rid in ids},
         }
 
-    def select_tasks(self, *, partition=None):
+    def select_tasks(self, *, partition=None, task_ids=(), unrolled=False):
         data = self.read()
+        seen = {r["task_key"] for r in data["rollouts"].values() if not r["provenance"].get("quarantined")}
+        requested = set(task_ids)
+        if requested - {t["instance_id"] for t in data["tasks"].values()}:
+            raise ValueError("Unknown requested task IDs")
         tasks = {
             key: copy.deepcopy(task)
             for key, task in data["tasks"].items()
             if (task["partition"] != "excluded" if partition is None else task["partition"] == partition)
+            and (not requested or task["instance_id"] in requested)
+            and (not unrolled or key not in seen)
         }
         return {
             "catalog_revision": data["catalog_revision"],
@@ -164,6 +171,15 @@ class Catalog:
             "task_keys": sorted(tasks),
             "tasks": tasks,
         }
+
+    def quarantine_runs(self, run_ids, reason):
+        changed = []
+        with self.transaction() as data:
+            for rid, row in data["rollouts"].items():
+                if row["run_id"] in set(run_ids):
+                    row["provenance"].update(quarantined=True, quarantine_reason=reason)
+                    changed.append(rid)
+        return sorted(changed)
 
     def verify(self):
         data = self.read()

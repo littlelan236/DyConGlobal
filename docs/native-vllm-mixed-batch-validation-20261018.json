@@ -1,0 +1,1370 @@
+{
+  "upstream_record_python_files_checked": 2681,
+  "upstream_record_mismatches": 0,
+  "cases": [
+    {
+      "name": "native-dispatch-20261018-094024-pinned-auto",
+      "passed": true,
+      "vllm_version": "0.29.0",
+      "vllm_path": "/home/wangtianyi/DyConGlobal/.venvs/easysteer/lib/python3.12/site-packages/vllm",
+      "model_runner_sha256": "c2882744d2f14a301d0d570bd6bcbf7590ca4b66f4875e1e9d3bb99b1b9479ae",
+      "args": {
+        "model": "/VM/wangtianyi/DyConGlobal/models/Qwen3.5-9B",
+        "gpus": "4",
+        "runtime_root": null,
+        "graph_mode": "AUTO",
+        "output": "/home/wangtianyi/DyConGlobal/state/native-dispatch-20261018-094024-pinned-auto",
+        "preflight": false
+      },
+      "workers": [
+        {
+          "runner": "GPUModelRunner",
+          "compiled_modules": [
+            "language_model.model"
+          ],
+          "resolved_graph_mode": "FULL_AND_PIECEWISE",
+          "compilation_mode": "VLLM_COMPILE"
+        }
+      ],
+      "runs": [
+        {
+          "name": "cold",
+          "counts": [
+            {
+              "prefill:PIECEWISE": 1,
+              "mixed:PIECEWISE": 5,
+              "decode:FULL": 31,
+              "unknown:unknown": 1
+            }
+          ],
+          "cached_tokens": [
+            0,
+            0
+          ],
+          "mixed_batches": [
+            {
+              "scheduled": {
+                "0-916943b1": 1,
+                "1-8a12fca9": 511
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-916943b1",
+                "1-8a12fca9"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                511
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 512
+            },
+            {
+              "scheduled": {
+                "0-916943b1": 1,
+                "1-8a12fca9": 17
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-916943b1",
+                "1-8a12fca9"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                17
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 32
+            },
+            {
+              "scheduled": {
+                "0-916943b1": 1,
+                "1-8a12fca9": 511
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-916943b1",
+                "1-8a12fca9"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                511
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 512
+            },
+            {
+              "scheduled": {
+                "0-916943b1": 1,
+                "1-8a12fca9": 17
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-916943b1",
+                "1-8a12fca9"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                17
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 32
+            },
+            {
+              "scheduled": {
+                "0-916943b1": 1,
+                "1-8a12fca9": 409
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-916943b1",
+                "1-8a12fca9"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                409
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 512
+            }
+          ]
+        },
+        {
+          "name": "warm",
+          "counts": [
+            {
+              "prefill:PIECEWISE": 1,
+              "mixed:PIECEWISE": 1,
+              "decode:FULL": 31,
+              "unknown:unknown": 1
+            }
+          ],
+          "cached_tokens": [
+            0,
+            1056
+          ],
+          "mixed_batches": [
+            {
+              "scheduled": {
+                "2-a9f04215": 1,
+                "3-b166d6a5": 409
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "2-a9f04215",
+                "3-b166d6a5"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                409
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 512
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "native-dispatch-20261018-094024-pinned-decode-only",
+      "passed": true,
+      "vllm_version": "0.29.0",
+      "vllm_path": "/home/wangtianyi/DyConGlobal/.venvs/easysteer/lib/python3.12/site-packages/vllm",
+      "model_runner_sha256": "c2882744d2f14a301d0d570bd6bcbf7590ca4b66f4875e1e9d3bb99b1b9479ae",
+      "args": {
+        "model": "/VM/wangtianyi/DyConGlobal/models/Qwen3.5-9B",
+        "gpus": "5",
+        "runtime_root": null,
+        "graph_mode": "FULL_DECODE_ONLY",
+        "output": "/home/wangtianyi/DyConGlobal/state/native-dispatch-20261018-094024-pinned-decode-only",
+        "preflight": false
+      },
+      "workers": [
+        {
+          "runner": "GPUModelRunner",
+          "compiled_modules": [
+            "language_model.model"
+          ],
+          "resolved_graph_mode": "FULL_DECODE_ONLY",
+          "compilation_mode": "VLLM_COMPILE"
+        }
+      ],
+      "runs": [
+        {
+          "name": "cold",
+          "counts": [
+            {
+              "prefill:NONE": 1,
+              "mixed:NONE": 5,
+              "decode:FULL": 31,
+              "unknown:unknown": 1
+            }
+          ],
+          "cached_tokens": [
+            0,
+            0
+          ],
+          "mixed_batches": [
+            {
+              "scheduled": {
+                "0-8e65793b": 1,
+                "1-82c2bc63": 511
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "NONE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-8e65793b",
+                "1-82c2bc63"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                511
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "NONE",
+              "need_eager": false,
+              "padded_tokens": 512
+            },
+            {
+              "scheduled": {
+                "0-8e65793b": 1,
+                "1-82c2bc63": 17
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "NONE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-8e65793b",
+                "1-82c2bc63"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                17
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "NONE",
+              "need_eager": false,
+              "padded_tokens": 18
+            },
+            {
+              "scheduled": {
+                "0-8e65793b": 1,
+                "1-82c2bc63": 511
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "NONE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-8e65793b",
+                "1-82c2bc63"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                511
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "NONE",
+              "need_eager": false,
+              "padded_tokens": 512
+            },
+            {
+              "scheduled": {
+                "0-8e65793b": 1,
+                "1-82c2bc63": 17
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "NONE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-8e65793b",
+                "1-82c2bc63"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                17
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "NONE",
+              "need_eager": false,
+              "padded_tokens": 18
+            },
+            {
+              "scheduled": {
+                "0-8e65793b": 1,
+                "1-82c2bc63": 409
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "NONE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-8e65793b",
+                "1-82c2bc63"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                409
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "NONE",
+              "need_eager": false,
+              "padded_tokens": 410
+            }
+          ]
+        },
+        {
+          "name": "warm",
+          "counts": [
+            {
+              "prefill:NONE": 1,
+              "mixed:NONE": 1,
+              "decode:FULL": 31,
+              "unknown:unknown": 1
+            }
+          ],
+          "cached_tokens": [
+            0,
+            1056
+          ],
+          "mixed_batches": [
+            {
+              "scheduled": {
+                "2-8eba2d08": 1,
+                "3-9463a3bf": 409
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "NONE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "2-8eba2d08",
+                "3-9463a3bf"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                409
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "NONE",
+              "need_eager": false,
+              "padded_tokens": 410
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "native-dispatch-20261018-094024-upstream-dense",
+      "passed": true,
+      "vllm_version": "0.30.0",
+      "vllm_path": "/home/wangtianyi/.cache/uv/archive-v0/FFydlu_RpDnA032n/vllm",
+      "model_runner_sha256": "174c93db921c23cf0396eee4764be25b2bd2d4b6a06e9fa41ce3598b884ce8ce",
+      "args": {
+        "model": "/VM/share/Qwen3-8B",
+        "gpus": "7",
+        "runtime_root": "/home/wangtianyi/.cache/uv/archive-v0/FFydlu_RpDnA032n",
+        "graph_mode": "FULL",
+        "output": "/home/wangtianyi/DyConGlobal/state/native-dispatch-20261018-094024-upstream-dense",
+        "preflight": false
+      },
+      "workers": [
+        {
+          "runner": "GPUModelRunner",
+          "compiled_modules": [
+            "model"
+          ],
+          "resolved_graph_mode": "FULL_AND_PIECEWISE",
+          "compilation_mode": "VLLM_COMPILE"
+        }
+      ],
+      "runs": [
+        {
+          "name": "cold",
+          "counts": [
+            {
+              "prefill:PIECEWISE": 1,
+              "mixed:PIECEWISE": 3,
+              "decode:FULL": 31,
+              "unknown:unknown": 1
+            }
+          ],
+          "cached_tokens": [
+            0,
+            0
+          ],
+          "mixed_batches": [
+            {
+              "scheduled": {
+                "0-98405f18": 1,
+                "1-a7aec3d7": 511
+              },
+              "compiled_calls": [
+                "model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-98405f18",
+                "1-a7aec3d7"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                511
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 512
+            },
+            {
+              "scheduled": {
+                "0-98405f18": 1,
+                "1-a7aec3d7": 511
+              },
+              "compiled_calls": [
+                "model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-98405f18",
+                "1-a7aec3d7"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                511
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 512
+            },
+            {
+              "scheduled": {
+                "0-98405f18": 1,
+                "1-a7aec3d7": 442
+              },
+              "compiled_calls": [
+                "model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-98405f18",
+                "1-a7aec3d7"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                442
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 512
+            }
+          ]
+        },
+        {
+          "name": "warm",
+          "counts": [
+            {
+              "prefill:PIECEWISE": 1,
+              "mixed:PIECEWISE": 1,
+              "decode:FULL": 31,
+              "unknown:unknown": 1
+            }
+          ],
+          "cached_tokens": [
+            16,
+            1456
+          ],
+          "mixed_batches": [
+            {
+              "scheduled": {
+                "2-bb9aed54": 1,
+                "3-975db838": 8
+              },
+              "compiled_calls": [
+                "model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "2-bb9aed54",
+                "3-975db838"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                8
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 16
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "native-dispatch-20261018-094024-upstream-qwen-gdn",
+      "passed": true,
+      "vllm_version": "0.30.0",
+      "vllm_path": "/home/wangtianyi/.cache/uv/archive-v0/FFydlu_RpDnA032n/vllm",
+      "model_runner_sha256": "174c93db921c23cf0396eee4764be25b2bd2d4b6a06e9fa41ce3598b884ce8ce",
+      "args": {
+        "model": "/VM/wangtianyi/DyConGlobal/models/Qwen3.5-9B",
+        "gpus": "6",
+        "runtime_root": "/home/wangtianyi/.cache/uv/archive-v0/FFydlu_RpDnA032n",
+        "graph_mode": "FULL",
+        "output": "/home/wangtianyi/DyConGlobal/state/native-dispatch-20261018-094024-upstream-qwen-gdn",
+        "preflight": false
+      },
+      "workers": [
+        {
+          "runner": "GPUModelRunner",
+          "compiled_modules": [
+            "language_model.model"
+          ],
+          "resolved_graph_mode": "FULL_AND_PIECEWISE",
+          "compilation_mode": "VLLM_COMPILE"
+        }
+      ],
+      "runs": [
+        {
+          "name": "cold",
+          "counts": [
+            {
+              "prefill:PIECEWISE": 1,
+              "mixed:PIECEWISE": 5,
+              "decode:FULL": 31,
+              "unknown:unknown": 1
+            }
+          ],
+          "cached_tokens": [
+            0,
+            0
+          ],
+          "mixed_batches": [
+            {
+              "scheduled": {
+                "0-8a5849f5": 1,
+                "1-b8e8aca8": 511
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-8a5849f5",
+                "1-b8e8aca8"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                511
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 512
+            },
+            {
+              "scheduled": {
+                "0-8a5849f5": 1,
+                "1-b8e8aca8": 17
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-8a5849f5",
+                "1-b8e8aca8"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                17
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 32
+            },
+            {
+              "scheduled": {
+                "0-8a5849f5": 1,
+                "1-b8e8aca8": 511
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-8a5849f5",
+                "1-b8e8aca8"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                511
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 512
+            },
+            {
+              "scheduled": {
+                "0-8a5849f5": 1,
+                "1-b8e8aca8": 17
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-8a5849f5",
+                "1-b8e8aca8"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                17
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 32
+            },
+            {
+              "scheduled": {
+                "0-8a5849f5": 1,
+                "1-b8e8aca8": 409
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-8a5849f5",
+                "1-b8e8aca8"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                409
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 512
+            }
+          ]
+        },
+        {
+          "name": "warm",
+          "counts": [
+            {
+              "prefill:PIECEWISE": 1,
+              "mixed:PIECEWISE": 1,
+              "decode:FULL": 31,
+              "unknown:unknown": 1
+            }
+          ],
+          "cached_tokens": [
+            0,
+            1056
+          ],
+          "mixed_batches": [
+            {
+              "scheduled": {
+                "2-8e63a461": 1,
+                "3-a4c165bd": 409
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "2-8e63a461",
+                "3-a4c165bd"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                409
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 512
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "native-dispatch-20261018-094339-upstream-dense-triton",
+      "passed": true,
+      "vllm_version": "0.30.0",
+      "vllm_path": "/home/wangtianyi/.cache/uv/archive-v0/FFydlu_RpDnA032n/vllm",
+      "model_runner_sha256": "174c93db921c23cf0396eee4764be25b2bd2d4b6a06e9fa41ce3598b884ce8ce",
+      "args": {
+        "model": "/VM/share/Qwen3-8B",
+        "gpus": "7",
+        "runtime_root": "/home/wangtianyi/.cache/uv/archive-v0/FFydlu_RpDnA032n",
+        "attention_backend": "TRITON_ATTN",
+        "graph_mode": "FULL",
+        "output": "/home/wangtianyi/DyConGlobal/state/native-dispatch-20261018-094339-upstream-dense-triton",
+        "preflight": false
+      },
+      "workers": [
+        {
+          "runner": "GPUModelRunner",
+          "compiled_modules": [
+            "model"
+          ],
+          "resolved_graph_mode": "FULL",
+          "compilation_mode": "VLLM_COMPILE"
+        }
+      ],
+      "runs": [
+        {
+          "name": "cold",
+          "counts": [
+            {
+              "prefill:FULL": 1,
+              "mixed:FULL": 3,
+              "decode:FULL": 31,
+              "unknown:unknown": 1
+            }
+          ],
+          "cached_tokens": [
+            0,
+            0
+          ],
+          "mixed_batches": [
+            {
+              "scheduled": {
+                "0-9aa06912": 1,
+                "1-bcc3782c": 511
+              },
+              "compiled_calls": [],
+              "forward_contexts": [],
+              "req_ids": [
+                "0-9aa06912",
+                "1-bcc3782c"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                511
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "FULL",
+              "need_eager": false,
+              "padded_tokens": 512
+            },
+            {
+              "scheduled": {
+                "0-9aa06912": 1,
+                "1-bcc3782c": 511
+              },
+              "compiled_calls": [],
+              "forward_contexts": [],
+              "req_ids": [
+                "0-9aa06912",
+                "1-bcc3782c"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                511
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "FULL",
+              "need_eager": false,
+              "padded_tokens": 512
+            },
+            {
+              "scheduled": {
+                "0-9aa06912": 1,
+                "1-bcc3782c": 442
+              },
+              "compiled_calls": [],
+              "forward_contexts": [],
+              "req_ids": [
+                "0-9aa06912",
+                "1-bcc3782c"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                442
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "FULL",
+              "need_eager": false,
+              "padded_tokens": 512
+            }
+          ]
+        },
+        {
+          "name": "warm",
+          "counts": [
+            {
+              "prefill:FULL": 1,
+              "mixed:FULL": 1,
+              "decode:FULL": 31,
+              "unknown:unknown": 1
+            }
+          ],
+          "cached_tokens": [
+            16,
+            1456
+          ],
+          "mixed_batches": [
+            {
+              "scheduled": {
+                "2-8e46f946": 1,
+                "3-96b6353f": 8
+              },
+              "compiled_calls": [],
+              "forward_contexts": [],
+              "req_ids": [
+                "2-8e46f946",
+                "3-96b6353f"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                8
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "FULL",
+              "need_eager": false,
+              "padded_tokens": 16
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "native-dispatch-20261018-094339-upstream-gdn-triton",
+      "passed": true,
+      "vllm_version": "0.30.0",
+      "vllm_path": "/home/wangtianyi/.cache/uv/archive-v0/FFydlu_RpDnA032n/vllm",
+      "model_runner_sha256": "174c93db921c23cf0396eee4764be25b2bd2d4b6a06e9fa41ce3598b884ce8ce",
+      "args": {
+        "model": "/VM/wangtianyi/DyConGlobal/models/Qwen3.5-9B",
+        "gpus": "6",
+        "runtime_root": "/home/wangtianyi/.cache/uv/archive-v0/FFydlu_RpDnA032n",
+        "attention_backend": "TRITON_ATTN",
+        "graph_mode": "FULL",
+        "output": "/home/wangtianyi/DyConGlobal/state/native-dispatch-20261018-094339-upstream-gdn-triton",
+        "preflight": false
+      },
+      "workers": [
+        {
+          "runner": "GPUModelRunner",
+          "compiled_modules": [
+            "language_model.model"
+          ],
+          "resolved_graph_mode": "FULL_AND_PIECEWISE",
+          "compilation_mode": "VLLM_COMPILE"
+        }
+      ],
+      "runs": [
+        {
+          "name": "cold",
+          "counts": [
+            {
+              "prefill:PIECEWISE": 1,
+              "mixed:PIECEWISE": 5,
+              "decode:FULL": 31,
+              "unknown:unknown": 1
+            }
+          ],
+          "cached_tokens": [
+            0,
+            0
+          ],
+          "mixed_batches": [
+            {
+              "scheduled": {
+                "0-905f859e": 1,
+                "1-ad6187d9": 511
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-905f859e",
+                "1-ad6187d9"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                511
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 512
+            },
+            {
+              "scheduled": {
+                "0-905f859e": 1,
+                "1-ad6187d9": 17
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-905f859e",
+                "1-ad6187d9"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                17
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 32
+            },
+            {
+              "scheduled": {
+                "0-905f859e": 1,
+                "1-ad6187d9": 511
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-905f859e",
+                "1-ad6187d9"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                511
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 512
+            },
+            {
+              "scheduled": {
+                "0-905f859e": 1,
+                "1-ad6187d9": 17
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-905f859e",
+                "1-ad6187d9"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                17
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 32
+            },
+            {
+              "scheduled": {
+                "0-905f859e": 1,
+                "1-ad6187d9": 409
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "0-905f859e",
+                "1-ad6187d9"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                409
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 512
+            }
+          ]
+        },
+        {
+          "name": "warm",
+          "counts": [
+            {
+              "prefill:PIECEWISE": 1,
+              "mixed:PIECEWISE": 1,
+              "decode:FULL": 31,
+              "unknown:unknown": 1
+            }
+          ],
+          "cached_tokens": [
+            0,
+            1056
+          ],
+          "mixed_batches": [
+            {
+              "scheduled": {
+                "2-a0d0ea26": 1,
+                "3-861c7155": 409
+              },
+              "compiled_calls": [
+                "language_model.model"
+              ],
+              "forward_contexts": [
+                {
+                  "cg_mode": "PIECEWISE",
+                  "skip_compiled": false
+                }
+              ],
+              "req_ids": [
+                "2-a0d0ea26",
+                "3-861c7155"
+              ],
+              "is_prefilling": [
+                false,
+                true
+              ],
+              "query_lengths": [
+                1,
+                409
+              ],
+              "uniform_token_count": null,
+              "batch_kind": "mixed",
+              "cg_mode": "PIECEWISE",
+              "need_eager": false,
+              "padded_tokens": 512
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

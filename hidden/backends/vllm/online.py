@@ -1,4 +1,5 @@
 """Small client/helpers for wiring rollout requests to the managed capture plane."""
+
 from __future__ import annotations
 
 from typing import Any, Mapping
@@ -41,9 +42,10 @@ def tokenizer_newline_inventory(tokenizer, *, policy="all"):
     """
     if policy not in {"all", "double_only"}:
         raise ValueError("unknown newline policy")
-    size = getattr(tokenizer, "vocab_size", None)
-    if size is None:
+    try:
         size = len(tokenizer)
+    except TypeError:
+        size = tokenizer.vocab_size
     ids = []
     texts = {}
     for token_id in range(size):
@@ -87,7 +89,9 @@ def capture_request_metadata(
     if any(x < 0 for x in [*newline_token_ids, *close_token_ids]):
         raise ValueError("capture token IDs must be nonnegative")
     selector = capture_select or build_capture_select(
-        newline_token_ids, close_token_ids, include_open="think_open" in anchors
+        newline_token_ids if "reasoning_newline" in anchors else [],
+        close_token_ids if "think_close" in anchors else [],
+        include_open="think_open" in anchors,
     )
     return {
         "session_id": session_id,
@@ -126,14 +130,38 @@ class CaptureClient:
         return self._request("POST", "/dycon/capture/session/start", {"metadata": dict(metadata), **options})
 
     def bind(self, request_id: str, metadata: Mapping[str, Any]):
-        return self._request("POST", "/dycon/capture/request/bind", {"request_id": request_id, "metadata": dict(metadata)})
+        return self._request(
+            "POST", "/dycon/capture/request/bind", {"request_id": request_id, "metadata": dict(metadata)}
+        )
 
     def status(self, session_id: str | None = None):
-        path = "/dycon/capture/status" if session_id is None else f"/dycon/capture/session/{session_id}/status"
+        path = (
+            "/dycon/capture/status" if session_id is None else f"/dycon/capture/session/{session_id}/status"
+        )
         return self._request("GET", path)
 
     def stop(self, session_id: str):
         return self._request("POST", f"/dycon/capture/session/{session_id}/stop", {})
+
+    def wait_output(self, session_id, step_id, response_id):
+        return self._request(
+            "POST",
+            "/dycon/capture/request/wait-output",
+            {
+                "session_id": session_id,
+                "step_id": step_id,
+                "response_id": response_id,
+                "timeout": min(20, self.timeout - 1),
+            },
+        )
+
+    def finalize(self, session_id, **metadata):
+        return self._request("POST", f"/dycon/capture/session/{session_id}/finalize", metadata)
+
+    def prepare(self, session_id, trajectory_path):
+        return self._request(
+            "POST", f"/dycon/capture/session/{session_id}/prepare", {"trajectory_path": str(trajectory_path)}
+        )
 
     def submit_staged(self, staging_root, request_id: str, tensors: Mapping[str, Any], **metadata):
         """Submit tensor bytes through a shared staging file.
@@ -160,7 +188,7 @@ class CaptureClient:
                 if hasattr(value, "detach"):
                     value = value.detach().to(device="cpu", copy=True).numpy()
                 arrays[str(key)] = np.asarray(value)
-            np.savez_compressed(path, **arrays)
+            np.savez(path, **arrays)
             return self._request(
                 "POST",
                 "/dycon/capture/sample-file",
@@ -181,7 +209,17 @@ def classify_capture_anchor(position, token_id, prompt_length, newline_token_ids
     return None
 
 
-def publish_capture_result(result, rows, client: CaptureClient, staging_root, *, newline_token_ids=(), close_token_ids=(), graph_replays=0, cache_hit_tokens=0):
+def publish_capture_result(
+    result,
+    rows,
+    client: CaptureClient,
+    staging_root,
+    *,
+    newline_token_ids=(),
+    close_token_ids=(),
+    graph_replays=0,
+    cache_hit_tokens=0,
+):
     """Publish a native ``CaptureResult`` while preserving row coordinates.
 
     ``result`` is produced by the pinned EasySteer fetch/assembly code.  The
@@ -199,8 +237,7 @@ def publish_capture_result(result, rows, client: CaptureClient, staging_root, *,
             if anchor is None:
                 continue
             tensors = {
-                f"layer_{layer}": result.sample_rows(index, layer)[row_number]
-                for layer in result.layers
+                f"layer_{layer}": result.sample_rows(index, layer)[row_number] for layer in result.layers
             }
             published.append(
                 client.submit_staged(

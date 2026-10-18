@@ -8,6 +8,7 @@ import numpy as np
 
 from core.io import artifact_dir, read_json
 from difficulty.models.estimators import build_estimator, inverse_target, transform_target
+from hidden.artifacts import read_arrays
 
 TARGETS = {
     "remaining_reasoning_tokens_log1p": "remaining_reasoning_tokens",
@@ -21,6 +22,24 @@ def load_training_data(cfg, index_id, target, split="all"):
         raise ValueError(f"Unknown target: {target}")
     idx_path = artifact_dir(cfg, "difficulty", index_id, "datasets") / "index.json"
     idx = read_json(idx_path)
+    if idx["schema_version"] == 3:
+        selected = [
+            r
+            for r in idx["samples"]
+            if (split == "all" or r["partition"] == split) and r["labels"][TARGETS[target]] is not None
+        ]
+        if not selected:
+            raise ValueError("No resolved, uncensored labeled hidden samples in requested task partition")
+        features = []
+        for row in selected:
+            arrays = read_arrays(idx["hidden_root"], row)
+            names = sorted(arrays, key=lambda key: int(key.removeprefix("layer_")))
+            features.append(np.stack([arrays[key] for key in names]))
+        return (
+            np.stack(features),
+            transform_target(np.array([r["labels"][TARGETS[target]] for r in selected]), target),
+            [r["sample_id"] for r in selected],
+        )
     source = artifact_dir(cfg, "enrichment", idx["dataset_id"])
     labels = {}
     for name in {r["label_shard"] for r in idx["samples"]}:
@@ -31,8 +50,9 @@ def load_training_data(cfg, index_id, target, split="all"):
         value = row["labels"][TARGETS[target]]
         if value is None:
             continue
-        with np.load(artifact_dir(cfg, "hidden", idx["capture_id"], "outputs") / item["hidden_path"]) as f:
-            hidden = f["hidden"]
+        hidden = read_arrays(
+            artifact_dir(cfg, "hidden", idx["capture_id"], "outputs"), {"path": item["hidden_path"]}
+        )["hidden"]
         rows.append(
             {
                 "sample_id": item["sample_id"],

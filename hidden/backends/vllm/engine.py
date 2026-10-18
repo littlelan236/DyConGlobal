@@ -16,21 +16,19 @@ def serving_interpreter(cfg):
     Read the same authoritative config/overrides without changing legacy
     serving resolution or snapshot hashes.
     """
-    import yaml
-
-    from core.config import UniqueLoader
-
-    raw = yaml.load(Path(cfg["config_source"]).read_text(), Loader=UniqueLoader)
-    value = raw["serving"]["python"]
-    for item in cfg["overrides"]:
-        key, text = item.split("=", 1)
-        if key == "serving.python":
-            value = yaml.safe_load(text)
-    return (Path(cfg["project_root"]) / value).absolute()
+    value = (Path(cfg["project_root"]) / cfg["serving"]["python"]).absolute()
+    if cfg.get("config_source_sha256"):
+        return value
+    # Old snapshots resolved venv symlinks. Recover only the pinned local venv
+    # with the very same interpreter; never consult today's editable config.
+    pinned = Path(cfg["project_root"]) / ".venvs/easysteer/bin/python"
+    if pinned.exists() and value.exists() and pinned.samefile(value):
+        return pinned
+    return value
 
 
 @contextmanager
-def gpu_reservation(root, gpus):
+def gpu_reservation(root, gpus, *, allow_shared=False, min_free_bytes=0):
     if not gpus or len(set(gpus)) != len(gpus) or any(type(g) is not int or g < 0 for g in gpus):
         raise ValueError("Explicit unique physical GPUs are required for vLLM extraction")
     with ExitStack() as stack:
@@ -49,7 +47,20 @@ def gpu_reservation(root, gpus):
         apps = subprocess.check_output(
             ["nvidia-smi", "--query-compute-apps=gpu_uuid,pid", "--format=csv,noheader,nounits"], text=True
         )
-        if any(line.split(",")[0].strip() in {uuids[g] for g in gpus} for line in apps.splitlines()):
+        if allow_shared:
+            if min_free_bytes <= 0:
+                raise ValueError("Shared GPU admission requires a positive free-memory floor")
+            memory = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=index,memory.free", "--format=csv,noheader,nounits"], text=True
+            )
+            free = {
+                int(row.split(",")[0]): int(row.split(",")[1].strip()) * 1024**2
+                for row in memory.splitlines()
+                if row.strip()
+            }
+            if any(free[g] < min_free_bytes for g in gpus):
+                raise RuntimeError("Insufficient free GPU memory for bounded shared replay")
+        elif any(line.split(",")[0].strip() in {uuids[g] for g in gpus} for line in apps.splitlines()):
             raise RuntimeError("Extraction GPUs are occupied; existing processes will not be interrupted")
         yield
 
@@ -147,4 +158,6 @@ def engine_args(cfg):
     )
     if v["moe_backend"] != "auto":
         args["kernel_config"] = {"moe_backend": v["moe_backend"]}
+    if v.get("kv_cache_memory_bytes") is not None:
+        args["kv_cache_memory_bytes"] = v["kv_cache_memory_bytes"]
     return args

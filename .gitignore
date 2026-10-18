@@ -13,6 +13,8 @@ dist/
 .ruff_cache/
 .mypy_cache/
 .hypothesis/
+.tox/
+.nox/
 .coverage
 .coverage.*
 htmlcov/
@@ -40,6 +42,7 @@ desktop.ini
 /runs/**
 /assets/
 /tmp/
+/.cache/
 *.log
 *.pid
 
@@ -55,6 +58,8 @@ desktop.ini
 /hidden/outputs/**
 /hidden/reports/**
 /hidden/online/**
+# Async capture shards, spill files and upload receipts stay local until NAS publication.
+/hidden/spool/**
 /hidden/evaluation/outputs/**
 
 # Estimator/action source stays tracked; generated datasets and models do not
@@ -76,8 +81,11 @@ desktop.ini
 /runtime/serving/*.lock
 /runtime/serving/outputs/
 /runtime/serving/logs/
+/runtime/serving/*.sock
 
 # Checkpoints and package/image archives are assets, not source
+/models/
+/checkpoints/
 *.pt
 *.pth
 *.ckpt
@@ -96,6 +104,12 @@ desktop.ini
 *.pkl
 *.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.db-wal
+*.db-shm
 
 # EasySteer uses the separate pinned vendor/easysteer-vllm overlay.
 # Its upstream checkout contains a redundant embedded vLLM source tree.

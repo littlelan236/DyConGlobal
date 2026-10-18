@@ -4,6 +4,7 @@ The controller is deliberately independent from vLLM's scheduler.  A managed
 EasySteer/vLLM integration can call ``record`` after its native capture hook,
 while tests and external adapters can use the same lifecycle contract.
 """
+
 from __future__ import annotations
 
 import json
@@ -19,9 +20,33 @@ from typing import Any, Mapping
 import numpy as np
 
 from core.io import hash_json, now, read_json, sha256, write_json
+from core.locking import file_lock
 
 THINK_OPEN_TOKEN_ID = 248068
 THINK_NEWLINE_TOKEN_ID = 198
+
+
+def accept_reasoning_event(state, position: int, anchor: str, stats=None) -> bool:
+    """Apply request-scoped phase filtering before a tensor enters export.
+
+    ``state`` is intentionally a tiny mutable mapping so the same rule can be
+    used by the vLLM plugin and by CPU/recovery tests without importing vLLM.
+    """
+    stats = stats if stats is not None else {}
+    prompt_length = state.get("prompt_length")
+    if prompt_length is not None and position < prompt_length:
+        stats["prompt"] = stats.get("prompt", 0) + 1
+        return False
+    if position <= state.get("last_position", -1):
+        stats["duplicate"] = stats.get("duplicate", 0) + 1
+        return False
+    if state.get("close_seen", False):
+        stats["after_close"] = stats.get("after_close", 0) + 1
+        return False
+    state["last_position"] = position
+    if anchor == "think_close":
+        state["close_seen"] = True
+    return True
 
 
 class AnchorError(ValueError):
@@ -73,6 +98,8 @@ class CaptureRequest:
     message_index: int | None = None
     prompt_token_ids: tuple[int, ...] = ()
     request_sha256: str | None = None
+    query_id: str | None = None
+    api_attempt_id: str | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]):
@@ -111,6 +138,8 @@ class CaptureRequest:
             message_index=value.get("message_index"),
             prompt_token_ids=tuple(value.get("prompt_token_ids") or ()),
             request_sha256=value.get("request_sha256"),
+            query_id=value.get("query_id"),
+            api_attempt_id=value.get("api_attempt_id"),
         )
 
     def to_dict(self):
@@ -133,6 +162,8 @@ class CaptureRequest:
             "message_index": self.message_index,
             "prompt_token_ids": list(self.prompt_token_ids),
             "request_sha256": self.request_sha256,
+            "query_id": self.query_id,
+            "api_attempt_id": self.api_attempt_id,
         }
 
 
@@ -141,6 +172,18 @@ class _ExportItem:
     sample_id: str
     tensor: dict[str, np.ndarray]
     metadata: dict[str, Any]
+    reservation: str | None = None
+
+
+@dataclass
+class _SpillItem:
+    """Durable tensor handoff created when the in-memory queue is full."""
+
+    sample_id: str
+    tensor_path: Path
+    metadata_path: Path
+    session_id: str
+    reservation: str | None = None
 
 
 class AsyncExportQueue:
@@ -151,31 +194,121 @@ class AsyncExportQueue:
     during shutdown/recovery without blocking the model forward.
     """
 
-    def __init__(self, root: str | Path, maxsize: int = 256):
+    def __init__(self, root: str | Path, maxsize: int = 256, spool=None):
+        self.spool = spool
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.staging = self.root / "staging"
         self.staging.mkdir(exist_ok=True)
+        self.spill = self.root / "spill"
+        self.spill.mkdir(exist_ok=True)
         self.journal = self.root / "queue.jsonl"
         self.queue: queue.Queue[_ExportItem | None] = queue.Queue(maxsize=maxsize)
         self._lock = threading.Lock()
+        self._pending_condition = threading.Condition(self._lock)
+        self._pending_sessions = {}
         self._closed = False
         self._failed: list[dict[str, Any]] = []
         self._written = 0
         self._worker = threading.Thread(target=self._run, name="dycon-capture-export", daemon=True)
+        self._spill_queue: queue.Queue[_SpillItem | None] = queue.Queue()
+        self._spill_worker = threading.Thread(target=self._run_spill, name="dycon-capture-spill", daemon=True)
         self._worker.start()
+        self._spill_worker.start()
+        self._recover_spills()
+
+    def _recover_spills(self):
+        """Queue committed spill records after a controller restart."""
+        for metadata_path in sorted(self.spill.glob("*.json")):
+            try:
+                metadata = read_json(metadata_path)
+                tensor_path = self.root / metadata["tensor"]
+                if not tensor_path.is_file():
+                    continue
+                item = _SpillItem(
+                    metadata["sample_id"], tensor_path, metadata_path,
+                    metadata["session_id"], metadata.get("reservation"),
+                )
+                with self._pending_condition:
+                    self._pending_sessions[item.session_id] = self._pending_sessions.get(item.session_id, 0) + 1
+                self._spill_queue.put(item)
+            except (OSError, KeyError, TypeError, ValueError) as exc:
+                with self._lock:
+                    self._failed.append({"sample_id": metadata_path.stem, "error": repr(exc)})
 
     def submit(self, item: _ExportItem, *, block: bool = False) -> bool:
         with self._lock:
             if self._closed:
                 raise RuntimeError("capture export queue is closed")
+        if self.spool:
+            item.reservation = "queue:" + item.sample_id
+            self.spool.budget.acquire(item.reservation, sum(v.nbytes for v in item.tensor.values()) + 4096)
+            with self._lock:
+                size = self.journal.stat().st_size if self.journal.exists() else 0
+                self.spool.budget.acquire(self.spool.key("queue.jsonl"), size + 256)
+        sid = item.metadata["session_id"]
+        with self._pending_condition:
+            self._pending_sessions[sid] = self._pending_sessions.get(sid, 0) + 1
         try:
             self.queue.put(item, block=block, timeout=1 if block else 0)
         except queue.Full:
-            return False
+            # Transient writer pressure must not silently discard a hidden
+            # event.  Persist it on local NVMe and consume it asynchronously.
+            try:
+                spill = self._write_spill(item)
+                if item.reservation and self.spool:
+                    self.spool.budget.release(item.reservation)
+                self._spill_queue.put(spill)
+                return True
+            except Exception as exc:
+                if item.reservation and self.spool:
+                    self.spool.budget.release(item.reservation)
+                with self._pending_condition:
+                    self._pending_sessions[sid] -= 1
+                    self._pending_condition.notify_all()
+                with self._lock:
+                    self._failed.append({"sample_id": item.sample_id, "session_id": sid, "error": repr(exc)})
+                return False
         with self.journal.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"sample_id": item.sample_id, "status": "queued", "at": now()}) + "\n")
         return True
+
+    def _write_spill(self, item: _ExportItem) -> _SpillItem:
+        if self.spool is None:
+            raise RuntimeError("capture queue full and no local spool is configured")
+        tensor_relative = f"spill/{item.sample_id}.npz"
+        metadata_relative = f"spill/{item.sample_id}.json"
+        tensor_path = self.root / tensor_relative
+        metadata_path = self.root / metadata_relative
+        temp = tensor_path.with_suffix(".part")
+        reservation = self.spool.key(tensor_relative)
+        estimate = sum(value.nbytes + 4096 for value in item.tensor.values()) + 8192
+        self.spool.budget.acquire(reservation, estimate)
+        try:
+            with temp.open("wb") as stream:
+                np.savez_compressed(stream, **item.tensor)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, tensor_path)
+            value = {
+                "schema_version": 1,
+                "sample_id": item.sample_id,
+                "session_id": item.metadata["session_id"],
+                "tensor": tensor_relative,
+                "metadata": item.metadata,
+                "tensor_sha256": sha256(tensor_path),
+                "reservation": reservation,
+                "status": "spilled",
+            }
+            self.spool.write_json(metadata_relative, value, immutable=True)
+            with self.journal.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"sample_id": item.sample_id, "status": "spilled", "at": now()}) + "\n")
+            return _SpillItem(item.sample_id, tensor_path, metadata_path, item.metadata["session_id"], reservation)
+        except Exception:
+            temp.unlink(missing_ok=True)
+            tensor_path.unlink(missing_ok=True)
+            self.spool.budget.release(reservation)
+            raise
 
     def _run(self):
         while True:
@@ -189,11 +322,88 @@ class AsyncExportQueue:
                     self._written += 1
             except Exception as exc:  # record and continue is the default policy
                 with self._lock:
-                    self._failed.append({"sample_id": item.sample_id, "error": repr(exc)})
+                    self._failed.append(
+                        {
+                            "sample_id": item.sample_id,
+                            "session_id": item.metadata["session_id"],
+                            "error": repr(exc),
+                        }
+                    )
             finally:
+                if item.reservation and self.spool:
+                    self.spool.budget.release(item.reservation)
+                with self._pending_condition:
+                    self._pending_sessions[item.metadata["session_id"]] -= 1
+                    self._pending_condition.notify_all()
                 self.queue.task_done()
 
+    def _run_spill(self):
+        while True:
+            item = self._spill_queue.get()
+            if item is None:
+                self._spill_queue.task_done()
+                return
+            try:
+                metadata = read_json(item.metadata_path)
+                with np.load(item.tensor_path, allow_pickle=False) as archive:
+                    tensors = {name: np.asarray(archive[name]) for name in archive.files}
+                if sha256(item.tensor_path) != metadata["tensor_sha256"]:
+                    raise ValueError("spill tensor checksum mismatch")
+                self._persist(_ExportItem(item.sample_id, tensors, metadata["metadata"]))
+                item.metadata_path.unlink(missing_ok=True)
+                item.tensor_path.unlink(missing_ok=True)
+                if item.reservation and self.spool:
+                    self.spool.budget.release(item.reservation)
+                with self._lock:
+                    self._written += 1
+            except Exception as exc:
+                with self._lock:
+                    self._failed.append({"sample_id": item.sample_id, "session_id": item.session_id, "error": repr(exc)})
+            finally:
+                with self._pending_condition:
+                    self._pending_sessions[item.session_id] = max(0, self._pending_sessions.get(item.session_id, 1) - 1)
+                    self._pending_condition.notify_all()
+                self._spill_queue.task_done()
+
+    def drain_session(self, session_id, timeout):
+        with self._pending_condition:
+            if not self._pending_condition.wait_for(
+                lambda: self._pending_sessions.get(session_id, 0) == 0, timeout
+            ):
+                raise TimeoutError("Session capture writer did not drain")
+
     def _persist(self, item: _ExportItem):
+        if self.spool:
+            relative = f"raw/{item.sample_id}.npz"
+            target = self.root / relative
+            target.parent.mkdir(exist_ok=True)
+            self.spool.budget.acquire(
+                self.spool.key(relative), sum(v.nbytes + 4096 for v in item.tensor.values()) + 4096
+            )
+            self.spool.write_json(
+                f"index/{item.sample_id}.json",
+                {**item.metadata, "tensor": relative, "artifact_state": "queued", "sha256": None},
+            )
+            temp = target.with_suffix(".part")
+            try:
+                with temp.open("wb") as stream:
+                    np.savez_compressed(stream, **item.tensor)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temp, target)
+                self.spool.budget.acquire(self.spool.key(relative), target.stat().st_size)
+                meta = {
+                    **item.metadata,
+                    "tensor": relative,
+                    "sha256": sha256(target),
+                    "status": "persisted",
+                    "artifact_state": "local_persisted",
+                }
+                self.spool.write_json(f"index/{item.sample_id}.json", meta)
+                self.spool.add(meta)
+            finally:
+                temp.unlink(missing_ok=True)
+            return
         # ``raw`` is the immutable recovery boundary.  Keep a hard-link under
         # the historical ``tensors`` name when possible so existing readers do
         # not need a migration and the tensor bytes are still stored once.
@@ -206,7 +416,14 @@ class AsyncExportQueue:
             np.savez_compressed(temp, **item.tensor)
             os.replace(temp, target)
             meta = dict(item.metadata)
-            meta.update({"sample_id": item.sample_id, "tensor": str(target.relative_to(self.root)), "sha256": sha256(target), "status": "persisted"})
+            meta.update(
+                {
+                    "sample_id": item.sample_id,
+                    "tensor": str(target.relative_to(self.root)),
+                    "sha256": sha256(target),
+                    "status": "persisted",
+                }
+            )
             write_json(self.root / "raw" / f"{item.sample_id}.json", meta)
             write_json(self.root / "index" / f"{item.sample_id}.json", meta)
             legacy = self.root / "tensors" / f"{item.sample_id}.npz"
@@ -225,7 +442,14 @@ class AsyncExportQueue:
 
     def status(self):
         with self._lock:
-            return {"queued": self.queue.qsize(), "persisted": self._written, "failed": list(self._failed), "closed": self._closed}
+            return {
+                "queued": self.queue.qsize(),
+                "persisted": self._written,
+                "failed": list(self._failed),
+                "spill_pending": self._spill_queue.qsize(),
+                "spill_files": len(list(self.spill.glob("*.json"))),
+                "closed": self._closed,
+            }
 
     def close(self, *, drain: bool = True, timeout: float = 30):
         with self._lock:
@@ -233,9 +457,16 @@ class AsyncExportQueue:
                 return
             self._closed = True
         if drain:
-            self.queue.join()
+            with self.queue.all_tasks_done:
+                if not self.queue.all_tasks_done.wait_for(lambda: self.queue.unfinished_tasks == 0, timeout):
+                    raise TimeoutError("Local capture writer drain timed out")
+            with self._pending_condition:
+                if not self._pending_condition.wait_for(lambda: not any(self._pending_sessions.values()), timeout):
+                    raise TimeoutError("Spill capture writer drain timed out")
         self.queue.put(None)
         self._worker.join(timeout=timeout)
+        self._spill_queue.put(None)
+        self._spill_worker.join(timeout=timeout)
 
 
 @dataclass
@@ -247,7 +478,16 @@ class _Session:
     status: str = "active"
     requests: dict[str, CaptureRequest] = field(default_factory=dict)
     samples: list[dict[str, Any]] = field(default_factory=list)
-    metrics: dict[str, int] = field(default_factory=lambda: {"graph_replays": 0, "eager_capture_forwards": 0, "fallbacks": 0, "cache_hit_tokens": 0})
+    sample_ids: dict[str, dict] = field(default_factory=dict)
+    finalization: dict[str, Any] | None = None
+    metrics: dict[str, int] = field(
+        default_factory=lambda: {
+            "graph_replays": 0,
+            "eager_capture_forwards": 0,
+            "fallbacks": 0,
+            "cache_hit_tokens": 0,
+        }
+    )
 
 
 class OnlineCaptureController:
@@ -255,53 +495,99 @@ class OnlineCaptureController:
 
     def __init__(self, project_root: str | Path, config: Mapping[str, Any]):
         self.root = Path(project_root)
+        self.project_root = self.root.resolve()
         self.config = dict(config)
         export = dict(config.get("export", {}))
-        self.export_root = self.root / export.get("root", "hidden/online")
-        self.queue = AsyncExportQueue(self.export_root, int(export.get("queue_size", 256)))
+        self.export_enabled = export.get("enabled", True)
+        self.spool = None
+        if self.export_enabled and "spool_root" in export:
+            from runtime.serving.spool import CaptureSpool
+
+            self.spool = CaptureSpool(
+                self.root,
+                export,
+                config.get("run_id", "standalone"),
+                config["nas_root"],
+                config.get("reserve_bytes", 0),
+            )
+        self.export_root = self.spool.root if self.spool else self.root / export.get("root", "hidden/online")
+        if not self.export_enabled:
+            self.export_root = self.root / "runs" / config.get("run_id", "standalone") / "capture-diagnostics"
+        self.queue = AsyncExportQueue(self.export_root, int(export.get("queue_size", 256)), self.spool)
         self.sessions: dict[str, _Session] = {}
         self.request_outputs = {}
         self.request_bindings: dict[str, tuple[str, CaptureRequest]] = {}
         self._lock = threading.RLock()
+        self._output_condition = threading.Condition(self._lock)
         self._manifest_lock = threading.Lock()
 
+    def _write(self, relative, value, **kwargs):
+        if self.spool:
+            return self.spool.write_json(relative, value, **kwargs)
+        write_json(self.export_root / relative, value)
+        return self.export_root / relative
+
+    @staticmethod
+    def _request_summary(request):
+        return {
+            k: v
+            for k, v in request.to_dict().items()
+            if k not in {"prompt_token_ids", "newline_token_ids", "close_token_ids", "capture_select"}
+        }
+
+    def failure(self, session_id, reason):
+        with self._lock:
+            session = self.sessions.get(session_id)
+            if session:
+                session.metrics["fallbacks"] += 1
+                session.options.setdefault("failures", []).append(str(reason))
+                self._write(f"sessions/{session_id}/failures.json", session.options["failures"])
+        if self.config.get("failure_policy") == "block_rollout":
+            raise RuntimeError("CaptureError: " + str(reason))
+        return {"recorded": True}
+
     def _record_manifests(self, session_id, metadata, *, session_status="active"):
+        if not self.export_enabled:
+            return
+        # Per-token sidecars are authoritative. Keep the two global catalogs
+        # bounded by sessions, rather than rewriting every token of every run.
+        session = self.sessions[session_id]
+        if session_status == "active" and session.samples:
+            return
+        directory = self.export_root / "sessions" / session_id
         entry = {
             "session_id": session_id,
+            "status": session_status,
+            "backend": "easysteer",
             "task_id": metadata["task_id"],
             "run_id": metadata["run_id"],
             "rollout_id": metadata["rollout_id"],
-            "step_id": metadata["step_id"],
-            "anchor": metadata["anchor"],
-            "anchor_position": metadata.get("anchor_position"),
-            "anchor_token_id": metadata.get("anchor_token_id"),
-            "capture_stage": metadata.get("capture_stage", "post_steering"),
-            "graph_execution": metadata.get("graph_execution"),
-            "cache_hit_tokens": metadata.get("cache_hit_tokens", 0),
-            "capture_target_position": metadata.get("capture_target_position"),
-            "capture_cache_boundary": metadata.get("capture_cache_boundary"),
-            "status": metadata.get("status", "queued"),
-            "tensor": metadata.get("tensor"),
-            "token_ref": metadata.get("token_ref"),
-            "token_id": metadata.get("token_id"),
-            "token_text": metadata.get("token_text"),
-            "phase": metadata.get("phase"),
-            "absolute_position": metadata.get("absolute_position"),
-            "generation_index": metadata.get("generation_index"),
-            "message_index": metadata.get("message_index"),
-            "trajectory_sha256": metadata.get("trajectory_sha256"),
-            "tokenizer_fingerprint": metadata.get("tokenizer_fingerprint"),
-            "capture_select_sha256": metadata.get("capture_select_sha256"),
+            "anchors": list(session.default_request.anchors),
+            "layout": "token_ledger_tar_v2" if self.spool else "per_token_sidecars_v1",
+            "export_root": str(self.spool.nas if self.spool else self.export_root),
+            "session_path": str(directory / "session.json"),
+            "index_root": str((self.spool.nas if self.spool else self.export_root) / "index"),
+            "index_filter": {"session_id": session_id},
+            "sample_count": len(session.samples) if session_status != "active" else None,
+            "receipt_path": str(directory / "receipt.json"),
+            "finalization_path": str(directory / "finalization.json"),
         }
-        with self._manifest_lock:
+        if session.finalization:
+            entry.update(session.finalization)
+        if self.spool:
+            for key in ("session_path", "receipt_path", "finalization_path"):
+                entry[key] = str(self.spool.nas / Path(entry[key]).relative_to(self.export_root))
+        entry["published"] = session_status == "complete"
+        diagnostic = session.default_request.task_id in {"startup", "startup-mixed", "engine-warmup"}
+        entry.update(
+            dataset_role="diagnostic" if diagnostic else "rollout",
+            eligible_for_training=session_status == "complete" and not diagnostic,
+        )
+        with self._manifest_lock, file_lock(self.root / "state/product-manifests.lock"):
             for owner in ("enrichment", "hidden"):
                 path = self.root / owner / "manifest.json"
                 manifest = read_json(path) if path.exists() else {"schema_version": 1}
-                captures = manifest.setdefault("online_captures", {})
-                sample = captures.setdefault(session_id, {"samples": []})
-                sample.update({"session_id": session_id, "status": session_status, "backend": "easysteer", "anchors": ["think_open", "reasoning_newline", "think_close"]})
-                sample["samples"] = [x for x in sample.get("samples", []) if x.get("sample_id") != metadata["sample_id"]]
-                sample["samples"].append(entry | {"sample_id": metadata["sample_id"]})
+                manifest.setdefault("online_captures", {})[session_id] = entry
                 write_json(path, manifest)
 
     def start(self, metadata: Mapping[str, Any], **options):
@@ -315,12 +601,16 @@ class OnlineCaptureController:
             self.sessions[request.session_id] = _Session(request.session_id, merged, request)
             session_dir = self.export_root / "sessions" / request.session_id
             session_dir.mkdir(parents=True, exist_ok=True)
-            write_json(
-                session_dir / "session.json",
+            self._write(
+                f"sessions/{request.session_id}/session.json",
                 {
                     "session_id": request.session_id,
-                    "metadata": request.to_dict(),
-                    "options": merged,
+                    "metadata": self._request_summary(request),
+                    "options": {
+                        "graph_mode": merged.get("graph_mode", "FULL"),
+                        "prefix_cache_policy": merged.get("prefix_cache_policy"),
+                    },
+                    "capture_config_sha256": hash_json(self.config),
                     "started_at": self.sessions[request.session_id].created_at,
                     "export_root": str(self.export_root),
                 },
@@ -333,11 +623,36 @@ class OnlineCaptureController:
             session = self.sessions.get(request.session_id)
             if session is None or session.status != "active":
                 raise KeyError("capture session is not active")
+            if request_id in self.request_bindings and self.request_bindings[request_id][1] != request:
+                raise ValueError("Native request ID has conflicting capture bindings")
             session.requests[request_id] = request
             self.request_bindings[request_id] = (request.session_id, request)
         return {"request_id": request_id, **request.to_dict()}
 
-    def record(self, request_id: str, tensors: Mapping[str, Any], *, prompt_token_ids=None, anchor="think_open", token_ids=None, position=None, token_id=None, token_text=None, phase=None, absolute_position=None, generation_index=None, message_index=None, token_ref=None, graph_replays=0, eager_capture_forwards=0, fallback_reason=None, cache_hit_tokens=0, capture_stage="post_steering"):
+    def record(
+        self,
+        request_id: str,
+        tensors: Mapping[str, Any],
+        *,
+        prompt_token_ids=None,
+        anchor="think_open",
+        token_ids=None,
+        position=None,
+        token_id=None,
+        token_text=None,
+        phase=None,
+        absolute_position=None,
+        generation_index=None,
+        message_index=None,
+        token_ref=None,
+        graph_replays=0,
+        eager_capture_forwards=0,
+        fallback_reason=None,
+        cache_hit_tokens=0,
+        capture_stage="post_steering",
+        graph_execution=None,
+        batch_kind=None,
+    ):
         with self._lock:
             binding = self.request_bindings.get(request_id)
             if binding is None:
@@ -358,7 +673,9 @@ class OnlineCaptureController:
                     failure = {
                         **request.to_dict(),
                         "request_id": request_id,
-                        "sample_id": hash_json({"session": session_id, "request": request_id, "anchor": anchor, "failed": True})[:32],
+                        "sample_id": hash_json(
+                            {"session": session_id, "request": request_id, "anchor": anchor, "failed": True}
+                        )[:32],
                         "anchor": anchor,
                         "status": "failed",
                         "failure_reason": str(error),
@@ -374,19 +691,74 @@ class OnlineCaptureController:
             if anchor == "reasoning_newline" and token_ids and token_id is not None:
                 allowed = set(token_ids.get("reasoning_newline") or token_ids.get("newline_token_ids") or [])
                 if allowed and token_id not in allowed:
-                    raise AnchorError("reasoning_newline_unavailable: token is outside the tokenizer inventory")
+                    raise AnchorError(
+                        "reasoning_newline_unavailable: token is outside the tokenizer inventory"
+                    )
             arrays = {}
             for name, value in tensors.items():
                 if hasattr(value, "detach"):
                     value = value.detach().to(device="cpu", copy=True).numpy()
                 arrays[str(name)] = np.asarray(value)
-            sample_id = hash_json({"session": session_id, "request": request_id, "anchor": anchor, "position": position})[:32]
-            metadata = {**request.to_dict(), "request_id": request_id, "sample_id": sample_id, "anchor": anchor, "anchor_position": position, "anchor_token_id": token_id, "token_id": token_id, "token_text": token_text, "phase": phase, "absolute_position": absolute_position if absolute_position is not None else position, "generation_index": generation_index, "message_index": message_index, "token_ref": token_ref, "capture_stage": capture_stage, "graph_execution": "full" if graph_replays else "eager", "cache_hit_tokens": cache_hit_tokens, "status": "captured", "captured_at": now()}
+            sample_id = hash_json(
+                {"session": session_id, "request": request_id, "anchor": anchor, "position": position}
+            )[:32]
+            metadata = {
+                **request.to_dict(),
+                "request_id": request_id,
+                "sample_id": sample_id,
+                "anchor": anchor,
+                "anchor_position": position,
+                "anchor_token_id": token_id,
+                "token_id": token_id,
+                "token_text": token_text,
+                "phase": phase,
+                "absolute_position": absolute_position if absolute_position is not None else position,
+                "generation_index": generation_index,
+                "message_index": message_index,
+                "token_ref": token_ref,
+                "capture_stage": capture_stage,
+                "graph_execution": "full" if graph_replays else "eager",
+                "cache_hit_tokens": cache_hit_tokens,
+                "status": "captured",
+                "captured_at": now(),
+            }
+            if graph_execution is not None:
+                if graph_execution not in {"full", "eager", "piecewise"}:
+                    raise ValueError("Unknown per-event graph execution")
+                metadata["graph_execution"] = graph_execution
+            metadata["batch_kind"] = batch_kind
+            metadata.update(
+                model_fingerprint=self.config.get("model_fingerprint"),
+                serving_dtype=self.config.get("serving_dtype"),
+                storage_dtypes={name: str(value.dtype) for name, value in arrays.items()},
+                storage_shapes={name: list(value.shape) for name, value in arrays.items()},
+            )
+            import hashlib
+
+            metadata["tensor_content_sha256"] = hash_json(
+                {name: hashlib.sha256(value.tobytes()).hexdigest() for name, value in arrays.items()}
+            )
+            previous = session.sample_ids.get(sample_id)
+            if previous is not None:
+                if previous.get("tensor_content_sha256") != metadata["tensor_content_sha256"]:
+                    raise ValueError("Conflicting duplicate capture point")
+                return previous
+            if self.spool:
+                for key in ("prompt_token_ids", "capture_select", "newline_token_ids", "close_token_ids"):
+                    metadata.pop(key, None)
+                metadata["request_key"] = hash_json(request_id)
+            if not self.export_enabled:
+                return {"sample_id": sample_id, "status": "not_exported"}
+            if not all(np.isfinite(v).all() for v in arrays.values()):
+                return self.failure(session_id, "Nonfinite capture tensors")
             accepted = self.queue.submit(_ExportItem(sample_id, arrays, metadata), block=False)
             metadata["status"] = "queued" if accepted else "failed"
             metadata["failure_reason"] = None if accepted else "export_backpressure"
+            if not accepted:
+                self.failure(session_id, "export_backpressure")
             self._record_manifests(session_id, metadata)
             session.samples.append(metadata)
+            session.sample_ids[sample_id] = metadata
             session.metrics["graph_replays"] += int(graph_replays)
             session.metrics["eager_capture_forwards"] += int(eager_capture_forwards)
             session.metrics["cache_hit_tokens"] += int(cache_hit_tokens)
@@ -423,7 +795,13 @@ class OnlineCaptureController:
             if prompt_length and position is not None:
                 metadata["phase"] = "prompt" if position < prompt_length else "generation_input"
                 metadata["generation_index"] = position - prompt_length if position >= prompt_length else -1
-            metadata["token_ref"] = [request.rollout_id, request.step_id, metadata.get("phase"), position, metadata.get("token_id")]
+            metadata["token_ref"] = [
+                request.rollout_id,
+                request.step_id,
+                metadata.get("phase"),
+                position,
+                metadata.get("token_id"),
+            ]
         try:
             with np.load(candidate, allow_pickle=False) as archive:
                 tensors = {name: np.asarray(archive[name]) for name in archive.files}
@@ -443,22 +821,228 @@ class OnlineCaptureController:
                 request_id = matches[0]
             session_id, request = self.request_bindings[request_id]
             record = {**request.to_dict(), **value, "request_id": request_id}
+            record.pop("metadata", None)
+            if request.prompt_token_ids and list(request.prompt_token_ids) != record["prompt_token_ids"]:
+                raise ValueError("Native prompt differs from request binding")
+            record.update(
+                schema_version=2,
+                request_key=hash_json(request_id),
+                request_sha256=hash_json(record["prompt_token_ids"]),
+                output_sha256=hash_json(record["output_token_ids"]),
+            )
+            relative = (
+                f"requests/{record['request_key']}.json"
+                if self.spool
+                else f"sessions/{session_id}/requests/{hash_json(request_id)}.json"
+            )
+            stored = dict(record)
+            if self.spool and (self.export_root / "inventory.json").exists():
+                for key in ("newline_token_ids", "close_token_ids", "capture_select"):
+                    stored.pop(key, None)
+                stored.update(
+                    inventory_ref="inventory.json",
+                    inventory_sha256=hash_json(read_json(self.export_root / "inventory.json")),
+                )
+            path = self._write(relative, stored, immutable=True)
+            record = {**record, "ledger_ref": relative, "ledger_sha256": sha256(path)}
             self.request_outputs[request_id] = record
-            write_json(self.export_root / "sessions" / session_id / "requests" / (hash_json(request_id) + ".json"), record)
+            self._output_condition.notify_all()
             return {"recorded": True, "request_id": request_id}
+
+    def wait_output(self, session_id, step_id, response_id=None, timeout=30):
+        def candidates():
+            return [
+                row
+                for row in self.request_outputs.values()
+                if row["session_id"] == session_id
+                and row["step_id"] == step_id
+                and (
+                    response_id is None
+                    or row["request_id"] == response_id
+                    or row["request_id"].startswith(response_id + "-")
+                )
+            ]
+
+        with self._output_condition:
+            if not self._output_condition.wait_for(lambda: bool(candidates()), timeout=timeout):
+                raise TimeoutError("Native output receipt did not arrive")
+            rows = candidates()
+            if len(rows) != 1:
+                raise ValueError("Ambiguous native output receipt")
+            return dict(rows[0])
+
+    def finalize(self, session_id, *, rollout_id, trajectory_path, trajectory_sha256, model_fingerprint):
+        path = Path(trajectory_path).resolve()
+        if not path.is_relative_to(self.project_root):
+            raise ValueError("Finalized trajectory is outside the project")
+        if sha256(path) != trajectory_sha256:
+            raise ValueError("Finalized trajectory checksum mismatch")
+        source = read_json(path)
+        from hidden.artifacts import read_request, response_records
+
+        assistant = [row for _, row, _ in response_records(source)]
+        native_ids = [
+            (row.get("extra", {}).get("response") or {}).get("dycon_native_request_id") for row in assistant
+        ]
+        with self._lock:
+            session = self.sessions[session_id]
+            if self.config.get("model_fingerprint") not in {None, model_fingerprint}:
+                raise ValueError("Finalized trajectory checkpoint mismatch")
+            for row, native_id in zip(assistant, native_ids, strict=True):
+                if native_id not in self.request_outputs:
+                    raise ValueError("Finalized trajectory is missing exact native request evidence")
+                response = read_request(self.export_root, row["extra"]["response"])
+                receipt = self.request_outputs[native_id]
+                if receipt["session_id"] != session_id:
+                    raise ValueError("Receipt belongs to a different capture session")
+                if any(response.get(key) != receipt[key] for key in ["prompt_token_ids", "output_token_ids"]):
+                    raise ValueError("Trajectory tokens differ from native output receipt")
+            value = {
+                "rollout_id": rollout_id,
+                "trajectory_path": str(path),
+                "trajectory_sha256": trajectory_sha256,
+                "model_fingerprint": model_fingerprint,
+                "accepted_native_request_ids": native_ids,
+                "finalized_at": now(),
+            }
+            action_step = 0
+            response_map = {}
+            for (index, message, _), native_id in zip(response_records(source), native_ids, strict=True):
+                valid = message.get("role") == "assistant"
+                response_map[native_id] = {
+                    "message_index": index,
+                    "agent_step_index": action_step,
+                    "is_action_response": valid,
+                }
+                action_step += int(valid)
+            value["responses"] = response_map
+            session.finalization = value
+            self._write(f"sessions/{session_id}/finalization.json", {"session_id": session_id, **value})
+        self.queue.drain_session(session_id, self.config.get("finalize_seconds", 120))
+        from enrichment.online_trace import reasoning_targets
+
+        expected, observed = set(), set()
+        for native_id in native_ids:
+            receipt = self.request_outputs[native_id]
+            targets, _ = reasoning_targets(
+                receipt,
+                self.config.get("open_token_ids", [248068]),
+                list(receipt.get("close_token_ids") or [248069]),
+            )
+            expected.update((native_id, p, a) for p, a in targets)
+        for sample in session.samples:
+            if sample.get("status") != "failed":
+                observed.add((sample["request_id"], sample["absolute_position"], sample["anchor"]))
+        # Native selector also observes answer newlines; only reasoning targets
+        # enter the training dataset. Missing selected reasoning rows fail coverage.
+        coverage = {
+            "expected": len(expected),
+            "observed": len(expected & observed),
+            "missing": sorted(expected - observed),
+        }
+        self._write(f"sessions/{session_id}/coverage.json", coverage)
+        complete = (
+            bool(assistant)
+            and not session.options.get("failures")
+            and not any(row.get("status") == "failed" for row in session.samples)
+            and not coverage["missing"]
+            and not any(f.get("session_id") == session_id for f in self.queue.status()["failed"])
+        )
+        if not self.export_enabled:
+            session.status = "not_exported"
+        elif self.spool:
+            published = self.spool.publish_session(
+                session_id, self.config.get("export", {}).get("upload_max_elapsed_seconds", 600)
+            )
+            session.status = (
+                "complete" if complete and published else "pending_upload" if complete else "partial"
+            )
+        else:
+            session.status = "complete" if complete else "partial"
+        self._record_manifests(session_id, session.default_request.to_dict(), session_status=session.status)
+        if self.spool and session.status == "complete":
+            self.spool.release_session_metadata(session_id)
+        return {**value, "capture_status": session.status}
+
+    def prepare_trajectory(self, session_id, trajectory_path):
+        """One bounded join before canonical import; includes FormatError responses."""
+        from hidden.artifacts import response_records
+
+        path = Path(trajectory_path).resolve()
+        if not path.is_relative_to(self.project_root):
+            raise ValueError("Trajectory escapes project")
+        source = read_json(path)
+        rows = list(response_records(source))
+
+        def matches(message, response):
+            metadata = (message.get("extra", {}).get("request") or {}).get("dycon_capture", {})
+            return [
+                r
+                for r in self.request_outputs.values()
+                if r["session_id"] == session_id
+                and (
+                    r.get("query_id") == metadata["query_id"]
+                    if metadata.get("query_id")
+                    else r["step_id"] == metadata.get("step_id")
+                )
+                and (
+                    not metadata.get("api_attempt_id")
+                    or r.get("api_attempt_id") == metadata["api_attempt_id"]
+                )
+                and (
+                    not response.get("id")
+                    or r["request_id"] == response["id"]
+                    or r["request_id"].startswith(response["id"] + "-")
+                )
+            ]
+
+        with self._output_condition:
+            self._output_condition.wait_for(
+                lambda: all(matches(m, r) for _, m, r in rows), self.config.get("finalize_seconds", 120)
+            )
+            for index, message, response in rows:
+                candidates = matches(message, response)
+                if len(candidates) != 1:
+                    self.failure(
+                        session_id, f"response {index} has {len(candidates)} matching native receipts"
+                    )
+                    continue
+                receipt = candidates[0]
+                response.update(
+                    dycon_native_request_id=receipt["request_id"],
+                    ledger_ref=receipt["ledger_ref"],
+                    ledger_sha256=receipt["ledger_sha256"],
+                    ledger_root=str(self.spool.nas if self.spool else self.export_root),
+                )
+                response.pop("prompt_token_ids", None)
+                response.pop("output_token_ids", None)
+                for choice in response.get("choices", []):
+                    choice.pop("token_ids", None)
+                message["extra"].setdefault("request", {})["message_index"] = index
+        write_json(path, source)
+        return {
+            "responses": len(rows),
+            "capture_failures": self.sessions[session_id].options.get("failures", []),
+        }
 
     def mark_behavior_failure(self, session_id, reason, *, expected=None, actual=None):
         with self._lock:
             session = self.sessions[session_id]
             session.status = "failed_behavior"
             session.metrics["fallbacks"] += 1
-            entry = {"session_id": session_id, "status": session.status,
-                     "failure_reason": reason, "expected": expected, "actual": actual,
-                     "at": now()}
+            entry = {
+                "session_id": session_id,
+                "status": session.status,
+                "failure_reason": reason,
+                "expected": expected,
+                "actual": actual,
+                "at": now(),
+            }
             write_json(self.export_root / "sessions" / session_id / "behavior-failure.json", entry)
             return entry
 
     def stop(self, session_id: str):
+        self.queue.drain_session(session_id, self.config.get("finalize_seconds", 120))
         with self._lock:
             session = self.sessions.get(session_id)
             if session is None:
@@ -467,23 +1051,19 @@ class OnlineCaptureController:
             for sample in session.samples:
                 if sample.get("status") in {"queued", "captured"}:
                     sample["session_status"] = "stopped"
-            for sample in session.samples:
-                self._record_manifests(session_id, sample, session_status="stopped")
-            write_json(
-                self.export_root / "sessions" / session_id / "receipt.json",
+            if session.samples:
+                self._record_manifests(session_id, session.samples[0], session_status="stopped")
+            self._write(
+                f"sessions/{session_id}/receipt.json",
                 {
                     "session_id": session_id,
                     "status": session.status,
-                    "metadata": session.requests[next(iter(session.requests))].to_dict()
-                    if session.requests
-                    else None,
+                    "metadata": self._request_summary(session.default_request),
                     "samples": len(session.samples),
                     "metrics": dict(session.metrics),
                     "export": self.queue.status(),
                     "files": {
-                        "queue.jsonl": sha256(self.queue.journal)
-                        if self.queue.journal.exists()
-                        else None
+                        "queue.jsonl": sha256(self.queue.journal) if self.queue.journal.exists() else None
                     },
                 },
             )
@@ -492,24 +1072,58 @@ class OnlineCaptureController:
     def status(self, session_id: str | None = None):
         with self._lock:
             if session_id is None:
-                return {"sessions": [self._session_status(s) for s in self.sessions.values()], "export": self.queue.status()}
+                return {
+                    "sessions": [self._session_status(s) for s in self.sessions.values()],
+                    "export": self.queue.status(),
+                }
             session = self.sessions.get(session_id)
             if session is None:
                 raise KeyError(session_id)
             return self._session_status(session)
 
     def _session_status(self, session: _Session):
-        return {"session_id": session.session_id, "status": session.status, "created_at": session.created_at, "requests": len(session.requests), "samples": list(session.samples), "metrics": dict(session.metrics), "export": self.queue.status()}
+        return {
+            "session_id": session.session_id,
+            "status": session.status,
+            "created_at": session.created_at,
+            "requests": len(session.requests),
+            "samples": list(session.samples),
+            "metrics": dict(session.metrics),
+            "export": self.queue.status(),
+        }
 
     def results(self, session_id: str):
         with self._lock:
             session = self.sessions.get(session_id)
             if session is None:
                 raise KeyError(session_id)
-            return {"session_id": session_id, "samples": list(session.samples), "status": session.status, "export": self.queue.status()}
+            return {
+                "session_id": session_id,
+                "samples": list(session.samples),
+                "status": session.status,
+                "export": self.queue.status(),
+            }
 
     def close(self):
-        self.queue.close(drain=True)
+        errors = []
+        try:
+            self.queue.close(drain=True, timeout=self.config.get("finalize_seconds", 120))
+        except Exception as exc:
+            errors.append(repr(exc))
+        try:
+            if self.spool and not self.spool.close(self.config["export"]["upload_max_elapsed_seconds"]):
+                errors.append("NAS publication remains pending/recoverable")
+        except Exception as exc:
+            errors.append(repr(exc))
+        if errors:
+            write_json(
+                self.root / "runs" / self.config.get("run_id", "standalone") / "capture-shutdown-errors.json",
+                errors,
+            )
+            if self.config.get("failure_policy") == "block_rollout":
+                from runtime.serving.errors import CaptureError
+
+                raise CaptureError(str(errors))
 
 
 class CaptureControlServer:
@@ -556,21 +1170,37 @@ class CaptureControlServer:
                         return self._json(200, controller_ref.start(value.pop("metadata", value), **value))
                     if self.path == "/dycon/capture/request/output":
                         return self._json(200, controller_ref.record_output(value))
+                    if self.path == "/dycon/capture/failure":
+                        return self._json(200, controller_ref.failure(**value))
+                    if self.path.startswith("/dycon/capture/session/") and self.path.endswith("/prepare"):
+                        return self._json(
+                            200, controller_ref.prepare_trajectory(self.path.split("/")[-2], **value)
+                        )
+                    if self.path == "/dycon/capture/request/wait-output":
+                        return self._json(200, controller_ref.wait_output(**value))
+                    if self.path.startswith("/dycon/capture/session/") and self.path.endswith("/finalize"):
+                        return self._json(200, controller_ref.finalize(self.path.split("/")[-2], **value))
                     if self.path == "/dycon/capture/behavior-failure":
-                        return self._json(200, controller_ref.mark_behavior_failure(
-                            value["session_id"], value["reason"], expected=value.get("expected"), actual=value.get("actual")
-                        ))
+                        return self._json(
+                            200,
+                            controller_ref.mark_behavior_failure(
+                                value["session_id"],
+                                value["reason"],
+                                expected=value.get("expected"),
+                                actual=value.get("actual"),
+                            ),
+                        )
                     if self.path == "/dycon/capture/request/bind":
                         return self._json(200, controller_ref.bind(value["request_id"], value["metadata"]))
                     if self.path == "/dycon/capture/sample":
                         tensors = {k: np.asarray(v) for k, v in value.pop("tensors").items()}
-                        return self._json(200, controller_ref.record(value.pop("request_id"), tensors, **value))
+                        return self._json(
+                            200, controller_ref.record(value.pop("request_id"), tensors, **value)
+                        )
                     if self.path == "/dycon/capture/sample-file":
                         return self._json(
                             200,
-                            controller_ref.record_file(
-                                value.pop("request_id"), value.pop("path"), **value
-                            ),
+                            controller_ref.record_file(value.pop("request_id"), value.pop("path"), **value),
                         )
                     if self.path.startswith("/dycon/capture/session/") and self.path.endswith("/stop"):
                         return self._json(200, controller_ref.stop(self.path.split("/")[-2]))
@@ -589,7 +1219,9 @@ class CaptureControlServer:
         return f"http://{self.host}:{self.port}"
 
     def start(self):
-        self._thread = threading.Thread(target=self._server.serve_forever, name="dycon-capture-control", daemon=True)
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, name="dycon-capture-control", daemon=True
+        )
         self._thread.start()
         return self
 

@@ -11,7 +11,12 @@ from core.io import write_json
 @pytest.fixture
 def cfg(tmp_path):
     raw = yaml.safe_load((Path(__file__).parents[1] / "config.yaml").read_text())
-    raw["model"].update(fingerprint="fixture-model", served_name="fixture")
+    raw["model"].update(path=None, fingerprint="fixture-model", served_name="fixture")
+    raw["capture"]["enabled"] = False
+    raw["hidden"]["adapter"] = "hf_causal"
+    raw["hidden"].pop("vllm", None)
+    raw["steering"].update(enabled=False, payload=None)
+    raw["serving"]["management"] = "external"
     raw["images"].update(
         reserve_bytes=0,
         minimum_load_bytes=1,
