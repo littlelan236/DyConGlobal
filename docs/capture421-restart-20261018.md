@@ -51,4 +51,47 @@ reordered 三种路径逐点逐层比较 NAS 在线张量；阈值 cosine≥0.99
 重放的 max_model_len 取实际最长采集 prefix +1，避免为短样本按 256k 预留 KV。
 
 回归测试：`tests/test_first_rollout.py tests/test_capture_repair.py tests/test_online_trace.py`，
-33 passed、2 skipped。实际首条轨迹与 replay 结果待事件脚本完成后补充。
+33 passed、2 skipped。
+
+## 首条轨迹实际验收结果
+
+2026-10-18 20:34（UTC+8）检查时，正式进程仍在运行，9/421 tasks 已完成，均为
+Submitted；其余尚未完成。GPU 4–7 每卡约占用 38.8 GiB，约余 34 GiB；prefix cache
+命中率约 95%。此后不轮询全队列进度。
+
+最早完成的是 `pytest-dev__pytest-5631`，rollout ID
+`r-fe68ae281c8e7957846cad05ecbee852`，20:15:10–20:17:53，共 31 轮，正常提交。
+已实际阅读 reasoning、行动、工具反馈与 patch：先复现 numpy array patch 收集时的
+ValueError，再将 sentinel 的相等比较改为 identity 比较；原始复现用例修复后通过，
+compat 测试 8 passed，integration 测试 15 passed / 4 skipped。整个 rollout 无格式错误。
+
+这不是 harness 的 resolved 结论。模型也遇到缺少 hypothesis/mock、较广测试集中的
+7 个失败，以及错误测试路径；部分 shell pipeline 掩盖 pytest 返回码。后加的某些
+“回归测试”仅定义嵌套函数，不能独立证明收集逻辑正确；有效证据是较早直接复现的
+数组 patch 用例。以上不妨碍判断调用、响应、修改、提交的 rollout 链路正常。
+
+NAS 在线采集覆盖为 128/128：97 个 reasoning newline、31 个 `</think>`，32 sites，
+missing=0、unexpected=0，张量全部有限，身份、token 坐标、ledger 与 shard 哈希通过。
+其中 119 点来自 decode FULL graph，9 点来自 mixed eager。
+
+FP16、同模型及 TP4 的 vLLM 独立离线重放于 20:31:37 完成。逐点逐 site 比较结果：
+
+| 重放路径 | 最差 cosine | 最大相对 L2 | 验收 |
+| --- | ---: | ---: | --- |
+| cold | 0.99995160 | 0.9860% | 通过 |
+| warm | 0.99996335 | 0.8580% | 通过 |
+| reordered | 0.99997566 | 0.6992% | 通过 |
+
+每种路径检查 128×32=4,096 个采集点/site 对。阈值为 cosine≥0.999、relative L2≤5%。
+不要求逐位相同；本次最大相对 L2 小于 1%。离线执行资源受限为 2 seqs、batch tokens=512、
+每卡 KV=2 GiB，max_model_len=16230，由实际最长待采集 prefix 决定；未中断正式 rollout。
+
+原始 `audit.json/result.json` 的 `protocol_ok=false/overall_passed=false` 保留不改。
+原因是旧检查只统计 `role=tool`，把最终提交的 `role=exit` 漏算为反馈：31 个命令实际
+对应 30 个普通工具反馈 +1 个 Submitted exit。已逐一验证 30 个 tool_call_id 顺序一致，
+最终命令为提交指令、exit submission 与保存 patch 一致，并单独写入
+`hidden/reports/<run>/first-rollout/manual-review.json`，人工复核验收通过。
+这项诊断误报不表示 capture 或数值测试失败。
+
+原始审计、精确采集点、重放日志及三种路径报告均保存在
+`hidden/reports/<run>/first-rollout/`，事件脚本退出码为 0。
