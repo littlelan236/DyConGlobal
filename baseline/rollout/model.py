@@ -10,6 +10,8 @@ def model_config(cfg, capture_context=None):
     s, g, a = cfg["serving"], cfg["generation"], cfg["agent"]
     extra_body = {
         "top_k": g["top_k"],
+        "min_p": g.get("min_p", 0.0),
+        "repetition_penalty": g.get("repetition_penalty", 1.0),
         "return_token_ids": bool(cfg.get("benchmark_metrics_dir")),
         "steering": steering_payload(cfg),
         "chat_template_kwargs": {k: g[k] for k in ["enable_thinking", "preserve_thinking"]},
@@ -44,6 +46,7 @@ def model_config(cfg, capture_context=None):
             "api_key": os.environ.get(s["api_key_env"], "EMPTY"),
             "timeout": cfg["timeouts"]["model_seconds"],
             **{k: g[k] for k in ["temperature", "top_p", "max_tokens", "seed"]},
+            "presence_penalty": g.get("presence_penalty", 0.0),
             "extra_body": extra_body,
         },
     }

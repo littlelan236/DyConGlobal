@@ -48,39 +48,9 @@ def install_harness_adapter(cfg: dict, factory: ContainerFactory, rows: list[dic
     )
     cache.mkdir(parents=True, exist_ok=True)
 
-    def cached_get(url, *args, **kwargs):
-        import requests
+    from baseline.evaluation.metadata import make_cached_get
 
-        if not url.startswith("https://raw.githubusercontent.com/"):
-            return original_get(url, *args, **kwargs)
-        p = cache / (hash_json(url) + ".txt")
-        if p.exists():
-            response = requests.Response()
-            response.status_code = 200
-            response._content = p.read_bytes()
-            response.url = url
-            return response
-        kwargs.setdefault("timeout", cfg["timeouts"].get("metadata_request_seconds", 30))
-        try:
-            response = original_get(url, *args, **kwargs)
-            # Official requirements lookup tries several candidate paths.
-            # A real missing file must reach that lookup, not abort it here.
-            if response.status_code in (404, 410):
-                return response
-            response.raise_for_status()
-        except requests.RequestException:
-            parts = url.removeprefix("https://raw.githubusercontent.com/").split("/", 3)
-            if len(parts) != 4:
-                raise
-            owner, repo, revision, path = parts
-            response = original_get(
-                f"https://cdn.jsdelivr.net/gh/{owner}/{repo}@{revision}/{path}", *args, **kwargs
-            )
-            if response.status_code in (404, 410):
-                return response
-            response.raise_for_status()
-        p.write_bytes(response.content)
-        return response
+    cached_get = make_cached_get(original_get, cache, cfg["timeouts"].get("metadata_request_seconds", 30))
 
     def build_container(test_spec, client, run_id, logger, nocache, force_rebuild):
         if force_rebuild or nocache:

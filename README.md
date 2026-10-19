@@ -1,112 +1,101 @@
 # DyConGlobal
 
-独立的 coding-agent 轨迹、剩余工作量与 latent 分析工程。远程根目录为
-`/home/wangtianyi/DyConGlobal`；NAS namespace 为 `/VM/wangtianyi/DyConGlobal`。
+coding-agent 轨迹、到最终成功提交的剩余工作量与 latent 分析工程。远程根目录 `/home/wangtianyi/DyConGlobal`，NAS namespace `/VM/wangtianyi/DyConGlobal`。本页按 2026-10-19 远程实际代码更新。
 
-已迁移历史训练轨迹并配置 Qwen3.5-9B FP16；数据范围与评测结果以 baseline manifest 为准。
-普通、capture、steering、steering+capture 共用正式 CLI。当前在线 anchor 为 reasoning 换行和 `</think>`。
+**启动任务先查 [任务入口表](docs/ENTRYPOINTS.md)。已有统一入口时必须复用，不得另建临时脚本、复制 launcher 或直接启动内部 worker，避免绕过快照、选择、身份核验、锁和产物绑定而造成行为不一致。** 普通、capture、steering、steering+capture 都使用 `dycon rollout`。
 
-## 当前检查
+## 阅读顺序
+
+- [任务入口、命令、环境与恢复](docs/ENTRYPOINTS.md)：全部 CLI、两条数据工作流、批量 extraction 和维护边界。
+- [实现状态与限制](docs/IMPLEMENTATION.md)、[文档索引](docs/README.md)。
+- [输入清单](docs/INPUTS.md)、[在线采集与存储](docs/online-capture-fullgraph.md)、[vLLM eager 重放](docs/vllm-eager-extraction.md)。
+- [difficulty](difficulty/README.md)、[action](action/README.md)、[协作约定](AGENTS.md)。
+
+## 配置、目录清单和快照
+
+`config.yaml` 是唯一可编辑配置，拒绝重复 key、未知字段和非法组合。配置所在目录就是 project root，不能复制临时配置到其他目录启动正式任务。离线分析允许显式 `--set`；正式 rollout 拒绝 `--set`，resume/evaluate 使用原 run 快照。
+
+`baseline/manifest.json` 是任务分区、轨迹用途、来源和评测关系的唯一事实来源，没有独立 `splits.json`。同 task 的全部轨迹共享分区；canonical trajectory、patch、评测按内容/来源绑定，submitted、resolved、基础设施故障分开记录。
+
+`runs/RUN_ID/resolved-config.json`、`selection.json` 和 hash 是不可变证据。rollout 从 tasks 选择；`prepare-evaluation` 从 rollouts 选择并创建独立评测快照，不暗中继承之后新增的轨迹。修改输入/配置须按 artifact 契约使用新 ID。
+
+## 启动与检查
+
+在工程根目录使用指定环境：
 
 ```bash
 cd /home/wangtianyi/DyConGlobal
 .venvs/runner/bin/dycon config-check
 .venvs/runner/bin/dycon catalog-check
-.venvs/runner/bin/python -m pytest -q tests
-.venvs/analysis/bin/python -m pytest -q tests/test_catalog.py tests/test_enrichment.py tests/test_hidden.py
-.venvs/runner/bin/ruff check core baseline enrichment hidden difficulty action runtime tests
 .venvs/easysteer/bin/python runtime/scripts/verify_easysteer_runtime.py
 ```
 
-`runtime-check` 在模型未配置时会明确拒绝执行。SSH 密码和 API key 不存入工程；API key 只从指定环境变量读取。
+`dycon` 注册到 `core.cli:main`，等价于同环境的 `python -m core.cli`。`runtime-check` 是旧 workflow 的模型/wheelhouse 前置检查；当前全局 `environment.wheelhouse=null` 会使它拒绝，不能代替真实启动验收。
 
-## 唯一配置与数据入口
-
-- `config.yaml` 是唯一可编辑配置；拒绝重复 YAML key、未知字段和非法组合。正式 `rollout` 拒绝 `--set`；离线分析仍可使用显式覆盖。
-- `baseline/manifest.json` 是唯一任务分区、rollout 用途、来源和评测关系的事实来源；没有 `splits.json`。
-- `runs/<run>/resolved-config.json` 与 selection/hash 是只读运行证据。恢复运行使用原快照，不接受覆盖配置。
-- 同一 task 的全部轨迹共享分区。复用副本按原始内容去重；submitted、resolved、评测故障分别记录。
-- `rollout RUN --task-id TASK --unrolled` 从同一 manifest 筛选未正式运行的任务；`--check-only` 执行真实容器/工具/采集启动验收。
-- 在线产物采用本地有界 spool、单请求 token ledger、异步 NAS 分片发布；用 `capture-recover RUN` 恢复上传，不重复 rollout。
-  详见 [在线采集与存储](docs/online-capture-fullgraph.md) 和 [修复计划](docs/rollout-capture-steering-repair-plan-20261018.md)。
-- 正式对比可用 `baseline-select PROFILE TASK_KEY ROLLOUT_ID` 显式固定每个 task 的 baseline。已有 profile 不自动改选成功样本。
-
-## 数据到位后的命令
-
-先阅读 [导入格式](docs/INPUTS.md)。所有数据导入都需要显式清单。
+以下命令会启动真实模型服务、Docker 和任务，应先核实范围与资源，按需执行：
 
 ```bash
-.venvs/runner/bin/dycon tasks-import /path/to/tasks.json
-.venvs/runner/bin/dycon rollouts-import /path/to/rollouts.json
-.venvs/runner/bin/dycon evaluations-import /path/to/evaluations.json
-.venvs/runner/bin/dycon catalog-check
-```
-
-checkpoint 可以是工程外的只读静态资产。注册会对完整权重及 tokenizer/模板元数据计算 SHA，随后将返回的 fingerprint、path、served_name 写入唯一配置。
-
-```bash
-.venvs/runner/bin/dycon model-register /path/to/checkpoint
-.venvs/runner/bin/dycon images-check --deep
-.venvs/runner/bin/dycon rollout BASELINE_RUN
+.venvs/runner/bin/dycon rollout CHECK_RUN --check-only --task-id INSTANCE_ID
+.venvs/runner/bin/dycon rollout BASELINE_RUN --task-id INSTANCE_ID --unrolled
 .venvs/runner/bin/dycon rollout BASELINE_RUN --resume
 .venvs/runner/bin/dycon prepare-evaluation EVAL_INPUT_RUN
 .venvs/runner/bin/dycon evaluate EVAL_INPUT_RUN EVAL_ID
 ```
 
-rollout 按 manifest tasks 查询；评测输入按 manifest rollouts 查询。两种运行快照分别冻结任务和轨迹，评测不偷偷继承 rollout 后新增加的数据。
-`evaluate --gold` 仅用于环境验证，结果不注册为模型轨迹成功标签。official harness 固定为 SWE-bench 4.1.0。
+`--check-only` 用独立 run ID，真实验收后退出。`--resume` 不允许新选择/覆盖。`evaluate --gold` 仅验证环境，不注册模型轨迹成功标签；官方 harness 固定 SWE-bench 4.1.0。
+
+## 两条 latent 数据路径
+
+在线路径由 `dycon rollout` 在 managed serving 中采集当前生成 reasoning 换行和 `</think>`，保存 request token ledger、event coordinates、hidden shards，随后 finalize token-event labels。上传失败时用 `dycon capture-recover RUN_ID` 恢复发布，不重复 rollout。确认产物/标签完整后，以 `dycon online-index RUN_ID ONLINE_INDEX_ID` 引用 NAS shard。
+
+离线路径按冻结 prefix 做 teacher-forcing 重放：
 
 ```bash
 .venvs/analysis/bin/dycon enrich DATASET_ID
 .venvs/analysis/bin/dycon hidden DATASET_ID CAPTURE_ID
 .venvs/analysis/bin/dycon dataset-index DATASET_ID CAPTURE_ID INDEX_ID
 .venvs/analysis/bin/dycon action-index INDEX_ID ACTION_INDEX_ID
-.venvs/analysis/bin/dycon difficulty-evaluate INDEX_ID /path/to/predictions.json SCORE_ID
+.venvs/analysis/bin/dycon difficulty-evaluate INDEX_ID PREDICTIONS.json SCORE_ID
 ```
 
-hidden.layers 必须显式配置（0-based site index），没有假定的最优层。HF convention 中前 N-1 行对应 decoder output，最后一行是 final norm。
-每个锚点独立 teacher-forcing 重放，分块预填充，仅取边界 token 的 hidden。不会跨请求裁剪混合 SSM/attention cache。
-receipt 与 shard hash 支持核验、幂等重跑和中断后继续；换输入/配置必须使用新 artifact ID。
+`hidden.adapter` 选择 HF 或 vLLM eager；当前 YAML 为 vLLM eager，由 CLI 派发独立 latent-vllm 解释器。显式 layers 使用 0-based 公共 site：前 N−1 个是 decoder output，最后一个是 final norm，不能直接混用 native site 索引。每锚点独立重放，HF 分块预填充，不跨请求裁剪混合 SSM/attention cache。
 
-## 目录职责
+token 级核验使用 `token-trace`、`trajectory-token-audit`、`token-join`、`hidden-token-join-audit`。普通离线索引、在线索引和 token join 格式不同；当前 scorer 只支持普通离线 label-shard 索引，兼容性详见入口表。历史四 GPU extraction 使用已有 `enrichment.scripts.launch_extraction`，不得直接启动 queue worker。
 
-| 目录 | 源码与产物 |
+## 代码与产物职责
+
+| 目录 | 职责 |
 |---|---|
-| `baseline/` | importers、rollout、官方 evaluation、唯一 manifest、canonical trajectories/patches、评测结果 |
-| `enrichment/` | 步骤重建、token prefix、锚点、成功标签与缺失原因；产物在 outputs/、reports/ |
-| `hidden/` | HF adapter、提取和核验；hidden tensor/index/receipt 在 outputs/ |
-| `difficulty/` | models/training/checkpoints 暂留空；datasets 是共享索引；evaluation 含指标和逐轨迹图 |
-| `action/` | datasets 保存无类别假设的样本索引；analyzers 预留，复用同一 hidden |
-| `runtime/` | 共享容器工厂、NAS 镜像、serving、EasySteer、恢复与安装脚本 |
-| `core/` | strict config、原子写、进程锁、model identity、CLI |
-| `runs/` | 配置快照、尝试状态与环境日志；canonical rollout 归 baseline/ |
+| `core/` | strict config、CLI、原子 I/O、锁、磁盘预算、model identity |
+| `baseline/` | manifest、importers、rollout、官方 harness、canonical trajectories/patches、evaluations |
+| `enrichment/` | trajectory labels、prefix、token traces、online token-event finalize；outputs/reports/manifests |
+| `hidden/` | HF/vLLM adapters、提取、artifact reader、online recovery；outputs、spool、online capture 产物 |
+| `difficulty/` | 共享索引、Ridge/FFN/残差估计器、训练 Python API、预测评分与轨迹图 |
+| `action/` | shared hidden 无标签索引；taxonomy/analyzers 预留 |
+| `runtime/` | 容器、NAS OCI、serving/capture/cache/spool、EasySteer、安装/验收/恢复 |
+| `runs/`、`state/` | run 快照/进度、启动证据、supervisor、批量任务和修复状态 |
+| `docs/` | 当前入口、实现约定和数据接口 |
 
-## 标签语义与证据等级
+## 标签和能力边界
 
-一次模型 assistant 回复及其动作阶段算一个 step。步骤序号从 0 起，成功轨迹共有 T 步：open/close 的 remaining_steps 都是 T-s，因为本轮动作尚未发生。
-open 的 reasoning tokens 包含本轮及后续轮，close 只包含后续轮。最终 close 的剩余 reasoning tokens 可以为 0，但不表示当前动作已经成功。
+一次 assistant 回复及其动作阶段算一个 step；s 从 0 起，共 T 步时 open/close 的 remaining steps 均为 T−s，当前动作尚未发生。open 的 reasoning-token 标签含本轮及后续轮，close 仅含后续轮；在线 newline 使用当前 token 之后的剩余 reasoning tokens。最终 close 的 token 剩余量为 0 不表示动作已成功。
 
-仅 `resolved=true` 的轨迹产生成功剩余量标签；unresolved、未评测、基础设施失败保留 null。另存距终止的步骤数量用于诊断。
-旧轨迹缺少实际 token IDs 时标记 template/count/parser 重建证据；长度吻合不冒充精确 token 校验。`token_evidence: exact` 可过滤低证据输入。
-action 命令等只保存在分析证据字段，绝不进入当前锚点的 `prefix_token_ids`。
+仅 `resolved=true` 轨迹产生成功剩余量标签；unresolved、未评测和基础设施故障保留 null。缺原始 prompt/output IDs 的历史轨迹明确标记重建证据；长度吻合不能冒充 exact。动作只存于分析证据，不能进入当前 anchor prefix。
 
-## NAS 与容器
+Ridge、FFN MLP、Ridge+FFN 和训练 API 已实现。单层 Ridge × alpha 的 submission-remainder pilot 已有正式 `dycon difficulty-ridge` CLI、task 划分和参数/验证报告，见 [实验指南](docs/ridge-submission-pilot.md)；通用 FFN/残差训练 CLI、完整 checkpoint 管理和动态 difficulty 控制仍未实现。action taxonomy/labels/analyzers 未实现。当前 task 全属 train，不能声称已有 task 级 train/val/test 验证。
 
-长期镜像采用 NAS 上不可变 OCI blob store；stream 到 `docker load`，不生成本地 tar。运行时 Docker 仍需要本地解压空间。
-四个跨进程 load slots、每镜像加载锁、生命周期 shared lease、短全局空间预约共同调度；相同镜像只加载一次，不同镜像允许并行。
-任务后先保存轨迹/patch/环境证据，再删除容器和无引用的本工程镜像。不会登记或删除原先存在的镜像；不 broad prune，不重启 Docker daemon。
+## 环境、镜像与验证
+
+已有 runner、analysis、easysteer、latent-vllm 四个独立环境；锁文件在 `locks/`，EasySteer/vLLM 源码在 `vendor/`。长期镜像是 NAS 不可变 OCI blobs，流式 docker load 不生成本地 tar；Docker 解压仍占本地磁盘。load slots、镜像锁、lease 和空间预约协调并发；清理限本工程拥有的容器/镜像。
+
+SSH 密码和 API key 不进入工程。managed serving 校验本地 checkpoint/runtime；external serving 的 checkpoint 身份来自显式配置声明。
+
+已有测试命令（不表示本次文档工作全部重跑）：
 
 ```bash
-.venvs/runner/bin/dycon recover
-.venvs/runner/bin/python -m runtime.scripts.smoke_images
+.venvs/runner/bin/python -m pytest -q tests
+.venvs/analysis/bin/python -m pytest -q tests/test_catalog.py tests/test_enrichment.py tests/test_hidden.py tests/test_difficulty_estimators.py
+.venvs/runner/bin/ruff check core baseline enrichment hidden difficulty action runtime tests
 ```
 
-recover 仅清理没有活跃 run 锁的本工程容器。smoke 使用 NAS 中 4 个极小合成 OCI 镜像验证真实 load/create/remove，不是 SWE-bench 或环境 gold 评测。
-
-## 运行环境与复现
-
-runner、analysis、easysteer 三个独立虚拟环境已在远程安装；固定包清单在 `locks/*.txt`。EasySteer/vLLM 源码物理保存在 vendor/，无旧工程可变代码依赖。
-只保留 EasySteer steering 路径；baseline 明确发送 `steering:false`。启用干预需提供模型 fingerprint 绑定的原生 payload；动态难度控制和估计器训练未预先实现。
-外部模型服务的 checkpoint 身份只能由用户配置声明，managed 服务才提供本地 checkpoint/runtime 校验。
-
-实际 checkpoint 的层语义、online/offline 一致性、SWE-bench 环境修复及 gold 通过率仍需在模型/任务范围确定后验证。当前通过的合成测试不替代这些实验。
+合成测试、GPU 小样本、真实 Docker smoke 和 SWE-bench gold 是不同证据；日期化结果只对当时模型、runtime 和任务范围有效。

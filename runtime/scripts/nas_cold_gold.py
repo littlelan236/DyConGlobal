@@ -155,15 +155,15 @@ def run_cohort(root, out, name, rows, allowed_stopped):
     # Descriptor integrity is verified before any image deletion. write_archive
     # performs full SHA256 verification before each actual Docker load.
     print(f"NAS INTEGRITY {name} ({len(rows)} tasks)", flush=True)
-    verified_blobs = set()
+    from runtime.images.oci import verify_blobs
+
+    grouped = {}
     for row in rows:
         store = NasImageStore(cfg, row["nas_image"])
-        for descriptor in store.verify(deep=False):
-            digest = descriptor["digest"]
-            if digest not in verified_blobs:
-                if "sha256:" + sha256(store.blob(digest)) != digest:
-                    raise ValueError(f"Corrupt NAS backup: {store.blob(digest)}")
-                verified_blobs.add(digest)
+        grouped.setdefault(store.root / "blobs/sha256", []).extend(store.verify())
+    verified_blobs = set()
+    for namespace, descriptors in grouped.items():
+        verified_blobs.update(verify_blobs(namespace, descriptors, workers=4))
     write_json(
         folder / "backup-integrity.json",
         {"at": now(), "unique_blobs": len(verified_blobs), "deep_verified": True},
@@ -180,7 +180,7 @@ def run_cohort(root, out, name, rows, allowed_stopped):
         selected = folder / f"attempt-{attempt}-ids.json"
         write_json(selected, [r["instance_id"] for r in pending])
         aid = out.name + "-" + name + f"-attempt{attempt}"
-        summary = audit(root, path, aid, 4, selected, cold_start=True)
+        summary = audit(root, path, aid, 4, selected, cold_start=True, cfg=cfg)
         summaries.append(str(root / "state/gold-image-audit" / aid / "summary.json"))
         latest.update({r["instance_id"]: r for r in summary["results"]})
         # Fresh attempts retry infrastructure/lifecycle failures. Genuine test

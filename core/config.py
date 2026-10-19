@@ -11,6 +11,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.io import hash_json, identifier, owned_path, read_json, sha256, write_json
+from difficulty.probe_config import RidgeProbe
 
 
 class Strict(BaseModel):
@@ -64,6 +65,9 @@ class Generation(Strict):
     temperature: float = Field(ge=0)
     top_p: float = Field(gt=0, le=1)
     top_k: int = Field(gt=0)
+    min_p: float = Field(default=0.0, ge=0, le=1)
+    presence_penalty: float = Field(default=0.0, ge=-2, le=2)
+    repetition_penalty: float = Field(default=1.0, gt=0)
     max_tokens: int = Field(gt=0)
     seed: int
     enable_thinking: bool
@@ -226,6 +230,7 @@ class Paths(Strict):
 
 class Difficulty(Strict):
     estimator: None
+    ridge_probe: RidgeProbe | None = None
 
 
 class Action(Strict):
@@ -311,6 +316,9 @@ def resolve(path, overrides=()):
             raise ValueError(f"Unknown config field: {dotted}")
         target[keys[-1]] = yaml.safe_load(value)
     cfg = Config.model_validate(raw).model_dump()
+    # Preserve old snapshot/config identities when the new optional pilot is absent.
+    if "ridge_probe" not in raw.get("difficulty", {}):
+        cfg["difficulty"].pop("ridge_probe")
     root = path.parent
     if (
         cfg["hidden"]["adapter"] == "hf_causal"

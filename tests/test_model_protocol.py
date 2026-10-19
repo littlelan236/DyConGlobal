@@ -44,7 +44,7 @@ def test_real_agent_request_and_submission_protocol(cfg, tmp_path, monkeypatch):
                                         "name": "bash",
                                         "arguments": json.dumps(
                                             {
-                                                "command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT; git diff"
+                                                "command": "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt"
                                             }
                                         ),
                                     },
@@ -73,6 +73,7 @@ def test_real_agent_request_and_submission_protocol(cfg, tmp_path, monkeypatch):
             return {}
 
         def execute(self, action):
+            assert action["command"] == "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt"
             DockerEnvironment._check_finished(
                 self, {"returncode": 0, "output": "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\nfixture-patch"}
             )
@@ -85,8 +86,8 @@ def test_real_agent_request_and_submission_protocol(cfg, tmp_path, monkeypatch):
         agent = DurableAgent(
             make_model(cfg, Deadline()),
             Environment(),
-            system_template="Fix code",
-            instance_template="{{task}}",
+            system_template=cfg["agent"]["system_template"],
+            instance_template=cfg["agent"]["instance_template"],
             step_limit=2,
             cost_limit=0,
             output_path=tmp_path / "trace.json",
@@ -95,6 +96,11 @@ def test_real_agent_request_and_submission_protocol(cfg, tmp_path, monkeypatch):
         assert result["exit_status"] == "Submitted"
         assert result["submission"] == "fixture-patch"
         assert seen[0]["steering"] is False
+        assert seen[0]["min_p"] == 0.0
+        assert seen[0]["presence_penalty"] == 0.0
+        assert seen[0]["repetition_penalty"] == 1.0
+        assert "<pr_description>" in seen[0]["messages"][1]["content"]
+        assert "git diff -- path/to/file1 path/to/file2 > patch.txt" in seen[0]["messages"][1]["content"]
         assistant = next(m for m in agent.messages if m["role"] == "assistant")
         assert assistant["extra"]["request"]["model_fingerprint"] == "fixture-model"
         assert assistant["extra"]["response"]["id"] == "chat-fixture"

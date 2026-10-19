@@ -28,14 +28,25 @@ class CaptureWorkerExtension:
             if geometry is None:
                 raise RuntimeError("Native capture batch has no geometry")
             generated = geometry.num_output.tolist()
-            kind = "mixed" if any(generated) and not all(generated) else "decode" if all(generated) else "prefill"
+            kind = (
+                "mixed"
+                if any(generated) and not all(generated)
+                else "decode"
+                if all(generated)
+                else "prefill"
+            )
             computed = geometry.num_computed.tolist()
             boundaries = geometry.query_start_loc_cpu
             for i, request_id in enumerate(geometry.req_ids):
                 start = int(computed[i])
                 end = start + int(boundaries[i + 1] - boundaries[i])
                 rows = self._dycon_execution.setdefault(request_id, [])
-                if rows and rows[-1]["end"] == start and rows[-1]["graph_execution"] == mode and rows[-1]["batch_kind"] == kind:
+                if (
+                    rows
+                    and rows[-1]["end"] == start
+                    and rows[-1]["graph_execution"] == mode
+                    and rows[-1]["batch_kind"] == kind
+                ):
                     rows[-1]["end"] = end
                 else:
                     rows.append({"start": start, "end": end, "graph_execution": mode, "batch_kind": kind})

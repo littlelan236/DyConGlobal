@@ -1,7 +1,14 @@
 # Online FULL-graph hidden capture
 
+Maintained against the remote working tree on 2026-10-19. Commands and recovery
+boundaries are in [ENTRYPOINTS.md](ENTRYPOINTS.md). All four production modes use
+`dycon rollout`; reuse that entry point rather than creating temporary scripts
+or directly starting workers. Historical acceptance scripts may contain fixed
+paths, GPUs and top-level execution.
+
 The optional online path is controlled by the `capture` block in `config.yaml`.
-Set `capture.enabled: false` for an ordinary rollout; the checked-in remote configuration
+Set `capture.enabled: false` and `steering.enabled: false` (with null payload)
+for an ordinary rollout; the current remote configuration
 currently enables capture. The four modes share the same official CLI and common
 model, parser, generation, agent and container configuration. Enabling capture
 it requires managed serving and starts a localhost control plane alongside the
@@ -19,7 +26,9 @@ The control plane exposes:
 Request metadata is explicit (`task_id`, `run_id`, `rollout_id`, `step_id`, and
 anchors). It is never inferred from HTTP response order or batch order. The
 rollout adapter adds the metadata under `extra_body.dycon_capture` only when the
-feature is enabled.
+feature is enabled. The managed process currently requests vLLM
+`FULL_AND_PIECEWISE`; `capture.graph_mode: FULL` describes the capture requirement,
+not a promise that every prefill or mixed batch executes a FULL graph.
 
 ## Anchor and cache semantics
 
@@ -95,12 +104,15 @@ was not instrumented.
 
 `capture.prefill_token_chunk_size: 0` now delegates prefill scheduling to vLLM
 and omits the threshold override. The project no longer changes CUDA graph
-dispatch to treat prompt chunks as uniform decode. Decode-only anchors use
-`FULL_DECODE_ONLY`: ordinary model-supported prefill followed by FULL decode
-capture. Decode capture preserves native APC reads and explicit caller skips.
+dispatch to treat prompt chunks as uniform decode. The earlier diagnostic
+configuration used `FULL_DECODE_ONLY`. Current `ServingManager.build_args()`
+requests `FULL_AND_PIECEWISE`, preserving native prefill/mixed graph options
+alongside FULL decode capture. Actual graph/compiled execution must be checked
+in each run's evidence; configuration alone does not prove coverage or parity.
+Decode capture preserves native APC reads and explicit caller skips.
 
 Managed serving rejects the known-invalid single-token Qwen configuration.
 The `allow_unsupported_gdn` diagnostic flag applies to prompt-anchor FULL
-experiments, not to normal decode capture. See
-[the diagnostic report](capture-zero-token-diagnosis-20261018.md) for controls
-and the limits of the current acceptance results.
+experiments, not to normal decode capture. Use the current rollout startup gate and per-run evidence to check graph
+execution and capture coverage; these small acceptance tests do not establish
+whole-corpus coverage or parity.

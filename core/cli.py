@@ -66,6 +66,9 @@ def main(argv=None):
     p.add_argument("index_id")
     p.add_argument("predictions")
     p.add_argument("evaluation_id")
+    p = sub.add_parser("difficulty-ridge")
+    p.add_argument("experiment_id")
+    p.add_argument("--mode", choices=["dry-run", "check-data", "fit"], default="fit")
     a = parser.parse_args(argv)
     if a.command == "rollout" and a.set:
         parser.error("rollout rejects --set; edit the unique config.yaml or resume its immutable snapshot")
@@ -204,6 +207,15 @@ def main(argv=None):
         from difficulty.evaluation.run import evaluate_predictions
 
         result = str(evaluate_predictions(cfg, a.index_id, a.predictions, a.evaluation_id))
+    elif a.command == "difficulty-ridge":
+        import os
+
+        threads = str((cfg["difficulty"].get("ridge_probe") or {}).get("blas_threads", 4))
+        for name in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS", "BLIS_NUM_THREADS"):
+            os.environ[name] = threads
+        from difficulty.training.ridge_probe import run_probe
+
+        result = run_probe(cfg, a.experiment_id, mode=a.mode)
     else:
         from runtime.containers.recovery import recover
 

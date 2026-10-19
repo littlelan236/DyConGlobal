@@ -12,6 +12,18 @@ def environment_overrides(cfg: dict, instance: dict) -> dict:
     # remains offline; the isolated task's runtime needs the Docker bridge.
     if iid in {
         "psf__requests-1921",
+        "pydicom__pydicom-1194",
+        "pydicom__pydicom-1236",
+        "pydicom__pydicom-1241",
+        "pydicom__pydicom-1365",
+        "pydicom__pydicom-1416",
+        "pydicom__pydicom-1539",
+        "pydicom__pydicom-1555",
+        "pyvista__pyvista-3675",
+        "pyvista__pyvista-3747",
+        "pyvista__pyvista-4417",
+        "pyvista__pyvista-4648",
+        "pyvista__pyvista-4808",
         "sphinx-doc__sphinx-10435",
         "sphinx-doc__sphinx-7985",
         "sphinx-doc__sphinx-8475",

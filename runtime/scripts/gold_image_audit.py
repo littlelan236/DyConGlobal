@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import copy
 import json
 import time
+import traceback
 from pathlib import Path
 
 from baseline.evaluation.harness import install_harness_adapter
@@ -40,6 +42,7 @@ def audit(
     workers: int,
     only_file: Path | None = None,
     cold_start: bool = False,
+    cfg: dict | None = None,
 ) -> dict:
     out = root / "state/gold-image-audit" / audit_id
     out.mkdir(parents=True, exist_ok=False)
@@ -49,7 +52,10 @@ def audit(
         instances = [x for x in instances if x["instance_id"] in wanted]
     if not instances or not all(x.get("nas_image") for x in instances):
         raise ValueError("Expected instances with NAS image references")
-    cfg = load_cfg(root, instances_path, out)
+    cfg = load_cfg(root, instances_path, out) if cfg is None else copy.deepcopy(cfg)
+    if cfg.get("project_root", str(root)) != str(root):
+        raise ValueError("Config snapshot belongs to another project")
+    cfg.update(project_root=str(root), evaluation_run_id=out.name, audit_instances=str(instances_path))
     cfg["require_cold_images"] = cold_start
     cfg["image_events_path"] = str(out / "image-lifecycle.jsonl")
     write_json(out / "audit-config.json", {k: v for k, v in cfg.items() if k not in {"project_root"}})
@@ -95,6 +101,7 @@ def audit(
             "status": "infra_error",
             "resolved": None,
         }
+        stage = "make_test_spec"
         try:
             spec = official.make_test_spec(row, namespace="swebench")
             t1 = time.perf_counter()
@@ -103,6 +110,7 @@ def audit(
                 "model_name_or_path": "gold-patch-audit",
                 "model_patch": row.get("patch", ""),
             }
+            stage = "harness"
             graded = official.run_instance(
                 spec,
                 prediction,
@@ -123,12 +131,18 @@ def audit(
             result["evaluation_seconds"] = t2 - t1
             result["total_seconds"] = t2 - t0
             if cold_start:
+                stage = "cleanup_check"
                 exists = factory.image_manager._exists(result["image_id"])
                 result["image_absent_after"] = not exists
                 if exists:
                     result.update(status="cleanup_error", resolved=None)
         except Exception as exc:
-            result.update(error=repr(exc), total_seconds=time.perf_counter() - t0)
+            result.update(
+                error=repr(exc),
+                failure_stage=stage,
+                traceback=traceback.format_exc(),
+                total_seconds=time.perf_counter() - t0,
+            )
         write_json(task_out / "result.json", result)
         return result
 
@@ -163,7 +177,8 @@ def audit(
             result["image_id"] in loads & cold & removed and result.get("image_absent_after") is True
         )
         if cold_start and not result["cold_lifecycle_verified"]:
-            result.update(status="lifecycle_error", resolved=None)
+            if result["status"] == "completed":
+                result.update(status="lifecycle_error", resolved=None)
         write_json(output / "tasks" / result["instance_id"] / "result.json", result)
     summary = {
         "audit_id": audit_id,
@@ -212,6 +227,7 @@ def main():
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--only-file", type=Path)
     p.add_argument("--cold-start", action="store_true")
+    p.add_argument("--config-snapshot", type=Path)
     a = p.parse_args()
     if a.workers < 1 or a.workers > 4:
         raise ValueError("workers must be 1..4")
@@ -224,6 +240,7 @@ def main():
                 a.workers,
                 a.only_file.resolve() if a.only_file else None,
                 a.cold_start,
+                read_json(a.config_snapshot) if a.config_snapshot else None,
             ),
             ensure_ascii=False,
             indent=2,

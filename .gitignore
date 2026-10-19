@@ -43,8 +43,20 @@ desktop.ini
 /assets/
 /tmp/
 /.cache/
+/reports/**
+/capture/**
+/online/**
 *.log
 *.pid
+
+# Atomic writes and process locks; dependency locks remain versioned
+.write-*
+/baseline/manifest.lock
+/enrichment/manifest.lock
+/hidden/manifest.lock
+
+# One-off machine-specific diagnostic (supported tools live in hidden/evaluation)
+/dense_capture_smoke.py
 
 # Keep the canonical baseline manifest and source; exclude rollout payloads
 /baseline/trajectories/**
@@ -58,17 +70,14 @@ desktop.ini
 /hidden/outputs/**
 /hidden/reports/**
 /hidden/online/**
-# Async capture shards, spill files and upload receipts stay local until NAS publication.
 /hidden/spool/**
 /hidden/evaluation/outputs/**
 
 # Estimator/action source stays tracked; generated datasets and models do not
-/difficulty/datasets/*
-!/difficulty/datasets/*.py
+/difficulty/datasets/*/
 /difficulty/checkpoints/**
 /difficulty/evaluation/outputs/**
-/action/datasets/*
-!/action/datasets/*.py
+/action/datasets/*/
 /action/evaluation/outputs/**
 /action/checkpoints/**
 
@@ -79,9 +88,9 @@ desktop.ini
 /runtime/serving/*.json
 /runtime/serving/*.jsonl
 /runtime/serving/*.lock
+/runtime/serving/*.sock
 /runtime/serving/outputs/
 /runtime/serving/logs/
-/runtime/serving/*.sock
 
 # Checkpoints and package/image archives are assets, not source
 /models/
@@ -104,12 +113,12 @@ desktop.ini
 *.pkl
 *.sqlite
 *.sqlite3
-*.sqlite-wal
 *.sqlite-shm
-*.sqlite3-wal
+*.sqlite-wal
 *.sqlite3-shm
-*.db-wal
+*.sqlite3-wal
 *.db-shm
+*.db-wal
 
 # EasySteer uses the separate pinned vendor/easysteer-vllm overlay.
 # Its upstream checkout contains a redundant embedded vLLM source tree.
@@ -122,7 +131,3 @@ desktop.ini
 
 # Preserve deliberate placeholders in otherwise empty functional directories
 !.gitkeep
-
-# Online capture queues and diagnostic process state
-/capture/**
-/online/**

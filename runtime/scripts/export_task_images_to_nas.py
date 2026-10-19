@@ -1,170 +1,229 @@
-"""Export the canonical 258-task Docker cohort into a DyConGlobal OCI NAS store."""
+"""Resume the 258-task NAS export, preserving complete immutable OCI graphs."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import tarfile
 import uuid
 from pathlib import Path
 
+import docker
+
 from baseline.catalog import Catalog
-from core.io import sha256, write_json
+from core.config import resolve
+from core.io import now, read_json, sha256, write_json
+from core.locking import file_lock
+from runtime.images.oci import blob_path, descriptor_graph, platform_manifest, verify_blobs
 
 
-def digest_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for block in iter(lambda: f.read(8 * 1024 * 1024), b""):
-            h.update(block)
-    return "sha256:" + h.hexdigest()
-
-
-def export(root: Path, store_name: str, dry_run: bool = False) -> dict:
-    root = root.resolve()
-    catalog = Catalog(root)
-    manifest = catalog.read()
-    tasks = [t["instance"] for t in manifest["tasks"].values()]
-    tasks.sort(key=lambda x: x["instance_id"])
-    if len(tasks) != 258 or not all(t.get("docker_image") for t in tasks):
-        raise ValueError("Expected 258 catalog tasks with docker_image")
-    requested = {t["docker_image"]: t["instance_id"] for t in tasks}
-    docker = "/home/wangtianyi/.local/bin/docker"
-    host = "unix:///run/user/1002/docker.sock"
-    listed = subprocess.check_output(
-        [docker, "--host", host, "images", "--no-trunc", "--format", "{{.ID}} {{.Repository}}:{{.Tag}}"],
-        text=True,
-    )
-    ids = {}
-    for line in listed.splitlines():
-        parts = line.split(maxsplit=1)
-        if len(parts) == 2 and parts[1] in requested:
-            ids[requested[parts[1]]] = parts[0]
-    missing = sorted(set(requested.values()) - set(ids))
-    if missing:
-        raise ValueError(f"Missing Docker images for {len(missing)} tasks: {missing[:10]}")
-    store = Path("/VM/wangtianyi/DyConGlobal") / store_name
-    if dry_run:
-        return {"tasks": len(tasks), "docker_images": len(ids), "missing": missing, "store": str(store)}
-    blob_root = store / "blobs/sha256"
-    image_root = store / "images"
-    blob_root.mkdir(parents=True, exist_ok=True)
-    image_root.mkdir(parents=True, exist_ok=True)
+def import_archive(cfg, tags, blobs):
+    """Stream only missing tasks, deduplicating blobs without staging local tar files."""
     proc = subprocess.Popen(
-        [docker, "--host", host, "save", *[t["docker_image"] for t in tasks]], stdout=subprocess.PIPE
+        [
+            cfg["environment"]["docker_executable"],
+            "--host",
+            cfg["environment"]["docker_host"],
+            "save",
+            *tags,
+        ],
+        stdout=subprocess.PIPE,
     )
-    member_digest: dict[str, dict] = {}
+    aliases = {}
+    deferred = []
     try:
-        with tarfile.open(fileobj=proc.stdout, mode="r|") as tar:
-            for member in tar:
+        with tarfile.open(fileobj=proc.stdout, mode="r|") as archive:
+            for member in archive:
+                if member.islnk() or member.issym():
+                    deferred.append((member.name, member.linkname))
+                    continue
                 if not member.isfile():
                     continue
-                source = tar.extractfile(member)
-                if source is None:
+                source = archive.extractfile(member)
+                if not member.name.startswith("blobs/sha256/"):
+                    # Read via the streaming tar iterator, never extract paths to disk.
                     continue
-                # Docker archive metadata is small; blobs are copied once to NAS.
-                if member.name == "manifest.json":
-                    metadata = json.load(source)
-                    member_digest[member.name] = {"metadata": metadata}
-                    continue
-                if member.name == "repositories":
-                    continue
-                token = uuid.uuid4().hex
-                tmp = blob_root / (".export-" + token)
-                h = hashlib.sha256()
-                size = 0
-                with tmp.open("wb") as out:
-                    for block in iter(lambda: source.read(8 * 1024 * 1024), b""):
-                        h.update(block)
-                        size += len(block)
-                        out.write(block)
-                digest = h.hexdigest()
-                final = blob_root / digest
-                if final.exists():
-                    if final.stat().st_size != size:
-                        raise ValueError(f"Existing NAS blob size mismatch: {final}")
-                    tmp.unlink()
-                else:
-                    tmp.replace(final)
-                member_digest[member.name] = {"digest": "sha256:" + digest, "size": size}
-        code = proc.wait()
-        if code:
-            raise RuntimeError(f"docker save exited with {code}")
+                expected = member.name.rsplit("/", 1)[-1]
+                target = blob_path(blobs, "sha256:" + expected)
+                tmp = blobs / (".export-" + uuid.uuid4().hex)
+                digest = hashlib.sha256()
+                try:
+                    with tmp.open("wb") as output:
+                        for block in iter(lambda: source.read(8 * 1024 * 1024), b""):
+                            digest.update(block)
+                            output.write(block)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    if digest.hexdigest() != expected:
+                        raise ValueError(f"Wrong archive blob hash: {member.name}")
+                    if (
+                        target.exists()
+                        and target.stat().st_size == member.size
+                        and sha256(target) == expected
+                    ):
+                        tmp.unlink()
+                    else:
+                        tmp.replace(target)
+                    aliases[member.name] = target
+                finally:
+                    tmp.unlink(missing_ok=True)
+        if proc.wait():
+            raise RuntimeError("docker save failed")
+        # Docker save can represent identical files as hardlinks. Only content
+        # digest aliases inside the archive are accepted, never filesystem links.
+        for name, link in deferred:
+            if not name.startswith("blobs/sha256/"):
+                continue
+            source = aliases.get(link)
+            if source is None:
+                source = blob_path(blobs, "sha256:" + link.rsplit("/", 1)[-1])
+            expected = name.rsplit("/", 1)[-1]
+            if sha256(source) != expected:
+                raise ValueError(f"Invalid Docker archive blob alias: {name}")
+            target = blob_path(blobs, "sha256:" + expected)
+            if not target.exists():
+                shutil.copyfile(source, target)
     except BaseException:
         proc.kill()
         proc.wait()
         raise
-    task_records = {}
-    for task in tasks:
-        iid = task["instance_id"]
-        image_id = ids[iid]
-        manifest_blob = blob_root / image_id[7:]
-        oci = json.loads(manifest_blob.read_bytes())
-        if "config" not in oci or "layers" not in oci:
-            raise ValueError(f"Expected a single-platform OCI manifest: {iid}")
-        descriptors = [oci["config"], *oci["layers"]]
-        for d in descriptors:
-            target = blob_root / d["digest"][7:]
-            if not target.is_file() or target.stat().st_size != d["size"]:
-                raise ValueError(f"Missing archived descriptor: {iid}/{d['digest']}")
-        task_records[iid] = {
-            "requested": task["docker_image"],
+
+
+def export(root: Path, store_name="legacy-258-20261017", *, dry_run=False, evidence=None):
+    root = root.resolve()
+    evidence = evidence or root / "state/nas-export-258-recovery-20261018"
+    cfg = resolve(root / "config.yaml")
+    catalog = Catalog(root)
+    initial = catalog.read()
+    tasks = sorted((t["instance"] for t in initial["tasks"].values()), key=lambda r: r["instance_id"])
+    if len(tasks) != 258 or not all(t.get("docker_image") for t in tasks):
+        raise ValueError("Expected exactly 258 catalog tasks with original Docker tags")
+    store = (Path(cfg["paths"]["nas_root"]) / store_name).resolve()
+    if not store.is_relative_to(Path(cfg["paths"]["nas_root"]).resolve()):
+        raise ValueError("NAS store escapes configured namespace")
+    client = docker.DockerClient(base_url=cfg["environment"]["docker_host"], timeout=120)
+    try:
+        images = client.api.images(all=True)
+        listed = {tag: image["Id"] for image in images for tag in (image.get("RepoTags") or [])}
+        ids = {r["instance_id"]: listed[r["docker_image"]] for r in tasks}
+    finally:
+        client.close()
+    blobs = store / "blobs/sha256"
+    records = store / "images"
+    blobs.mkdir(parents=True, exist_ok=True)
+    records.mkdir(exist_ok=True)
+
+    def describe(row):
+        image_id = ids[row["instance_id"]]
+        path = blob_path(blobs, image_id)
+        obj = read_json(path)
+        descriptor = {"digest": image_id, "size": path.stat().st_size, "mediaType": obj["mediaType"]}
+        graph = descriptor_graph(blobs, descriptor)
+        runtime, manifest = platform_manifest(blobs, descriptor, cfg["environment"]["platform"])
+        return {
+            "requested": row["docker_image"],
             "manifest_digest": image_id,
-            "manifest_size": manifest_blob.stat().st_size,
-            "config": oci["config"],
-            "layers": oci["layers"],
-            "compressed_bytes": sum(d["size"] for d in oci["layers"]),
+            "manifest_size": descriptor["size"],
+            "root_media_type": descriptor["mediaType"],
+            "runtime_manifest_digest": runtime["digest"],
+            "config": manifest["config"],
+            "layers": manifest["layers"],
+            "compressed_bytes": sum(d["size"] for d in graph),
             "repo_digests": [],
         }
-        write_json(image_root / (iid + ".json"), task_records[iid])
-    import shutil
 
-    old_config = json.loads(
-        Path("/home/wangtianyi/tactRefractor/baseline/config/resolved-config.json").read_text()
+    pending = []
+    for task in tasks:
+        try:
+            describe(task)
+        except (FileNotFoundError, KeyError, ValueError):
+            pending.append(task["docker_image"])
+    print(
+        f"RESUME: {len(tasks) - len(pending)}/258 complete graphs, {len(pending)} images need export",
+        flush=True,
     )
-    env = old_config["environment"]
+    if dry_run:
+        return {"tasks": len(tasks), "store": str(store), "missing_images": pending}
+    evidence.mkdir(parents=True, exist_ok=True)
+    write_json(evidence / "original-identities.json", ids)
+    write_json(evidence / "catalog-before.json", initial)
+    if pending:
+        import_archive(cfg, pending, blobs)
+    # Derive runtime fields from linux/amd64, retain index + attestation digests.
+    task_records = {r["instance_id"]: describe(r) for r in tasks}
+    descriptors = []
+    for record in task_records.values():
+        descriptors.extend(
+            descriptor_graph(
+                blobs,
+                {
+                    "digest": record["manifest_digest"],
+                    "size": record["manifest_size"],
+                    "mediaType": record["root_media_type"],
+                },
+            )
+        )
+
+    def progress(done, total):
+        if done % 100 == 0 or done == total:
+            print(f"INTEGRITY {done}/{total} unique blobs verified (4 read workers)", flush=True)
+
+    verified = verify_blobs(blobs, descriptors, workers=4, progress=progress)
+    for iid, record in task_records.items():
+        write_json(records / (iid + ".json"), record)
+    old_cfg = read_json("/home/wangtianyi/tactRefractor/baseline/config/resolved-config.json")
+    env = old_cfg["environment"]
     wheels = store / "wheels"
     shutil.copytree(env["wheelhouse"], wheels, dirs_exist_ok=True)
     write_json(store / "wheel-hashes.json", {p.name: sha256(p) for p in wheels.glob("*.whl")})
     with catalog.transaction() as data:
-        for task in data["tasks"].values():
-            iid = task["instance_id"]
-            p = image_root / (iid + ".json")
-            task["instance"]["environment_overrides"] = {
-                **(task["instance"].get("environment_overrides") or {}),
+        if set(data["tasks"]) != set(initial["tasks"]):
+            raise ValueError("Task membership changed during export")
+        for key, task in data["tasks"].items():
+            row = task["instance"]
+            iid = row["instance_id"]
+            if row["docker_image"] != initial["tasks"][key]["instance"]["docker_image"]:
+                raise ValueError("Task image changed during export")
+            overrides = row.get("environment_overrides") or {}
+            row["environment_overrides"] = {
+                **overrides,
                 "wheelhouse": str(wheels),
-                "constraints": env["constraints"],
-                "repo_pins": env["repo_pins"],
+                "constraints": list(dict.fromkeys(env["constraints"] + overrides.get("constraints", []))),
+                "repo_pins": {**env["repo_pins"], **overrides.get("repo_pins", {})},
                 "network_fallback": False,
             }
-            task["instance"]["nas_image"] = {
+            row["nas_image"] = {
                 "store": store_name,
                 "manifest": "images/" + iid + ".json",
-                "manifest_sha256": sha256(p),
-                "image_id": task_records[iid]["manifest_digest"],
+                "manifest_sha256": sha256(records / (iid + ".json")),
+                "image_id": ids[iid],
             }
-    return {
+    result = {
         "tasks": len(tasks),
-        "docker_images": len(ids),
         "store": str(store),
-        "unique_blobs": len(list(blob_root.glob("[0-9a-f]*"))),
         "manifest_files": len(task_records),
+        "unique_verified_blobs": len(verified),
+        "reexported_images": len(pending),
+        "index_images": sum(
+            "index" in r["root_media_type"] or "manifest.list" in r["root_media_type"]
+            for r in task_records.values()
+        ),
+        "deep_verified": True,
+        "finished_at": now(),
     }
+    write_json(evidence / "receipt.json", result)
+    return result
 
 
-def main():
+if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--root", type=Path, required=True)
     p.add_argument("--store", default="legacy-258-20261017")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
-    result = export(args.root, args.store, args.dry_run)
-    if not args.dry_run:
-        write_json(args.root / "state/nas-export-258/receipt.json", result)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-
-
-if __name__ == "__main__":
-    main()
+    with file_lock(args.root / "state/nas-export-258.lock"):
+        print(json.dumps(export(args.root, args.store, dry_run=args.dry_run), indent=2))

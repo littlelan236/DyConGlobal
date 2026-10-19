@@ -1,6 +1,11 @@
 # vLLM eager latent extraction
 
-This backend uses the project's pinned EasySteer/vLLM 0.29.0 runtime in an independent `.venvs/latent-vllm` environment. It does not patch the serving environment, vendor sources, model weights, rollout code or steering code. The existing default remains `hf_causal`.
+This backend uses the project's pinned EasySteer/vLLM 0.29.0 runtime in an independent `.venvs/latent-vllm` environment. It does not patch the serving environment, vendor sources, model weights, rollout code or steering code. As of 2026-10-19 the remote `config.yaml` selects `vllm_eager`; `hf_causal` remains supported and legacy HF artifact identities are preserved.
+
+Production extraction uses `dycon hidden DATASET_ID CAPTURE_ID`, which delegates
+to the isolated interpreter. Reuse this entry point; do not create temporary
+extraction scripts or directly call workers. See [ENTRYPOINTS.md](ENTRYPOINTS.md)
+for the historical queue launcher and online/offline workflow boundaries.
 
 ## Reused implementation
 
@@ -48,13 +53,14 @@ The only editable configuration is still `config.yaml`. `hidden.vllm` is optiona
 | capture_budget_bytes | 268435456 |
 | fetch_bytes | 16777216 |
 
-Use a new capture ID. The dataset's checkpoint fingerprint must match the configured checkpoint; configure `model.path`, `model.fingerprint`, `model.served_name` and `hidden.layers` as usual. Real Qwen validation passed in FP16; BF16 showed appreciably larger batch-dependent differences. Choose `hidden.dtype=float16` explicitly for the validated path; the legacy global BF16 default is not changed. For example, after those model settings have been supplied:
+Use a new capture ID. The dataset's checkpoint fingerprint must match the configured checkpoint; configure `model.path`, `model.fingerprint`, `model.served_name` and `hidden.layers` as usual. Real Qwen validation passed in FP16; BF16 showed appreciably larger batch-dependent differences. Current remote hidden dtype is FP16. For example, after those model settings and a free GPU scope have been confirmed:
 
 ```bash
 .venvs/runner/bin/python -m core.cli \
   --set hidden.adapter=vllm_eager \
   --set hidden.dtype=float16 \
   --set 'hidden.vllm.gpus=[4]' \
+  --set hidden.vllm.tensor_parallel_size=1 \
   --set 'hidden.layers=[0,15,31]' \
   hidden DATASET_ID NEW_CAPTURE_ID
 ```
@@ -79,4 +85,4 @@ CPU contract tests: `tests/test_vllm_hidden.py`. Native SDK CPU tests: `tests/te
 
 `python -m hidden.evaluation.compare_backends --smoke-dir DIRECTORY --gpu GPU` runs the same prefixes/sites through HF, with model/config overrides. It requires a passing vLLM smoke report and records numerical differences rather than asserting bitwise equality. Use the analysis interpreter for this command.
 
-Real GPU validation results and limitations are recorded in `docs/vllm-eager-validation-20261017.md`. These small tests do not establish whole-corpus speedup or prove every checkpoint is numerically interchangeable with HF.
+Small GPU smoke tests are diagnostic evidence only; they do not establish whole-corpus speedup or prove every checkpoint is numerically interchangeable with HF.
