@@ -58,6 +58,8 @@ class DyConCapturePlugin:
         self.flush_seconds = max(0.001, float(os.environ.get("DYCON_CAPTURE_FLUSH_SECONDS", "0.1")))
         self.export_options = json.loads(os.environ.get("DYCON_CAPTURE_EXPORT_OPTIONS", "{}"))
         self.budget = None
+        self.parallel_options = json.loads(os.environ.get("DYCON_PARALLEL_OPTIONS", "{}"))
+        self.scoring = None
         if self.export_options.get("enabled", True) and self.export_options.get("spool_root"):
             from core.disk_budget import DiskBudget
 
@@ -87,6 +89,24 @@ class DyConCapturePlugin:
                 return await call_next(request)
             finally:
                 REQUEST_CONTEXT.reset(context)
+
+        @app.post("/dycon/parallel/{action}")
+        async def parallel(action: str, request: Request):
+            from starlette.responses import JSONResponse
+
+            if self.scoring is None:
+                return JSONResponse({"error": "parallel_scoring_not_enabled"}, status_code=503)
+            value = await request.json()
+            try:
+                if action == "reserve":
+                    return await asyncio.to_thread(self.scoring.reserve, value["decision_id"], value["branches"])
+                if action == "results":
+                    return await asyncio.to_thread(self.scoring.results, value["decision_id"], value["timeout"])
+                if action == "release":
+                    return self.scoring.release(value["decision_id"])
+                return JSONResponse({"error": "unknown_parallel_action"}, status_code=404)
+            except (ValueError, KeyError, RuntimeError) as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
 
         @app.post("/dycon/capture/engine/flush")
         async def flush():
@@ -173,6 +193,12 @@ class DyConCapturePlugin:
         self.tp_size = int(engine_client.vllm_config.parallel_config.tensor_parallel_size)
         text_config = engine_client.model_config.hf_text_config
         self.layers = native_layers(self.layers, text_config.num_hidden_layers)
+        if self.parallel_options.get("enabled"):
+            from runtime.serving.parallel import ScoringBroker
+
+            self.scoring = ScoringBroker(self.parallel_options,
+                                         os.environ["DYCON_PARALLEL_MODEL_FINGERPRINT"],
+                                         text_config.num_hidden_layers)
         spec = self.select.get(STREAM, self.select)
         self.stream_options = {
             "layers": self.layers,
@@ -310,6 +336,8 @@ class DyConCapturePlugin:
             final = None
             generated = []
             params = args[1] if len(args) > 1 else kwargs["sampling_params"]
+            if metadata is not None and metadata.get("decision_id") and params.n != 1:
+                raise ValueError("Parallel transport requires native n=1 for exact capture identity")
             delta = getattr(params.output_kind, "name", "") == "DELTA"
             async for output in original_generate(*args, **kwargs):
                 final = output
@@ -390,6 +418,9 @@ class DyConCapturePlugin:
                 f"layer_{layer}": tensor[row_number].detach().cpu().numpy()
                 for layer, tensor in tensors.items()
             }
+            if anchor == "think_close" and self.scoring is not None:
+                self.scoring.submit(self.request_metadata.get(request_id, {}), request_id,
+                                    int(position), int(token_id), sample)
             execution = execution_at(self.execution_intervals, request_id, int(position))
             fd, name = tempfile.mkstemp(prefix=".dycon-", suffix=".npz", dir=self.staging)
             os.close(fd)
@@ -462,6 +493,8 @@ class DyConCapturePlugin:
         return accepted
 
     async def shutdown(self):
+        if self.scoring is not None:
+            self.scoring.close()
         if self.task is not None:
             self.task.cancel()
             await self.task

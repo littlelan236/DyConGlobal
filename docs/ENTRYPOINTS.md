@@ -1,5 +1,7 @@
 # 任务启动入口与执行约定
 
+并行完整响应 rollout 已增加可选 `parallel` 配置，继续使用下表的 `dycon rollout` / `--resume` / `--check-only` 入口。多个 reasoning+action 候选通过同一服务并发原生 `n=1` 请求产生，只执行 winner；全分支 close hidden 和选择证据沿原有 spool/NAS 发布。外部 predictor 尚需后续对接，默认关闭；不修改 difficulty 实现或生产配置。契约、NAS reader、失败规则及 FULL graph 验收边界见 [parallel-rollout.md](parallel-rollout.md)。CPU/协议测试不能替代真实 GPU 吞吐和选择效果验收。
+
 2026-10-19新增单层Ridge pilot：analysis环境 `.venvs/analysis/bin/dycon difficulty-ridge EXPERIMENT_ID [--mode dry-run|check-data|fit]`。默认fit，消费唯一config.yaml的difficulty.ridge_probe及冻结submission清单。新实验ID拒绝覆盖；三种模式的receipt明确区分核验、数据检查和拟合。细节见 [ridge-submission-pilot.md](ridge-submission-pilot.md)。此入口补齐本专项训练/参数发布，后文原Python训练API边界仍适用于通用FFN/残差训练。
 
 核对日期：2026-10-19。依据远程实际代码 `core/cli.py`、`pyproject.toml` 及各模块实现；历史报告中的旧命令和参数不覆盖本页。所有命令均从 `/home/wangtianyi/DyConGlobal` 执行，示例中的大写 ID/路径须替换为真实值。

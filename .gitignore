@@ -84,11 +84,14 @@ desktop.ini
 /action/datasets/*/
 /action/evaluation/outputs/**
 /action/checkpoints/**
+/action/outputs/**
+/action/provenance/**
 
 # Runtime caches and machine-specific observations
 /runtime/cache/**
 /runtime/reports/**
 /runtime/model-identities/**
+/runtime/parallel-artifacts/**
 /runtime/serving/*.json
 /runtime/serving/*.jsonl
 /runtime/serving/*.lock

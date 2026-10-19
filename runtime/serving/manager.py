@@ -29,6 +29,11 @@ class ServingManager:
 
     def build_args(self, serving_python, host, port):
         cfg, s = self.cfg, self.cfg["serving"]
+        if cfg.get("parallel", {}).get("enabled") and cfg["parallel"]["branch_count"] > 1:
+            from runtime.serving.parallel import artifact_contract
+
+            opts = cfg["parallel"]
+            artifact_contract(opts["estimator_ref"], opts["estimator_sha256"], cfg["model"]["fingerprint"])
         cap = cfg.get("capture", {})
         args = [
             serving_python,
@@ -100,6 +105,11 @@ class ServingManager:
 
     def __enter__(self):
         cfg, s = self.cfg, self.cfg["serving"]
+        if cfg.get("parallel", {}).get("enabled") and cfg["parallel"]["branch_count"] > 1:
+            from runtime.serving.parallel import artifact_contract
+
+            options = cfg["parallel"]
+            artifact_contract(options["estimator_ref"], options["estimator_sha256"], cfg["model"]["fingerprint"])
         # ``resolve`` canonicalizes ordinary paths, which would turn a venv's
         # python symlink into the shared interpreter.  Managed serving must use
         # the pinned EasySteer venv, so retain the authoritative raw path.
@@ -179,6 +189,13 @@ class ServingManager:
                 self.capture_token_inventory["tokenizer_fingerprint"] = hash_json(
                     self.capture_token_inventory
                 )
+                parallel = cfg.get("parallel", {})
+                if parallel.get("enabled") and parallel["branch_count"] > 1:
+                    contract = artifact_contract(parallel["estimator_ref"], parallel["estimator_sha256"],
+                                                 cfg["model"]["fingerprint"])
+                    expected = contract.get("tokenizer_fingerprint")
+                    if expected is not None and expected != self.capture_token_inventory["tokenizer_fingerprint"]:
+                        raise ValueError("Parallel estimator tokenizer fingerprint mismatch")
                 self.capture_controller = OnlineCaptureController(
                     cfg["project_root"],
                     {
@@ -198,6 +215,15 @@ class ServingManager:
                     capture_cfg.get("control_port", 0),
                 ).start()
             env = dict(os.environ)
+            env.pop("DYCON_PARALLEL_OPTIONS", None)
+            env.pop("DYCON_PARALLEL_MODEL_FINGERPRINT", None)
+            if cfg.get("parallel", {}).get("enabled") and cfg["parallel"]["branch_count"] > 1:
+                from runtime.serving.parallel import artifact_contract
+
+                opts = cfg["parallel"]
+                artifact_contract(opts["estimator_ref"], opts["estimator_sha256"], cfg["model"]["fingerprint"])
+                env["DYCON_PARALLEL_OPTIONS"] = json.dumps(opts)
+                env["DYCON_PARALLEL_MODEL_FINGERPRINT"] = cfg["model"]["fingerprint"]
             # Both native FULL graphs and online capture compile CUDA graphs
             # through ninja. The managed venv may be pip-less while uv has
             # already materialized a compatible binary in its cache.

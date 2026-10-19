@@ -100,6 +100,10 @@ class CaptureRequest:
     request_sha256: str | None = None
     query_id: str | None = None
     api_attempt_id: str | None = None
+    decision_id: str | None = None
+    branch_id: int | None = None
+    branch_count: int | None = None
+    parent_prefix_sha256: str | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]):
@@ -119,6 +123,14 @@ class CaptureRequest:
         selector_hash = value.get("capture_select_sha256")
         if selector is not None and selector_hash is not None and hash_json(selector) != selector_hash:
             raise ValueError("capture selector checksum mismatch")
+        decision = value.get("decision_id")
+        if decision is not None:
+            from core.io import identifier
+
+            identifier(decision)
+            if (type(value.get("branch_id")) is not int or type(value.get("branch_count")) is not int
+                    or not 0 <= value["branch_id"] < value["branch_count"] <= 16):
+                raise ValueError("Invalid capture branch identity")
         return cls(
             session_id=str(value["session_id"]),
             task_id=str(value["task_id"]),
@@ -140,10 +152,14 @@ class CaptureRequest:
             request_sha256=value.get("request_sha256"),
             query_id=value.get("query_id"),
             api_attempt_id=value.get("api_attempt_id"),
+            decision_id=decision,
+            branch_id=value.get("branch_id"),
+            branch_count=value.get("branch_count"),
+            parent_prefix_sha256=value.get("parent_prefix_sha256"),
         )
 
     def to_dict(self):
-        return {
+        value = {
             "session_id": self.session_id,
             "task_id": self.task_id,
             "run_id": self.run_id,
@@ -165,6 +181,10 @@ class CaptureRequest:
             "query_id": self.query_id,
             "api_attempt_id": self.api_attempt_id,
         }
+        if self.decision_id is not None:
+            value.update(decision_id=self.decision_id, branch_id=self.branch_id,
+                         branch_count=self.branch_count, parent_prefix_sha256=self.parent_prefix_sha256)
+        return value
 
 
 @dataclass
@@ -520,12 +540,18 @@ class OnlineCaptureController:
         self._lock = threading.RLock()
         self._output_condition = threading.Condition(self._lock)
         self._manifest_lock = threading.Lock()
+        self.parallel_decisions = {}
 
     def _write(self, relative, value, **kwargs):
         if self.spool:
             return self.spool.write_json(relative, value, **kwargs)
-        write_json(self.export_root / relative, value)
-        return self.export_root / relative
+        path = self.export_root / relative
+        if kwargs.get("immutable") and path.exists():
+            if read_json(path) != value:
+                raise ValueError("Immutable capture record changed")
+            return path
+        write_json(path, value)
+        return path
 
     @staticmethod
     def _request_summary(request):
@@ -871,6 +897,131 @@ class OnlineCaptureController:
                 raise ValueError("Ambiguous native output receipt")
             return dict(rows[0])
 
+    def record_decision(self, decision, timeout=30):
+        """Freeze branch outputs and selection before any tool is executed."""
+        import copy
+
+        sid, did = decision["session_id"], decision["decision_id"]
+        from core.io import identifier
+
+        identifier(did)
+        candidates = decision["candidates"]
+        if (len(candidates) != decision["branch_count"]
+                or sorted(r["branch_id"] for r in candidates) != list(range(len(candidates)))
+                or (decision["selected_branch_id"] is not None
+                    and decision["selected_branch_id"] not in range(len(candidates)))):
+            raise ValueError("Invalid decision candidates/winner")
+
+        def matches(row):
+            return [r for r in self.request_outputs.values()
+                    if r["session_id"] == sid and r.get("decision_id") == did
+                    and r.get("branch_id") == row["branch_id"]
+                    and r.get("api_attempt_id") == row["api_attempt_id"]]
+
+        with self._output_condition:
+            self._output_condition.wait_for(
+                lambda: all(matches(r) for r in candidates if r.get("response") is not None), timeout)
+            value = copy.deepcopy(decision)
+            native_prompt_hashes = set()
+            for row in value["candidates"]:
+                receipts = matches(row)
+                if row.get("response") is not None and len(receipts) != 1:
+                    self._write(f"sessions/{sid}/parallel/failed-{did}.json", value, immutable=True)
+                    raise ValueError("Parallel response has no unique native output receipt")
+                if receipts:
+                    receipt = receipts[0]
+                    native_prompt_hashes.add(receipt["request_sha256"])
+                    if row.get("native_request_id") not in {None, receipt["request_id"]}:
+                        raise ValueError("Parallel score belongs to another native request")
+                    if row.get("close_sample_id") is not None:
+                        position = row.get("absolute_position")
+                        token = row.get("token_id")
+                        ids = receipt["prompt_token_ids"] + receipt["output_token_ids"]
+                        if (type(position) is not int or not len(receipt["prompt_token_ids"]) <= position < len(ids) - 1
+                                or ids[position] != token or token not in receipt.get("close_token_ids", [248069])
+                                or row["close_sample_id"] != hash_json({"session": sid,
+                                    "request": receipt["request_id"], "anchor": "think_close", "position": position})[:32]):
+                            raise ValueError("Parallel score has invalid close token evidence")
+                    row.update(native_request_id=receipt["request_id"],
+                               ledger_ref=receipt["ledger_ref"], ledger_sha256=receipt["ledger_sha256"],
+                               output_sha256=receipt["output_sha256"],
+                               num_cached_tokens=receipt.get("num_cached_tokens", 0),
+                               prompt_tokens=len(receipt["prompt_token_ids"]),
+                               completion_tokens=len(receipt["output_token_ids"]))
+                    row["selected"] = row["branch_id"] == value["selected_branch_id"]
+            if len(native_prompt_hashes) > 1:
+                raise ValueError("Parallel candidates have different native token prompts")
+            self._write(f"sessions/{sid}/parallel/decisions/{did}.json", value, immutable=True)
+            # Full candidate text is durable on disk; keep only small identities
+            # in memory until this session is finalized.
+            self.parallel_decisions[did] = {
+                **value,
+                "candidates": [{k: v for k, v in row.items() if k != "response"}
+                               for row in value["candidates"]],
+            }
+            return value
+
+    def record_parallel_action(self, summary, phase, details=None):
+        if phase not in {"started", "completed", "failed"}:
+            raise ValueError("Invalid parallel action phase")
+        sid, did = summary["session_id"], summary["decision_id"]
+        from core.io import identifier
+
+        identifier(did)
+        if did not in self.parallel_decisions:
+            raise ValueError("Action has no committed decision")
+        value = {"session_id": sid, "decision_id": did,
+                 "selected_branch_id": summary["selected_branch_id"], "phase": phase,
+                 "recorded_at": now(), "details": details or {}}
+        self._write(f"sessions/{sid}/parallel/actions/{did}-{phase}.json", value, immutable=True)
+
+    def _finalize_branches(self, session_id, rollout_id, trajectory_sha256):
+        session = self.sessions[session_id]
+        with self._lock:
+            decisions = [v for v in self.parallel_decisions.values() if v["session_id"] == session_id]
+        if not decisions:
+            previous = self.export_root / f"sessions/{session_id}/parallel/branch-coverage.json"
+            if previous.exists():
+                return read_json(previous)
+            return None
+        from enrichment.online_trace import reasoning_targets
+
+        rows, missing = [], []
+        for decision in decisions:
+            for candidate in decision["candidates"]:
+                rid = candidate.get("native_request_id")
+                receipt = self.request_outputs.get(rid)
+                events = [e for e in session.samples if e["request_id"] == rid and e["anchor"] == "think_close"]
+                targets, available = reasoning_targets(receipt, self.config.get("open_token_ids", [248068]),
+                                                       receipt.get("close_token_ids", [248069])) if receipt else (set(), [])
+                close_positions = {p for p, a in targets if a == "think_close"}
+                matched = []
+                for event in events:
+                    path = self.export_root / "index" / (event["sample_id"] + ".json")
+                    if event["absolute_position"] in close_positions and path.exists():
+                        stored = read_json(path)
+                        if stored.get("status") != "failed" and stored.get("sha256"):
+                            matched.append(stored)
+                if not matched:
+                    missing.append({"decision_id": decision["decision_id"], "branch_id": candidate["branch_id"],
+                                    "reason": "missing_close_hidden", "availability": available})
+                rows.append({"decision_id": decision["decision_id"], "branch_id": candidate["branch_id"],
+                             "selected": candidate["branch_id"] == decision["selected_branch_id"],
+                             "native_request_id": rid, "close_sample_ids": [e["sample_id"] for e in matched],
+                             "close_events": matched,
+                             "score": candidate.get("score"), "rollout_id": rollout_id,
+                             "trajectory_sha256": trajectory_sha256,
+                             "labels": {"remaining_steps": None, "remaining_reasoning_tokens": None}})
+        base = f"sessions/{session_id}/parallel"
+        self._write(base + "/branch-index.json", rows, immutable=True)
+        coverage = {"expected": len(rows), "observed": len(rows) - len(missing), "missing": missing}
+        self._write(base + "/branch-coverage.json", coverage, immutable=True)
+        files = {str(p.relative_to(self.export_root)): sha256(p)
+                 for p in (self.export_root / base).rglob("*.json") if p.name != "branch-receipt.json"}
+        self._write(base + "/branch-receipt.json", {"schema_version": 1, "files": files,
+                    "rollout_id": rollout_id, "trajectory_sha256": trajectory_sha256}, immutable=True)
+        return coverage
+
     def finalize(self, session_id, *, rollout_id, trajectory_path, trajectory_sha256, model_fingerprint):
         path = Path(trajectory_path).resolve()
         if not path.is_relative_to(self.project_root):
@@ -941,8 +1092,12 @@ class OnlineCaptureController:
             "missing": sorted(expected - observed),
         }
         self._write(f"sessions/{session_id}/coverage.json", coverage)
+        if self.spool and self.parallel_decisions:
+            self.spool.seal(session_id)
+        branch_coverage = self._finalize_branches(session_id, rollout_id, trajectory_sha256)
         complete = (
-            bool(assistant)
+            not (branch_coverage and branch_coverage["missing"])
+            and bool(assistant)
             and not session.options.get("failures")
             and not any(row.get("status") == "failed" for row in session.samples)
             and not coverage["missing"]
@@ -960,6 +1115,10 @@ class OnlineCaptureController:
         else:
             session.status = "complete" if complete else "partial"
         self._record_manifests(session_id, session.default_request.to_dict(), session_status=session.status)
+        with self._lock:
+            for did in [key for key, record in self.parallel_decisions.items()
+                        if record["session_id"] == session_id]:
+                del self.parallel_decisions[did]
         if self.spool and session.status == "complete":
             self.spool.release_session_metadata(session_id)
         return {**value, "capture_status": session.status}
@@ -980,6 +1139,9 @@ class OnlineCaptureController:
                 r
                 for r in self.request_outputs.values()
                 if r["session_id"] == session_id
+                and (not metadata.get("decision_id") or (
+                    r.get("decision_id") == metadata["decision_id"]
+                    and r.get("branch_id") == metadata["branch_id"]))
                 and (
                     r.get("query_id") == metadata["query_id"]
                     if metadata.get("query_id")
@@ -990,7 +1152,8 @@ class OnlineCaptureController:
                     or r.get("api_attempt_id") == metadata["api_attempt_id"]
                 )
                 and (
-                    not response.get("id")
+                    (metadata.get("decision_id") and r.get("decision_id") == metadata["decision_id"])
+                    or not response.get("id")
                     or r["request_id"] == response["id"]
                     or r["request_id"].startswith(response["id"] + "-")
                 )
