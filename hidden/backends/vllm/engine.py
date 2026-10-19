@@ -137,6 +137,8 @@ def verify_runtime(root):
 
 def engine_args(cfg):
     v = cfg["hidden"]["vllm"]
+    if not v["enable_prefix_caching"]:
+        raise ValueError("Offline replay requires hidden.vllm.enable_prefix_caching=true")
     if len(v["gpus"]) != v["tensor_parallel_size"]:
         raise ValueError("One explicit GPU is required per TP rank")
     args = dict(

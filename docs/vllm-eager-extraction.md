@@ -9,7 +9,9 @@ for the historical queue launcher and online/offline workflow boundaries.
 
 ## Reused implementation
 
-vLLM owns continuous batching, chunked prefill, Automatic Prefix Caching (APC), hybrid recurrent-state restoration and KV allocation/eviction. The adapter passes bounded windows of token-ID prompts to `LLM.generate`; this window is not a custom GPU batch scheduler. The original input order (step order within each rollout) is retained. A window completes and is drained before another is submitted; there is no custom asynchronous scheduler.
+vLLM owns continuous batching, chunked prefill, Automatic Prefix Caching (APC), hybrid recurrent-state restoration and KV allocation/eviction. The adapter partitions each bounded submission into dependency waves containing at most one anchor per rollout/session/branch. A wave completes and is drained before its successors are submitted. Independent trajectories can share a wave, bounded by `max_num_seqs`; step order within each trajectory is retained. Unscoped rows conservatively share a serial queue. This is request dependency ordering, not a custom GPU scheduler. The same engine and APC remain alive across submission windows.
+
+Trajectory APC is the only offline replay policy. Disabling prefix caching is rejected at engine construction. The online-artifact comparison and first-rollout audit make one chronological pass, including missing points in their correct positions. The old per-window cache reset and cold/warm/reordered execution branches have been removed; there is no legacy mode flag. See [the implementation and validation report](vllm-trajectory-apc-20261019.md).
 
 Capture uses existing `tact_states` RPCs, `SelectSpec(prompt_positions=[-1])`, request/position/token labels, the native residual composition, SDK `fetch_pages` and `CaptureResult`. The SDK public `capture()` helper currently excludes `tact_states`; only its RPC lifecycle is adapted here. No new model hooks, row-geometry producer, cache manager or tensor-parallel assembly are implemented.
 
@@ -48,7 +50,7 @@ The only editable configuration is still `config.yaml`. `hidden.vllm` contains t
 | max_inflight_requests | 32 |
 | gpu_memory_utilization | 0.8 |
 | enable_chunked_prefill | true |
-| enable_prefix_caching | true |
+| enable_prefix_caching | true; required, false is rejected |
 | allow_shared_gpus | false; diagnostic-only override |
 | min_free_gpu_bytes | 0; required when sharing a GPU |
 | moe_backend | auto (`triton` explicitly selects native Triton MoE kernels) |
@@ -69,7 +71,7 @@ Use a new capture ID. The dataset's checkpoint fingerprint must match the config
 
 The CLI delegates to the independent interpreter. Explicit physical GPU indices must match TP size. Before importing torch/vLLM, the child checks existing compute processes and acquires extraction GPU locks. Occupied GPUs cause an error; no existing process is terminated. PP/DP/context/sequence/expert parallel capture restrictions are enforced by the native runtime; only ordinary TP is supported. GPU locks coordinate extraction instances; other software must still use separately allocated GPUs.
 
-`max_num_batched_tokens` controls each engine scheduling iteration; `max_inflight_requests` bounds submitted samples and captured CPU data. Capture overflow fails clearly and does not retry silently. Reduce the submission window or increase its capture budget. APC hits are best-effort and require exact token prefixes; history reformatting can reduce reuse.
+`max_num_batched_tokens` controls each engine scheduling iteration; `max_inflight_requests` bounds input samples and captured CPU data per adapter call. Each native wave contains at most one anchor per trajectory, so a single trajectory can produce several serial native requests within that bound. Capture overflow fails clearly and does not retry silently. Reduce the submission window or increase its capture budget. APC hits are best-effort and require exact token prefixes; history reformatting can reduce reuse. A non-append prefix is submitted unchanged and only its native hash-compatible prefix can be reused; the adapter never splices recurrent state manually.
 
 On SM120 GPUs, the automatic MoE choice may trigger a lengthy FlashInfer C++ compilation, including unused quantized variants. `hidden.vllm.moe_backend=triton` selects vLLM's native Triton MoE implementation explicitly, without replacing kernels or modifying the serving environment. This choice is stored in the capture identity.
 
@@ -77,11 +79,13 @@ On SM120 GPUs, the automatic MoE choice may trigger a lengthy FlashInfer C++ com
 
 `hidden.extract.extract_hidden` uses the vLLM batch API. It retains per-sample NPZ files, checksummed partial-result sidecars, final index/receipt, and bounded batch flushing. A failed window does not commit a final receipt; subsequent invocation with identical inputs/runtime/config reuses verified completed samples. Runtime/code/config changes require a new capture ID.
 
-vLLM receipts additionally contain runtime/source fingerprints, inference dtype, engine options and window timing/cache metrics. Window metrics retain sample-to-native-request-ID mappings and target position/token labels. Index entries contain target token ID and absolute position. Both `enrichment/manifest.json` and `hidden/manifest.json` receive `native_captures` entries linking task ID, run ID, rollout ID, trajectory hash, explicit marker text and receipt. Existing migrated records and active extraction job records are preserved under the shared manifest lock. Capture output locations stay under `hidden/outputs/`; diagnostic results stay under `hidden/evaluation/outputs/`.
+vLLM receipts use `replay=native_trajectory_apc` and additionally contain runtime/source fingerprints, inference dtype, engine options and per-wave timing/cache metrics. The policy enters backend identity; code/config changes require a new capture ID. Each extraction receipt includes only its own execution metrics, even when the queue reuses an engine across jobs. Window metrics retain sample-to-native-request-ID mappings, target position/token labels, prefix length, actual cached tokens, uncached input count and bounded predecessor/LCP diagnostics. The latter are CPU diagnostics, not a cache compatibility decision or a guarantee against native eviction. Their history retains at most `max_inflight_requests` trajectory prefixes. Uncached input count is not an exact measure of GPU work after preemption/recomputation. Index entries contain target token ID and absolute position. Both `enrichment/manifest.json` and `hidden/manifest.json` receive `native_captures` entries linking task ID, run ID, rollout ID, trajectory hash, explicit marker text and receipt. Existing migrated records and active extraction job records are preserved under the shared manifest lock. Capture output locations stay under `hidden/outputs/`; diagnostic results stay under `hidden/evaluation/outputs/`.
+
+Online-artifact replay writes schema-2 `report.json` with `comparison`, `cache` and `windows`. Matched tensors and detailed comparison live in `trajectory-apc/`; missing online points live in `offline-only/` and never enter online numerical acceptance. Historical reports retain their original schema and directories.
 
 ## Validation tools
 
-CPU contract tests: `tests/test_vllm_hidden.py`. Native SDK CPU tests: `tests/test_vllm_native_capture.py` (run with the isolated interpreter). These cover layer mapping, request labels, failures, GPU admission, batched resume, manifest preservation and old config/snapshot compatibility.
+CPU contract tests: `tests/test_vllm_hidden.py`, `tests/test_replay_trajectory_apc.py`, `tests/test_first_rollout.py` and `tests/test_compare_vllm_replay.py`. Native SDK CPU tests: `tests/test_vllm_native_capture.py` (run with the isolated interpreter). These cover dependency waves, cache continuity, non-append prefixes, session separation, one-pass missing-point ordering, layer mapping, request labels, failures, GPU admission, resume, per-job metrics, manifest preservation and old config/snapshot compatibility.
 
 `python -m hidden.evaluation.smoke_vllm --output NEW_DIRECTORY` accepts `--config`/`--set`. It uses 129-, 2049- and 4097-token mixed-anchor prompts, checks cold/hot APC, reverse input order and singleton requests, verifies real cache hits, and checks cosine >= 0.999 and relative L2 <= 0.05. Failures remain failures and are retained in diagnostic reports. The default GPU admission rejects existing compute processes; a shared-GPU diagnostic must explicitly set `allow_shared_gpus=true`, a positive `min_free_gpu_bytes`, and a bounded `kv_cache_memory_bytes`.
 

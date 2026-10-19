@@ -1,4 +1,4 @@
-"""Event-triggered first-completion audit and bounded independent vLLM replay.
+"""Event-triggered first-completion audit and bounded trajectory-APC vLLM replay.
 
 Existing completions are handled once at startup; future completions wake on
 the official runner's atomic progress write. No timer-based status polling.
@@ -177,6 +177,8 @@ def inspect_first(cfg, result, out):
                 **reference_rows[rid],
                 "rollout_id": rollout_id,
                 "trajectory_sha256": sha256(trajectory),
+                "session_id": request["session_id"],
+                "step_id": request["step_id"],
                 "alignment_status": "exact",
                 "token_ref": [rollout_id, request["step_id"], "generation_input", pos, event["token_id"]],
             }
@@ -198,6 +200,9 @@ def inspect_first(cfg, result, out):
                 "prefix_token_ids": prefix,
                 "prefix_sha256": hash_json(prefix),
                 "trajectory_sha256": sha256(trajectory),
+                "rollout_id": rollout_id,
+                "session_id": request["session_id"],
+                "step_id": request["step_id"],
                 **reference_rows[rid],
             }
         )
@@ -338,10 +343,13 @@ def main():
             "paired_points": len(read_json(out / "paired-events.json")),
             "missing_online_points": len(read_json(out / "missing-prefixes.json")),
             "offline_only_missing_points": report.get("offline_only_missing_points"),
-            "phases": {
-                key: {k: v[k] for k in ["passed", "worst_cosine", "worst_relative_l2"]}
-                for key, v in report.get("phases", {}).items()
+            "replay_policy": report.get("replay_policy"),
+            "comparison": {
+                key: value
+                for key, value in report.get("comparison", {}).items()
+                if key in {"passed", "worst_cosine", "worst_relative_l2"}
             },
+            "cache": report.get("cache"),
             "replay_exit_code": child.returncode,
             "finished_at": now(),
         }

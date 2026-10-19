@@ -58,15 +58,17 @@ cd /home/wangtianyi/DyConGlobal
 .venvs/analysis/bin/dycon difficulty-evaluate INDEX_ID PREDICTIONS.json SCORE_ID
 ```
 
-离线 hidden 统一使用 vLLM eager，由 CLI 派发独立 latent-vllm 解释器。显式 layers 使用 0-based 公共 site：前 N−1 个是 decoder output，最后一个是 final norm，不能直接混用 native site 索引。vLLM 负责连续 batching、chunked prefill 和 APC；重放只提交精确 token prefix，不裁剪跨请求的混合 SSM/attention cache。
+离线 hidden 统一使用 vLLM eager，由 CLI 派发独立 latent-vllm 解释器。显式 layers 使用 0-based 公共 site：前 N−1 个是 decoder output，最后一个是 final norm，不能直接混用 native site 索引。离线接口统一采用 trajectory APC：同一轨迹的前一个 anchor 完成后再提交下一个，不同轨迹可以并发，跨窗口保留缓存。vLLM 负责 continuous batching、chunked prefill、APC 和混合 SSM/attention 状态恢复；项目只提交精确 token prefix，不自行裁剪 cache。详见 [连续重放契约与验收](docs/vllm-trajectory-apc-20261019.md)。
 
 token 级核验使用 `token-trace`、`trajectory-token-audit`、`token-join`、`hidden-token-join-audit`。普通离线索引、在线索引和 token join 格式不同；当前 scorer 只支持普通离线 label-shard 索引，兼容性详见入口表。历史四 GPU extraction 使用已有 `enrichment.scripts.launch_extraction`，不得直接启动 queue worker。
 
 当前 vLLM 重放实现位于 `hidden/adapters/vllm.py`、`hidden/backends/vllm/` 和
 `hidden/extract.py`；轨迹 prefix 重建位于 `enrichment/trajectory.py`，历史批量
 入口位于 `enrichment/scripts/launch_extraction.py`。在线 NAS hidden 对照使用
-`hidden/evaluation/replay_online_artifacts.py`。2026-10-19 的四事件对照和 APC
-smoke 报告位于 `hidden/evaluation/outputs/`，这些诊断产物不会进入 git。
+`hidden/evaluation/replay_online_artifacts.py`，只运行一次按轨迹排序的连续重放，
+输出 `trajectory-apc/` 及 `report.json` 中的 `comparison`、`cache`、`windows`；
+不再执行逐窗口 reset 或 cold/warm/reordered 三轮重放。历史报告保留原格式。
+诊断产物位于 `hidden/evaluation/outputs/`，不会进入 git。
 
 ## 代码与产物职责
 

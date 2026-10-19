@@ -75,6 +75,7 @@ def extract_hidden(cfg, dataset_id, capture_id, adapter):
         register_capture(cfg, out, existing)
         return out
     files, index = {}, []
+    metrics_start = len(getattr(adapter, "metrics", []))
     pending = []
     batch_size = getattr(adapter, "batch_size", 1)
 
@@ -167,11 +168,11 @@ def extract_hidden(cfg, dataset_id, capture_id, adapter):
         "sites": [adapter.sites()[i] for i in layers],
         "hidden_size": adapter.hidden_size,
         "storage_dtype": "float32",
-        "replay": "native_batched_causal_prefix",
+        "replay": "native_trajectory_apc",
         "files": files,
     }
     receipt["backend"] = adapter.metadata
-    receipt["execution_metrics"] = getattr(adapter, "metrics", [])
+    receipt["execution_metrics"] = getattr(adapter, "metrics", [])[metrics_start:]
     write_json(out / "receipt.json", receipt)
     register_capture(cfg, out, receipt)
     return out

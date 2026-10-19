@@ -56,7 +56,14 @@ def main():
         for i, (length, anchor) in enumerate([(129, "<think>"), (2049, "</think>"), (4097, "<think>")]):
             marker = tokenizer.encode(anchor, add_special_tokens=False)
             ids = (body * ((length // len(body)) + 1))[: length - len(marker)] + marker
-            rows.append({"sample_id": f"smoke-{i}", "prefix_token_ids": ids, "prefix_sha256": hash_json(ids)})
+            rows.append(
+                {
+                    "sample_id": f"smoke-{i}",
+                    "rollout_id": f"smoke-{i}",
+                    "prefix_token_ids": ids,
+                    "prefix_sha256": hash_json(ids),
+                }
+            )
         write_json(out / "inputs.json", rows)
         layers = cfg["hidden"]["layers"]
         start = time.monotonic()
@@ -69,7 +76,9 @@ def main():
         }
         try:
             cold = adapter.capture_batch(rows, layers, cfg["hidden"]["chunk_size"])
+            hot_start = len(adapter.metrics)
             hot = adapter.capture_batch(rows, layers, cfg["hidden"]["chunk_size"])
+            hot_windows = adapter.metrics[hot_start:]
             reordered = adapter.capture_batch(list(reversed(rows)), layers, cfg["hidden"]["chunk_size"])
             single = {r["sample_id"]: adapter.capture_batch([r], layers, 1)[r["sample_id"]] for r in rows}
             report["comparisons"] = {}
@@ -81,7 +90,7 @@ def main():
                 }
                 np.savez_compressed(out / (sid + ".npz"), hidden=cold[sid])
             report["windows"] = adapter.metrics
-            if cfg["hidden"]["vllm"]["enable_prefix_caching"] and not adapter.metrics[1]["cached_tokens"]:
+            if not sum(window["cached_tokens"] for window in hot_windows):
                 raise AssertionError("APC enabled but repeated prompts produced no measured cache hits")
             if any(
                 c["min_cosine"] < 0.999 or c["max_relative_l2"] > 0.05

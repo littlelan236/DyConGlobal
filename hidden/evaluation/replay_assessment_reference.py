@@ -41,14 +41,20 @@ def main():
         adapter = load_adapter(cfg)
         report["backend"] = adapter.metadata
         try:
-            for phase in ["cold_replay", "warm_replay"]:
-                values = adapter.capture_batch(rows, cfg["hidden"]["layers"], cfg["hidden"]["chunk_size"])
-                values = np.stack([values[r["sample_id"]] for r in rows])
-                report[phase] = {
-                    "errors": summarize_errors(values, reference, rows),
-                    "window": adapter.metrics[-1],
-                }
-                np.savez_compressed(a.output / (phase + ".npz"), hidden=values)
+            captured = {}
+            for start in range(0, len(rows), adapter.batch_size):
+                captured.update(
+                    adapter.capture_batch(
+                        rows[start : start + adapter.batch_size],
+                        cfg["hidden"]["layers"],
+                        cfg["hidden"]["chunk_size"],
+                    )
+                )
+            values = np.stack([captured[row["sample_id"]] for row in rows])
+            report["replay_policy"] = "trajectory_apc"
+            report["comparison"] = summarize_errors(values, reference, rows)
+            report["windows"] = adapter.metrics
+            np.savez_compressed(a.output / "trajectory-apc.npz", hidden=values)
             report["completed"] = True
         finally:
             write_json(a.output / "report.json", report)

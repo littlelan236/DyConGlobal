@@ -143,7 +143,7 @@ def test_native_batches_resume_and_keep_manifests(cfg):
     assert [len(x) for x in resumed.calls] == [1]
     receipt = read_json(out / "receipt.json")
     assert receipt["backend"]["name"] == "vllm_eager"
-    assert receipt["replay"] == "native_batched_causal_prefix"
+    assert receipt["replay"] == "native_trajectory_apc"
     manifest = read_json(root + "/hidden/manifest.json")
     assert manifest["legacy"] == "preserve"
     binding = next(iter(manifest["native_captures"]["capture"]["rollouts"].values()))
@@ -203,3 +203,132 @@ def test_gpu_admission_rejects_occupied_or_missing_device(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="unique"):
         with gpu_reservation(tmp_path, [4, 4]):
             pytest.fail("Must not acquire a duplicate GPU")
+
+
+def test_replay_requires_apc(cfg):
+    cfg["hidden"]["vllm"]["gpus"] = [0]
+    cfg["hidden"]["vllm"]["enable_prefix_caching"] = False
+    with pytest.raises(ValueError, match="enable_prefix_caching=true"):
+        engine_args(cfg)
+
+
+def replay_row(sid, ids, rollout="a", session="s", step=0):
+    return {
+        "sample_id": sid,
+        "prefix_token_ids": ids,
+        "prefix_sha256": hash_json(ids),
+        "rollout_id": rollout,
+        "session_id": session,
+        "step_id": step,
+    }
+
+
+def cached_adapter(cfg, monkeypatch):
+    import hidden.adapters.vllm as module
+
+    completed, calls = [], []
+
+    def capture(llm, rows, layers, layer_count, hidden_size, options):
+        calls.append([r["sample_id"] for r in rows])
+        assert len({module.replay_group(r) for r in rows}) == len(rows)
+        samples = []
+        for row in rows:
+            ids = row["prefix_token_ids"]
+            matches = [
+                next((i for i, (a, b) in enumerate(zip(old, ids)) if a != b), min(len(old), len(ids)))
+                for old in completed
+            ]
+            cached = min(max(matches, default=0), len(ids) - 1)
+            samples.append({"sample_id": row["sample_id"], "cached_tokens": cached})
+        completed.extend(r["prefix_token_ids"] for r in rows)
+        return (
+            {r["sample_id"]: np.ones((len(layers), hidden_size)) for r in rows},
+            {
+                "requests": len(rows),
+                "prompt_tokens": sum(len(r["prefix_token_ids"]) for r in rows),
+                "cached_tokens": sum(s["cached_tokens"] for s in samples),
+                "samples": samples,
+            },
+        )
+
+    monkeypatch.setattr(module, "capture_window", capture)
+    cfg["hidden"]["vllm"].update(max_inflight_requests=4, max_num_seqs=2, max_model_len=100)
+    return module.VLLMAdapter(None, cfg, 2, 4, {}), calls
+
+
+def test_same_trajectory_waits_while_independent_trajectories_batch(cfg, monkeypatch):
+    adapter, calls = cached_adapter(cfg, monkeypatch)
+    rows = [
+        replay_row("a0", [1, 2]),
+        replay_row("a1", [1, 2, 3]),
+        replay_row("b0", [9, 8], "b"),
+        replay_row("b1", [9, 8, 7], "b"),
+    ]
+    values = adapter.capture_batch(rows, [0], 1024)
+    assert calls == [["a0", "b0"], ["a1", "b1"]]
+    assert list(values) == [r["sample_id"] for r in rows]
+    assert [w["cached_tokens"] for w in adapter.metrics] == [0, 4]
+    assert adapter.metrics[1]["samples"][0]["previous_sample_id"] == "a0"
+    assert adapter.metrics[1]["samples"][0]["append_only"]
+
+
+def test_cache_and_predecessor_continue_across_submission_windows(cfg, monkeypatch):
+    adapter, calls = cached_adapter(cfg, monkeypatch)
+    adapter.capture_batch([replay_row("a0", [1, 2])], [0], 1024)
+    adapter.capture_batch([replay_row("a1", [1, 2, 3, 4])], [0], 1024)
+    sample = adapter.metrics[-1]["samples"][0]
+    assert calls == [["a0"], ["a1"]]
+    assert sample["cached_tokens"] == sample["common_prefix_tokens"] == 2
+    assert sample["uncached_prompt_tokens"] == 2
+    assert sample["previous_sample_id"] == "a0"
+    adapter.capture_batch([replay_row("branch", [9, 8])], [0], 1024)
+    sample = adapter.metrics[-1]["samples"][0]
+    assert sample["common_prefix_tokens"] == sample["cached_tokens"] == 0
+    assert not sample["append_only"]
+
+
+def test_session_boundaries_and_unscoped_rows_are_safe(cfg, monkeypatch):
+    adapter, calls = cached_adapter(cfg, monkeypatch)
+    adapter.capture_batch([replay_row("a0", [1, 2]), replay_row("a1", [1, 2, 3], session="other")], [0], 1024)
+    assert calls == [["a0", "a1"]]
+    assert all(s["previous_sample_id"] is None for s in adapter.metrics[-1]["samples"])
+    plain = [{"sample_id": str(i), "prefix_token_ids": [i], "prefix_sha256": hash_json([i])} for i in [4, 5]]
+    adapter.capture_batch(plain, [0], 1024)
+    assert calls[-2:] == [["4"], ["5"]]
+
+
+def test_duplicate_sample_rejected_before_any_native_request(cfg, monkeypatch):
+    adapter, calls = cached_adapter(cfg, monkeypatch)
+    with pytest.raises(ValueError, match="Duplicate"):
+        adapter.capture_batch([replay_row("same", [1]), replay_row("same", [2])], [0], 1024)
+    assert not calls
+
+
+def test_failed_wave_does_not_submit_later_anchors(cfg, monkeypatch):
+    import hidden.adapters.vllm as module
+
+    adapter, calls = cached_adapter(cfg, monkeypatch)
+    capture = module.capture_window
+
+    def fail(llm, rows, *args):
+        if rows[0]["sample_id"] == "fail":
+            raise RuntimeError("capture interrupted")
+        return capture(llm, rows, *args)
+
+    monkeypatch.setattr(module, "capture_window", fail)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        adapter.capture_batch(
+            [replay_row("first", [1]), replay_row("fail", [1, 2]), replay_row("never", [1, 2, 3])], [0], 1024
+        )
+    assert calls == [["first"]]
+    assert len(adapter.metrics) == 1
+
+
+def test_receipt_metrics_exclude_previous_queue_jobs(cfg):
+    import_fixture(cfg)
+    enrich(cfg, "dataset", ToyTokenizer())
+    cfg["hidden"]["layers"] = [0]
+    adapter = BatchAdapter()
+    adapter.metrics.append({"sample_id": "another-queue-job"})
+    out = extract_hidden(cfg, "dataset", "isolated-metrics", adapter)
+    assert read_json(out / "receipt.json")["execution_metrics"] == []

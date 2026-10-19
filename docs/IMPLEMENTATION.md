@@ -19,7 +19,7 @@ HEAD 为 `ae3167daf2e819be4c93f43c048108102dd9803b`，工作树已有大量未�
 | 评测 | SWE-bench 4.1.0、patch 绑定、success/infra error 区分、gold 只验环境 |
 | 在线 capture | EasySteer control plane、native request ledger/token IDs、anchor/event 绑定、bounded spool、异步 NAS shard、上传恢复 |
 | enrichment | open/close prefix、成功剩余量/终止诊断、证据分级、token trace、online token-event finalize |
-| hidden | 独立 vLLM eager 重放、显式 site、常驻 TP queue worker、APC、receipt/partial 校验、同身份下续提 |
+| hidden | 独立 vLLM eager、显式 site、常驻 TP queue worker、同轨迹依赖顺序的 trajectory APC、跨窗口保留缓存、receipt/partial 校验、同身份下续提 |
 | 数据视图 | schema 1 离线索引、schema 2 exact join、schema 3 在线索引、trajectory action 分类视图、hidden 共享 action 引用 |
 | difficulty | Ridge、FFN MLP、Ridge+FFN；训练/加载 Python API；显式预测评分和轨迹图 |
 | runtime | NAS OCI streaming、load slots/lease/空间预约、owned cleanup/recovery、独立 EasySteer runtime |
@@ -35,6 +35,8 @@ HEAD 为 `ae3167daf2e819be4c93f43c048108102dd9803b`，工作树已有大量未�
 - serving manager 当前请求 `FULL_AND_PIECEWISE`；`capture.graph_mode=FULL` 不代表所有 prefill/mixed 均走 FULL graph，须查该 run 实际证据。
 
 ## 标签和验收
+
+离线正式提取和在线产物对照共用单次 trajectory APC 执行策略。原在线对照逐窗口清 cache、cold/warm/reordered 三轮执行已删除；当前报告使用 schema 2 的 `comparison`、`cache`、`windows`，历史证据保持不变。APC 命中取决于精确 token 公共前缀、原生块/SSM 快照和 cache 容量，不能承诺所有历史 token 都不重算。实现与 GPU 验收见 [连续重放报告](vllm-trajectory-apc-20261019.md)。
 
 resolved=true 才提供“到最终成功提交”的剩余量标签；unresolved、未评测、infra error 保留 null。旧轨迹 token 重建不能提升为 native exact；exact join 必须唯一绑定 prompt/output IDs、token ID 和 absolute position。
 

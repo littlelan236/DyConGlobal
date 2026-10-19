@@ -49,8 +49,12 @@ desktop.ini
 *.log
 *.pid
 
-# Atomic writes and process locks; dependency locks remain versioned
+# Atomic writes, interrupted SSH uploads and process locks.
+# Dependency lockfiles under locks/ remain versioned.
 .write-*
+*.tmp
+*.part
+*.kv-replay-pending
 /baseline/manifest.lock
 /enrichment/manifest.lock
 /hidden/manifest.lock
@@ -73,9 +77,6 @@ desktop.ini
 /hidden/spool/**
 /hidden/evaluation/outputs/**
 /hidden/evaluation/*.json
-
-# Temporary selectors used by online-to-vLLM replay diagnostics
-/tmp/replay-online-smoke-*.json
 
 # Estimator/action source stays tracked; generated datasets and models do not
 /difficulty/datasets/*/
@@ -113,8 +114,8 @@ desktop.ini
 *.tar
 *.tar.gz
 *.tgz
-*.tmp
-*.part
+
+# Generated tensors and analysis databases
 *.npy
 *.npz
 *.pickle
