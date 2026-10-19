@@ -92,6 +92,7 @@ desktop.ini
 /runtime/cache/**
 /runtime/reports/**
 /runtime/model-identities/**
+/runtime/parallel-artifacts/**
 /runtime/serving/*.json
 /runtime/serving/*.jsonl
 /runtime/serving/*.lock

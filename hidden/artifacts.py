@@ -79,3 +79,21 @@ def response_records(trajectory):
         extra = message.get("extra") or {}
         if isinstance(extra.get("response"), dict):
             yield index, message, extra["response"]
+
+
+def read_branch_index(root, session_id):
+    """Read a frozen all-candidate view, without promoting predictions to GT.
+
+    Each close_events item can be passed directly to read_arrays(root, event).
+    NAS publication is required: no in-flight spool data are silently accepted.
+    """
+    from core.io import identifier
+
+    base = Path(root) / "sessions" / identifier(session_id) / "parallel"
+    receipt = read_json(base / "branch-receipt.json")
+    for relative, digest in receipt["files"].items():
+        if sha256(owned_path(root, relative)) != digest:
+            raise ValueError("Branch evidence checksum mismatch")
+    rows = read_json(base / "branch-index.json")
+    coverage = read_json(base / "branch-coverage.json")
+    return {"samples": rows, "coverage": coverage, "receipt": receipt}

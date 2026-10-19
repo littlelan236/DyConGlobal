@@ -28,10 +28,12 @@ def recover_online(cfg, run_id):
             if sha256(trajectory) != finalization["trajectory_sha256"]:
                 raise ValueError("Recovery trajectory hash mismatch")
             coverage = read_json(path.parent / "coverage.json")
+            branch_path = path.parent / "parallel/branch-coverage.json"
+            branch_complete = not branch_path.exists() or not read_json(branch_path)["missing"]
             published = spool.publish_session(sid, frozen["capture"]["export"]["upload_max_elapsed_seconds"])
             state = (
                 "complete"
-                if published and not coverage["missing"]
+                if published and not coverage["missing"] and branch_complete
                 else "pending_upload"
                 if not published
                 else "partial"

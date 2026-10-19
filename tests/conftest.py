@@ -11,6 +11,7 @@ from core.io import write_json
 @pytest.fixture
 def cfg(tmp_path):
     raw = yaml.safe_load((Path(__file__).parents[1] / "config.yaml").read_text())
+    raw.pop("parallel", None)  # Unit fixtures do not depend on a GPU acceptance config.
     raw["model"].update(path=None, fingerprint="fixture-model", served_name="fixture")
     raw["capture"]["enabled"] = False
     raw["hidden"]["adapter"] = "vllm_eager"

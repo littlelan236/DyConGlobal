@@ -237,6 +237,36 @@ class Action(Strict):
     taxonomy: None
 
 
+class Parallel(Strict):
+    """Optional branch selection; the predictor is supplied by a later adapter."""
+
+    enabled: bool = False
+    branch_count: int = Field(default=2, gt=0, le=16)
+    policy: Literal["first_step", "every_k_steps", "every_step"] = "first_step"
+    every_k_steps: int | None = Field(default=None, gt=0)
+    estimator_ref: str | None = None
+    max_inflight_branches: int = Field(default=16, gt=0)
+    admission_timeout_seconds: int = Field(default=1800, gt=0, le=28800)
+    score_timeout_ms: int = Field(default=200, ge=1, le=30000)
+    decision_ttl_seconds: int = Field(default=28860, gt=0)
+    persist_all_branch_close: bool = True
+    save_sites: list[int] = []
+    fallback_policy: Literal["first_valid", "stop"] = "first_valid"
+    validation_repetitions: int = Field(default=0, ge=0, le=10)
+
+    @model_validator(mode="after")
+    def validate_policy(self):
+        if self.policy == "every_k_steps" and self.every_k_steps is None:
+            raise ValueError("parallel.every_k_steps is required for every_k_steps")
+        if self.policy != "every_k_steps" and self.every_k_steps is not None:
+            raise ValueError("parallel.every_k_steps is only valid for every_k_steps")
+        if self.enabled and self.branch_count > 1 and not self.persist_all_branch_close:
+            raise ValueError("parallel rollout requires all branch close hidden to be persisted")
+        if len(set(self.save_sites)) != len(self.save_sites) or any(x < 0 for x in self.save_sites):
+            raise ValueError("parallel.save_sites must contain unique nonnegative sites")
+        return self
+
+
 class Config(Strict):
     schema_version: Literal[1]
     paths: Paths
@@ -255,6 +285,7 @@ class Config(Strict):
     action: Action
     steering: Steering
     capture: Capture = Field(default_factory=Capture)
+    parallel: Parallel = Field(default_factory=Parallel)
 
     @model_validator(mode="after")
     def cross_fields(self):
@@ -276,6 +307,21 @@ class Config(Strict):
             raise ValueError("Capture anchors must be nonempty and unique")
         if self.capture.enabled and self.capture.prefill_token_chunk_size != 0:
             raise ValueError("Production online capture requires native prefill_token_chunk_size=0")
+        if self.parallel.enabled and self.parallel.branch_count > 1 and self.parallel.max_inflight_branches < self.parallel.branch_count:
+            raise ValueError("parallel capacity must accommodate one decision")
+        if self.parallel.enabled and self.parallel.branch_count > 1 and not self.capture.enabled:
+            raise ValueError("parallel rollout requires online capture for branch hidden")
+        if self.parallel.enabled and self.parallel.branch_count > 1:
+            if not self.capture.export.enabled or "think_close" not in self.capture.anchors:
+                raise ValueError("parallel requires persistent think_close capture")
+            if not self.generation.enable_thinking or not self.parallel.estimator_ref:
+                raise ValueError("parallel requires thinking and external estimator_ref")
+            if not self.parallel.save_sites or not set(self.parallel.save_sites) <= set(self.capture.layers):
+                raise ValueError("parallel.save_sites must be a nonempty subset of capture.layers")
+            if self.parallel.max_inflight_branches > self.serving.max_num_seqs:
+                raise ValueError("parallel capacity must not exceed serving.max_num_seqs")
+            if self.parallel.decision_ttl_seconds <= self.timeouts.model_seconds:
+                raise ValueError("parallel reservation TTL must exceed model request timeout")
         return self
 
 
@@ -318,7 +364,18 @@ def resolve(path, overrides=()):
     # Preserve old snapshot/config identities when the new optional pilot is absent.
     if "ridge_probe" not in raw.get("difficulty", {}):
         cfg["difficulty"].pop("ridge_probe")
+    if "parallel" not in raw:
+        cfg.pop("parallel")
     root = path.parent
+    if cfg.get("parallel", {}).get("enabled") and cfg["parallel"]["branch_count"] > 1:
+        from runtime.serving.parallel import artifact_contract
+
+        options = cfg["parallel"]
+        options["estimator_ref"] = str((root / options["estimator_ref"]).absolute())
+        contract = artifact_contract(options["estimator_ref"], model_fingerprint=cfg["model"]["fingerprint"])
+        if not set(contract["sites"]) <= set(options["save_sites"]):
+            raise ValueError("Predictor sites must be included in parallel.save_sites")
+        options["estimator_sha256"] = sha256(options["estimator_ref"])
     cfg["hidden"]["vllm"]["python"] = str((root / cfg["hidden"]["vllm"]["python"]).absolute())
     for section, field in [
         ("model", "path"),

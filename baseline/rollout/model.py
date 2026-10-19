@@ -1,6 +1,8 @@
 """Native mini-swe-agent model, augmented with request provenance."""
 
+import copy
 import os
+import time
 
 from hidden.backends.vllm.online import build_capture_select
 from runtime.steering.easysteer.payload import steering_payload
@@ -66,6 +68,12 @@ def make_model(cfg, deadline, capture_context=None, runtime=None):
             self._dycon_capture_step = 0
             self._dycon_metric_step = 0
 
+        def record_action_phase(self, message, phase, details=None):
+            summary = message.get("extra", {}).get("dycon_parallel")
+            if summary is not None:
+                controller = (runtime or {}).get("capture_controller")
+                controller.record_parallel_action(summary, phase, details)
+
         def serialize(self):
             import copy
 
@@ -95,6 +103,8 @@ def make_model(cfg, deadline, capture_context=None, runtime=None):
             self.config.model_kwargs["timeout"] = deadline.remaining(cfg["timeouts"]["model_seconds"])
             capture = self.config.model_kwargs.get("extra_body", {}).get("dycon_capture")
             if capture is not None:
+                for key in ("decision_id", "branch_id", "branch_count", "parent_prefix_sha256"):
+                    capture.pop(key, None)
                 capture.update(step_id=self._dycon_capture_step, query_id=uuid4().hex)
                 self._dycon_capture_step += 1
 
@@ -147,7 +157,45 @@ def make_model(cfg, deadline, capture_context=None, runtime=None):
 
             check_capture()
             try:
-                message = attach(super().query(messages, **kwargs))
+                from baseline.rollout.parallel import ParallelReasoningCoordinator, active
+
+                step = self._dycon_metric_step
+                self._dycon_metric_step += 1
+                if active(cfg, step) and not (runtime or {}).get("diagnostic_single_query"):
+                    coordinator = ParallelReasoningCoordinator(
+                        cfg, (runtime or {}).get("capture_controller"),
+                        client=(runtime or {}).get("parallel_client"),
+                        diagnostic_mode=(runtime or {}).get("diagnostic_selection_mode"),
+                        diagnostic_branches=(runtime or {}).get("diagnostic_branch_count"))
+
+                    def generate(prepared, metadata, seed):
+                        options = copy.deepcopy(self.config.model_kwargs)
+                        extra = {**options["extra_body"], **kwargs.get("extra_body", {})}
+                        options.update(kwargs)
+                        extra["dycon_capture"] = metadata
+                        options["extra_body"] = extra
+                        options["seed"] = seed
+                        options["timeout"] = deadline.remaining(cfg["timeouts"]["model_seconds"])
+                        # Call the same native model transport and parsers, with
+                        # per-branch immutable kwargs; no shared metadata races.
+                        return LitellmModel._query(self, prepared, **options)
+
+                    def parse(response):
+                        try:
+                            actions = self._parse_actions(response)
+                        except FormatError as error:
+                            for msg in error.messages:
+                                msg.setdefault("extra", {})["response"] = response.model_dump(mode="json")
+                            raise
+                        msg = response.choices[0].message.model_dump()
+                        msg["extra"] = {"actions": actions, "response": response.model_dump(mode="json"),
+                                        "timestamp": time.time()}
+                        return msg
+
+                    message = attach(coordinator.run(
+                        self._prepare_messages_for_api(messages), capture, generate, parse, self._calculate_cost))
+                else:
+                    message = attach(super().query(messages, **kwargs))
                 check_capture(message)
                 return message
             except FormatError as exc:

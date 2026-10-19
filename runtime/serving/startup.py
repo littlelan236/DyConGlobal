@@ -52,7 +52,15 @@ def check_tool_chain(cfg, run_id, task, factory, runtime):
         message = make_model(cfg, factory.deadline, metadata, runtime).query(messages)
         messages.append(message)
         actions = message["extra"]["actions"]
+        from core.io import hash_json
+
+        recorder = runtime.get("capture_controller") if message.get("extra", {}).get("dycon_parallel") else None
+        if recorder:
+            recorder.record_parallel_action(message["extra"]["dycon_parallel"], "started")
         observations = [env.execute(action) for action in actions]
+        if recorder:
+            recorder.record_parallel_action(message["extra"]["dycon_parallel"], "completed",
+                                            {"observations_sha256": hash_json(observations)})
         if not observations or not any(
             "DYCON_STARTUP_OK" in o["output"] and o["returncode"] == 0 for o in observations
         ):
@@ -91,6 +99,21 @@ def check_tool_chain(cfg, run_id, task, factory, runtime):
                 receipt.update(passed=True, capture_status="not_exported")
                 write_json(out / "receipt.json", receipt)
                 return receipt
+            if message.get("extra", {}).get("dycon_parallel"):
+                from hidden.artifacts import read_branch_index
+
+                branch_root = controller.spool.nas if controller.spool else controller.export_root
+                branch = read_branch_index(branch_root, sid)
+                if branch["coverage"]["missing"]:
+                    raise ValueError("Startup parallel close coverage incomplete")
+                for row in branch["samples"]:
+                    if not row["close_events"]:
+                        raise ValueError("Startup parallel branch has no close")
+                    for event in row["close_events"]:
+                        arrays = read_arrays(branch_root, event)
+                        if not all(np.isfinite(a).all() for a in arrays.values()):
+                            raise ValueError("Startup parallel branch nonfinite hidden")
+                receipt["parallel"] = message["extra"]["dycon_parallel"]
             if finalized["capture_status"] != "complete":
                 raise ValueError("Startup capture is not published and complete")
             source = controller.spool.nas if controller.spool else controller.export_root
@@ -124,6 +147,12 @@ def check_tool_chain(cfg, run_id, task, factory, runtime):
         receipt["passed"] = True
         if cap and runtime.get("validation_mixed"):
             receipt["mixed_batch"] = check_mixed_batches(cfg, run_id, factory, runtime)
+        if (runtime.get("validation_mixed") and cfg.get("parallel", {}).get("enabled")
+                and cfg["parallel"]["branch_count"] > 1
+                and cfg["parallel"].get("validation_repetitions", 0)):
+            from runtime.serving.parallel_validation import validate_parallel_queries
+
+            receipt["parallel_validation"] = validate_parallel_queries(cfg, run_id, factory, runtime)
         write_json(out / "receipt.json", receipt)
         return receipt
     finally:
@@ -156,7 +185,9 @@ def check_mixed_batches(cfg, run_id, factory, runtime):
     barrier = threading.Barrier(2)
 
     def one(index):
-        model = make_model(cfg, factory.deadline, md, runtime)
+        # This native scheduler diagnostic constrains output to newline tokens,
+        # deliberately has no close/tool call, and is not a branch decision.
+        model = make_model(cfg, factory.deadline, md, {**runtime, "diagnostic_single_query": True})
         model._dycon_capture_step = index
         messages = [
             {
