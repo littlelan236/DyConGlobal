@@ -19,7 +19,7 @@ HEAD 为 `ae3167daf2e819be4c93f43c048108102dd9803b`，工作树已有大量未�
 | 评测 | SWE-bench 4.1.0、patch 绑定、success/infra error 区分、gold 只验环境 |
 | 在线 capture | EasySteer control plane、native request ledger/token IDs、anchor/event 绑定、bounded spool、异步 NAS shard、上传恢复 |
 | enrichment | open/close prefix、成功剩余量/终止诊断、证据分级、token trace、online token-event finalize |
-| hidden | HF 分块重放、独立 vLLM eager、显式 site、receipt/partial 校验、同身份下续提 |
+| hidden | 独立 vLLM eager 重放、显式 site、常驻 TP queue worker、APC、receipt/partial 校验、同身份下续提 |
 | 数据视图 | schema 1 离线索引、schema 2 exact join、schema 3 在线索引、无标签 action 引用 |
 | difficulty | Ridge、FFN MLP、Ridge+FFN；训练/加载 Python API；显式预测评分和轨迹图 |
 | runtime | NAS OCI streaming、load slots/lease/空间预约、owned cleanup/recovery、独立 EasySteer runtime |
@@ -38,6 +38,6 @@ HEAD 为 `ae3167daf2e819be4c93f43c048108102dd9803b`，工作树已有大量未�
 
 resolved=true 才提供“到最终成功提交”的剩余量标签；unresolved、未评测、infra error 保留 null。旧轨迹 token 重建不能提升为 native exact；exact join 必须唯一绑定 prompt/output IDs、token ID 和 absolute position。
 
-测试涵盖 manifest 并发/分区、patch/evaluation 绑定、失败标签、prefix 无未来动作、hidden/resume、token alignment、trace/spool/capture、镜像并发/恢复、agent 协议及 estimator 数值契约。Docker smoke 只验证四个合成 OCI 镜像，不替代 SWE-bench gold；GPU 验收证据仅证明其模型、dtype、输入和 runtime 范围，不能外推全量数值一致性或吞吐。
+测试涵盖 manifest 并发/分区、patch/evaluation 绑定、失败标签、prefix 无未来动作、hidden/resume、token alignment、trace/spool/capture、镜像并发/恢复、agent 协议及 estimator 数值契约。2026-10-19 的 vLLM GPU 证据还覆盖了四个在线轨迹事件的 NAS hidden 对照，以及 5,280/6,275 token 的 APC hot-cache smoke。Docker smoke 只验证四个合成 OCI 镜像，不替代 SWE-bench gold；GPU 验收证据仅证明其模型、dtype、输入和 runtime 范围，不能外推全量数值一致性或吞吐。
 
 本页只描述当前实现与验收边界；冲突时以当前源码和 run 证据为准。

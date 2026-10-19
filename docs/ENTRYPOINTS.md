@@ -41,7 +41,7 @@ cd /home/wangtianyi/DyConGlobal
 | 轨迹 enrichment | analysis | `dycon enrich DATASET_ID` | `enrichment.trajectory.enrich` → `enrichment/outputs/DATASET_ID/` 和 `reports/` |
 | 构建 token trace | analysis | `dycon token-trace DATASET_ID` | `enrichment.token_trace.build_token_traces` → dataset 下 `token-traces/` |
 | token trace 审计 | analysis | `dycon trajectory-token-audit DATASET_ID` | `audit_token_traces`；核验 trace SHA、维度和计数 |
-| 离线 hidden | analysis | `dycon hidden DATASET_ID CAPTURE_ID` | HF 或 vLLM adapter → `hidden/outputs/CAPTURE_ID/` |
+| 离线 hidden | analysis | `dycon hidden DATASET_ID CAPTURE_ID` | vLLM eager adapter → `hidden/outputs/CAPTURE_ID/` |
 | 普通离线共享索引 | analysis | `dycon dataset-index DATASET_ID CAPTURE_ID INDEX_ID` | `difficulty.datasets.index.build_index` → `difficulty/datasets/INDEX_ID/index.json`，schema 1 |
 | exact token-hidden join | analysis | `dycon token-join DATASET_ID CAPTURE_ID JOIN_ID` | `difficulty.datasets.token_join` → `rows.jsonl` + `receipt.json`，schema 2 |
 | join 审计 | analysis | `dycon hidden-token-join-audit JOIN_ID` | 校验 join 行和 receipt；不重建数据 |
@@ -109,7 +109,7 @@ dycon / python -m core.cli
 
 ## hidden 环境和已有批量入口
 
-HF 提取在 analysis 环境执行；vLLM eager 提取由统一 CLI 自动启动 `hidden.vllm.python`（当前 `.venvs/latent-vllm/bin/python`）的 `hidden.scripts.extract_vllm`。不要用 serving 环境替代，也不要重新实现 vLLM batching、capture 或 cache。
+离线提取由统一 CLI 自动启动 `hidden.vllm.python`（当前 `.venvs/latent-vllm/bin/python`）的 `hidden.scripts.extract_vllm`。不要用 serving 环境替代，也不要重新实现 vLLM batching、capture 或 cache。
 
 独立 eager 环境尚未存在时，使用 `.venvs/runner/bin/python -m hidden.scripts.prepare_vllm_runtime`；它复制并核验 serving runtime，已存在的目标会拒绝覆盖。该主机已有四个环境：runner、analysis、easysteer、latent-vllm。
 
@@ -120,7 +120,7 @@ HF 提取在 analysis 环境执行；vLLM eager 提取由统一 CLI 自动启动
   --root /home/wangtianyi/DyConGlobal
 ```
 
-它针对已有 `state/anchors-20261017/queue.json`、`launch.json` 和 `state/extraction-models.json`，固定 GPU 0–3、HF/all-layer 提取；校验 completed receipt、checkpoint/trajectory 绑定、旧 worker/GPU locks，再冻结配置并派发 `run_extraction_queue.py`。这是已有批次的维护入口，不是自动创建新批次的工具。系统错误保留 pending 并停止 worker，不能反复跳过错误耗尽队列，也不能直接手动起 worker 绕过 preflight。
+它针对已有 `state/anchors-20261017/queue.json`、`launch.json` 和 `state/extraction-models.json`，固定 GPU 0–3 的 vLLM TP 提取；校验 completed receipt、checkpoint/trajectory 绑定、旧 worker/GPU locks，再冻结配置并派发单个常驻 `run_extraction_queue.py`。该 worker 按模型复用 engine 和 APC。这是已有批次的维护入口，不是自动创建新批次的工具。系统错误保留 pending 并停止 worker，不能反复跳过错误耗尽队列，也不能直接手动起 worker 绕过 preflight。
 
 多 checkpoint 历史 token trace 已有 `enrichment.scripts.build_all_token_traces --model-inventory INVENTORY.json --dataset-id DATASET_ID`；inventory 为含 `models` 映射的对象，各模型有 path/fingerprint。它固定选择 train/training，并记录弱证据和失败；不是当前单模型 `token-trace` 的可任意替代品。
 
@@ -142,10 +142,16 @@ action 目前只有共享索引，taxonomy、labels、analyzers、训练和动�
 | Docker/NAS smoke | `.venvs/runner/bin/python -m runtime.scripts.smoke_images` | 4 个合成 OCI 镜像的真实 load/create/remove，非 SWE-bench gold |
 | 原生 capture 精度矩阵 | `.venvs/easysteer/bin/python -m hidden.evaluation.capture_matrix --output NEW_DIR` | 实际 GPU 诊断，读取 serving GPUs，不执行正式 cohort |
 | eager replay smoke | `.venvs/latent-vllm/bin/python -m hidden.evaluation.smoke_vllm --output NEW_DIR` | offline runtime/capture 诊断 |
-| HF/eager 对比 | `.venvs/analysis/bin/python -m hidden.evaluation.compare_backends --smoke-dir DIR --gpu GPU` | 要求前序 passing smoke |
 | 发布 artifact 重放 | `hidden.evaluation.replay_online_artifacts` | 用其 `--help` 核对独立 replay runtime、source run、事件范围 |
 | online/replay 结果比较 | `.venvs/analysis/bin/python -m hidden.evaluation.compare_vllm_replay --online-dir DIR --replay-dir DIR --output FILE` | 数值对比，不能证明所有 checkpoint 等价 |
 | 原生 dispatch 诊断 | `.venvs/easysteer/bin/python -m hidden.evaluation.diagnose_native_dispatch --model MODEL --gpus GPU --output NEW_DIR` | 记录 graph/compile 实际执行路径 |
 | gold 镜像审计 | `.venvs/runner/bin/python -m runtime.scripts.gold_image_audit --root ROOT --instances FILE --audit-id ID` | 真实 Docker/gold 维护，先核对输入和 `--help` |
+
+2026-10-19 的在线轨迹对照使用 NAS 批次
+`capture-verified200-20261018-143317`，报告保存在
+`hidden/evaluation/outputs/replay-online-smoke-20261019-4/`。该验证只选取
+存在匹配 request ledger 的事件；在线事件索引中的孤立 request 不得被当作
+模型数值失败。共享 GPU smoke 必须显式设置 `allow_shared_gpus=true`、
+`min_free_gpu_bytes` 和 `kv_cache_memory_bytes`，且不能终止已有 serving 进程。
 
 `hidden/evaluation/validate_online.py` 等旧验收脚本带硬编码路径、GPU、配置和顶层执行，不能因文件名含 validate 就直接 import 或当作通用入口。迁移、清理和 NAS repair 工具还有专用 plan/apply、冻结 cohort 等约束，应先查对应源码/`--help` 和冻结输入，不能沿用历史任务范围直接执行。

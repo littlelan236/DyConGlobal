@@ -1,4 +1,4 @@
-"""Run one explicit rollout shard through enrichment then hidden extraction."""
+"""Run one explicit rollout shard through the isolated vLLM replay backend."""
 
 from __future__ import annotations
 
@@ -31,8 +31,11 @@ def main():
         f"model.path={a.model}",
         f"model.fingerprint={a.fingerprint}",
         f"model.served_name={Path(a.model).name}",
-        f"hidden.device=cuda:{a.gpu}",
+        "hidden.device=cpu",
         f"hidden.layers={list(range(32)) if '9B' in a.model else list(range(64))}",
+        "hidden.adapter=vllm_eager",
+        f"hidden.vllm.gpus=[{a.gpu}]",
+        "hidden.vllm.tensor_parallel_size=1",
         f"enrichment.anchors={a.anchors}",
         "benchmark.partition=train",
         "benchmark.purposes=[training]",
@@ -49,16 +52,22 @@ def main():
 
     Catalog.select = select
     verify_model(cfg)
+    from hidden.backends.vllm.engine import configure_environment, gpu_reservation
+    configure_environment(cfg)
+
     from transformers import AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(cfg["model"]["path"], local_files_only=True, trust_remote_code=False)
+    from hidden.adapters.vllm import load_adapter
+
+    tok = AutoTokenizer.from_pretrained(cfg["model"]["path"], local_files_only=True,
+                                        trust_remote_code=cfg["model"]["trust_remote_code"])
     enrich(cfg, a.dataset, tok)
-    extract_hidden(
-        cfg,
-        a.dataset,
-        a.capture,
-        __import__("hidden.adapters.hf", fromlist=["load_adapter"]).load_adapter(cfg),
-    )
+    with gpu_reservation(root, [int(a.gpu)]):
+        adapter = load_adapter(cfg)
+        try:
+            extract_hidden(cfg, a.dataset, a.capture, adapter)
+        finally:
+            adapter.close()
     print(json.dumps({"dataset": a.dataset, "capture": a.capture, "ids": len(ids), "gpu": a.gpu}, indent=2))
 
 

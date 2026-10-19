@@ -13,8 +13,8 @@ def cfg(tmp_path):
     raw = yaml.safe_load((Path(__file__).parents[1] / "config.yaml").read_text())
     raw["model"].update(path=None, fingerprint="fixture-model", served_name="fixture")
     raw["capture"]["enabled"] = False
-    raw["hidden"]["adapter"] = "hf_causal"
-    raw["hidden"].pop("vllm", None)
+    raw["hidden"]["adapter"] = "vllm_eager"
+    raw["hidden"]["vllm"] = {"gpus": [0], "tensor_parallel_size": 1}
     raw["steering"].update(enabled=False, payload=None)
     raw["serving"]["management"] = "external"
     raw["images"].update(

@@ -15,7 +15,7 @@ def native_layers(layers, layer_count):
         raise ValueError("Capture needs unique nonempty sites")
     if any(type(i) is not int or not 0 <= i < layer_count for i in layers):
         raise ValueError("Capture site is outside the text decoder")
-    # HF excludes the last block's pre-norm output; native tact_states has
+    # The public convention excludes the last block's pre-norm output; native tact_states has
     # all N decoder outputs followed by final norm at native index N.
     return [layer_count if i == layer_count - 1 else i for i in layers]
 

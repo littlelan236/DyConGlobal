@@ -23,6 +23,13 @@ def main(argv=None):
     for cmd in ["tasks-import", "rollouts-import", "evaluations-import"]:
         sub.add_parser(cmd).add_argument("list")
     sub.add_parser("model-register").add_argument("checkpoint")
+    p = sub.add_parser("benchmark-pull")
+    p.add_argument("cohort_id")
+    p.add_argument("--count", type=int, default=600)
+    p.add_argument("--proxy", default="http://127.0.0.1:7890")
+    p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--source-revision", default="c6fe717fd7a4c3ac1daa4055a4fd082c6a1d28a2")
+    p.add_argument("--results-revision", default="40f164d5b8f1d249bf95a6df8b74b577fd8e519d")
     p = sub.add_parser("rollout")
     p.add_argument("run_id")
     p.add_argument("--resume", action="store_true")
@@ -107,6 +114,18 @@ def main(argv=None):
         from core.model_identity import register
 
         result = {"fingerprint": register(cfg["project_root"], a.checkpoint)}
+    elif a.command == "benchmark-pull":
+        from baseline.benchmark import publish
+
+        result = publish(
+            cfg,
+            a.cohort_id,
+            count=a.count,
+            proxy=a.proxy,
+            workers=a.workers,
+            source_revision=a.source_revision,
+            results_revision=a.results_revision,
+        )
     elif a.command == "rollout":
         if a.resume and a.set:
             raise ValueError("Resume uses immutable snapshot; --set requires a new run")
@@ -156,25 +175,19 @@ def main(argv=None):
 
         result = audit_token_traces(cfg, a.dataset_id)
     elif a.command == "hidden":
-        if cfg["hidden"]["adapter"] == "vllm_eager":
-            import subprocess
+        import subprocess
 
-            args = [
-                cfg["hidden"]["vllm"]["python"],
-                "-m",
-                "hidden.scripts.extract_vllm",
-                "--config",
-                cfg["config_source"],
-            ]
-            for override in a.set:
-                args += ["--set", override]
-            subprocess.run([*args, a.dataset_id, a.capture_id], cwd=cfg["project_root"], check=True)
-            return
-        else:
-            from hidden.adapters.hf import load_adapter
-            from hidden.extract import extract_hidden
-
-            result = str(extract_hidden(cfg, a.dataset_id, a.capture_id, load_adapter(cfg)))
+        args = [
+            cfg["hidden"]["vllm"]["python"],
+            "-m",
+            "hidden.scripts.extract_vllm",
+            "--config",
+            cfg["config_source"],
+        ]
+        for override in a.set:
+            args += ["--set", override]
+        subprocess.run([*args, a.dataset_id, a.capture_id], cwd=cfg["project_root"], check=True)
+        return
     elif a.command == "images-check":
         from runtime.images.nas import NasImageStore
 

@@ -72,6 +72,10 @@ desktop.ini
 /hidden/online/**
 /hidden/spool/**
 /hidden/evaluation/outputs/**
+/hidden/evaluation/*.json
+
+# Temporary selectors used by online-to-vLLM replay diagnostics
+/tmp/replay-online-smoke-*.json
 
 # Estimator/action source stays tracked; generated datasets and models do not
 /difficulty/datasets/*/

@@ -13,8 +13,14 @@ class Adapter:
     fingerprint = "fixture-model"
     hidden_size = 4
 
-    def capture(self, ids, layers, chunk_size):
-        return np.ones((len(layers), self.hidden_size), dtype=np.float32)
+    batch_size = 4
+    metadata = {"name": "vllm_eager", "runtime_source_sha256": "fixture"}
+
+    def capture_batch(self, rows, layers, chunk_size):
+        return {
+            row["sample_id"]: np.ones((len(layers), self.hidden_size), dtype=np.float32)
+            for row in rows
+        }
 
     def sites(self):
         return [{"kind": "final_norm", "block_index": None}]
@@ -58,26 +64,3 @@ def test_prediction_evaluation_uses_frozen_labels(cfg, tmp_path):
     )
     out = evaluate_predictions(cfg, "joined", path, "score")
     assert all(x["mae"] == 0 for x in read_json(out / "metrics.json")["metrics"].values())
-
-
-def test_hf_chunk_replay_matches_full_forward():
-    torch = pytest.importorskip("torch")
-    transformers = pytest.importorskip("transformers")
-    from hidden.adapters.hf import HFDecoderAdapter
-
-    torch.manual_seed(42)
-    config = transformers.LlamaConfig(
-        vocab_size=32,
-        hidden_size=16,
-        intermediate_size=32,
-        num_hidden_layers=2,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-    )
-    model = transformers.LlamaForCausalLM(config).eval()
-    ids = [1, 4, 5, 2, 3, 6]
-    with torch.inference_mode():
-        full = model(input_ids=torch.tensor([ids]), output_hidden_states=True)
-    actual = HFDecoderAdapter(model, "tiny").capture(ids, [0, 1], 2)
-    expected = torch.stack([h[0, -1].float() for h in full.hidden_states[1:]]).numpy()
-    np.testing.assert_allclose(actual, expected, atol=2e-5, rtol=2e-5)

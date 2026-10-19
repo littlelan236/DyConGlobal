@@ -15,7 +15,8 @@ from hidden.extract import extract_hidden
 
 
 def test_legacy_config_and_snapshot_identity_unchanged(cfg):
-    assert "vllm" not in cfg["hidden"]
+    assert cfg["hidden"]["adapter"] == "vllm_eager"
+    assert "vllm" in cfg["hidden"]
     selection = {"rollouts": {}}
     snapshot(cfg, "old", selection)
     assert load_snapshot(cfg["project_root"], "old") == read_json(

@@ -99,17 +99,11 @@ def extract_hidden(cfg, dataset_id, capture_id, adapter):
         if not pending:
             return
         rows = [row for row, _ in pending]
-        if hasattr(adapter, "capture_batch"):
-            values = adapter.capture_batch(rows, layers, cfg["hidden"]["chunk_size"])
-            if set(values) != {row["sample_id"] for row in rows}:
-                raise ValueError("Batch capture returned mismatched sample identities")
-        else:
-            values = {
-                row["sample_id"]: adapter.capture(
-                    row["prefix_token_ids"], layers, cfg["hidden"]["chunk_size"]
-                )
-                for row in rows
-            }
+        if not hasattr(adapter, "capture_batch"):
+            raise TypeError("Offline hidden extraction requires the vLLM batch adapter")
+        values = adapter.capture_batch(rows, layers, cfg["hidden"]["chunk_size"])
+        if set(values) != {row["sample_id"] for row in rows}:
+            raise ValueError("Batch capture returned mismatched sample identities")
         for row, sample_hash in pending:
             store(row, sample_hash, values[row["sample_id"]])
         pending.clear()
@@ -151,14 +145,8 @@ def extract_hidden(cfg, dataset_id, capture_id, adapter):
                     "occurrence": row["occurrence"],
                     "path": tensor_name,
                     "prefix_sha256": row["prefix_sha256"],
-                    **(
-                        {
-                            "anchor_token_id": row["prefix_token_ids"][-1],
-                            "anchor_position": len(row["prefix_token_ids"]) - 1,
-                        }
-                        if hasattr(adapter, "metadata")
-                        else {}
-                    ),
+                    "anchor_token_id": row["prefix_token_ids"][-1],
+                    "anchor_position": len(row["prefix_token_ids"]) - 1,
                 }
             )
     flush()
@@ -179,14 +167,11 @@ def extract_hidden(cfg, dataset_id, capture_id, adapter):
         "sites": [adapter.sites()[i] for i in layers],
         "hidden_size": adapter.hidden_size,
         "storage_dtype": "float32",
-        "replay": "native_batched_causal_prefix"
-        if hasattr(adapter, "capture_batch")
-        else "independent_causal_prefix",
+        "replay": "native_batched_causal_prefix",
         "files": files,
     }
-    if hasattr(adapter, "metadata"):
-        receipt["backend"] = adapter.metadata
-        receipt["execution_metrics"] = adapter.metrics
+    receipt["backend"] = adapter.metadata
+    receipt["execution_metrics"] = getattr(adapter, "metrics", [])
     write_json(out / "receipt.json", receipt)
     register_capture(cfg, out, receipt)
     return out

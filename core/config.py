@@ -154,7 +154,7 @@ class Hidden(Strict):
     device: str
     chunk_size: int = Field(gt=0)
     layers: list[int]
-    adapter: Literal["hf_causal", "vllm_eager"]
+    adapter: Literal["vllm_eager"]
     vllm: VLLMHidden = Field(default_factory=VLLMHidden)
 
 
@@ -299,7 +299,6 @@ UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, uni
 def resolve(path, overrides=()):
     path = Path(path).resolve()
     raw = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueLoader)
-    explicit_vllm = "vllm" in raw.get("hidden", {})
     # Optional defaults preserve old config files while allowing dotted overrides.
     # Existing keys still undergo strict validation; unknown keys are not discarded.
     hidden = raw.get("hidden", {})
@@ -320,15 +319,7 @@ def resolve(path, overrides=()):
     if "ridge_probe" not in raw.get("difficulty", {}):
         cfg["difficulty"].pop("ridge_probe")
     root = path.parent
-    if (
-        cfg["hidden"]["adapter"] == "hf_causal"
-        and not explicit_vllm
-        and not any(item.startswith("hidden.vllm.") for item in overrides)
-    ):
-        # Preserve legacy HF config hashes and immutable artifact identities.
-        cfg["hidden"].pop("vllm")
-    else:
-        cfg["hidden"]["vllm"]["python"] = str((root / cfg["hidden"]["vllm"]["python"]).absolute())
+    cfg["hidden"]["vllm"]["python"] = str((root / cfg["hidden"]["vllm"]["python"]).absolute())
     for section, field in [
         ("model", "path"),
         ("environment", "wheelhouse"),

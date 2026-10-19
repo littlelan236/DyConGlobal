@@ -58,9 +58,15 @@ cd /home/wangtianyi/DyConGlobal
 .venvs/analysis/bin/dycon difficulty-evaluate INDEX_ID PREDICTIONS.json SCORE_ID
 ```
 
-`hidden.adapter` 选择 HF 或 vLLM eager；当前 YAML 为 vLLM eager，由 CLI 派发独立 latent-vllm 解释器。显式 layers 使用 0-based 公共 site：前 N−1 个是 decoder output，最后一个是 final norm，不能直接混用 native site 索引。每锚点独立重放，HF 分块预填充，不跨请求裁剪混合 SSM/attention cache。
+离线 hidden 统一使用 vLLM eager，由 CLI 派发独立 latent-vllm 解释器。显式 layers 使用 0-based 公共 site：前 N−1 个是 decoder output，最后一个是 final norm，不能直接混用 native site 索引。vLLM 负责连续 batching、chunked prefill 和 APC；重放只提交精确 token prefix，不裁剪跨请求的混合 SSM/attention cache。
 
 token 级核验使用 `token-trace`、`trajectory-token-audit`、`token-join`、`hidden-token-join-audit`。普通离线索引、在线索引和 token join 格式不同；当前 scorer 只支持普通离线 label-shard 索引，兼容性详见入口表。历史四 GPU extraction 使用已有 `enrichment.scripts.launch_extraction`，不得直接启动 queue worker。
+
+当前 vLLM 重放实现位于 `hidden/adapters/vllm.py`、`hidden/backends/vllm/` 和
+`hidden/extract.py`；轨迹 prefix 重建位于 `enrichment/trajectory.py`，历史批量
+入口位于 `enrichment/scripts/launch_extraction.py`。在线 NAS hidden 对照使用
+`hidden/evaluation/replay_online_artifacts.py`。2026-10-19 的四事件对照和 APC
+smoke 报告位于 `hidden/evaluation/outputs/`，这些诊断产物不会进入 git。
 
 ## 代码与产物职责
 
@@ -69,7 +75,7 @@ token 级核验使用 `token-trace`、`trajectory-token-audit`、`token-join`、
 | `core/` | strict config、CLI、原子 I/O、锁、磁盘预算、model identity |
 | `baseline/` | manifest、importers、rollout、官方 harness、canonical trajectories/patches、evaluations |
 | `enrichment/` | trajectory labels、prefix、token traces、online token-event finalize；outputs/reports/manifests |
-| `hidden/` | HF/vLLM adapters、提取、artifact reader、online recovery；outputs、spool、online capture 产物 |
+| `hidden/` | vLLM adapter、提取、artifact reader、online recovery；outputs、spool、online capture 产物 |
 | `difficulty/` | 共享索引、Ridge/FFN/残差估计器、训练 Python API、预测评分与轨迹图 |
 | `action/` | shared hidden 无标签索引；taxonomy/analyzers 预留 |
 | `runtime/` | 容器、NAS OCI、serving/capture/cache/spool、EasySteer、安装/验收/恢复 |

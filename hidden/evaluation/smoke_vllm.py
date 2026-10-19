@@ -37,7 +37,13 @@ def main():
     configure_environment(cfg)
     out = Path(a.output)
     out.mkdir(parents=True, exist_ok=False)
-    with gpu_reservation(cfg["project_root"], cfg["hidden"]["vllm"]["gpus"]):
+    options = cfg["hidden"]["vllm"]
+    with gpu_reservation(
+        cfg["project_root"],
+        options["gpus"],
+        allow_shared=options.get("allow_shared_gpus", False),
+        min_free_bytes=options.get("min_free_gpu_bytes", 0),
+    ):
         from transformers import AutoTokenizer
 
         from hidden.adapters.vllm import load_adapter

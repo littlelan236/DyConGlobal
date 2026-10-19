@@ -1,6 +1,6 @@
 # vLLM eager latent extraction
 
-This backend uses the project's pinned EasySteer/vLLM 0.29.0 runtime in an independent `.venvs/latent-vllm` environment. It does not patch the serving environment, vendor sources, model weights, rollout code or steering code. As of 2026-10-19 the remote `config.yaml` selects `vllm_eager`; `hf_causal` remains supported and legacy HF artifact identities are preserved.
+This is the only offline hidden-state backend. It uses the project's pinned EasySteer/vLLM 0.29.0 runtime in an independent `.venvs/latent-vllm` environment. It does not patch the serving environment, vendor sources, model weights or rollout code.
 
 Production extraction uses `dycon hidden DATASET_ID CAPTURE_ID`, which delegates
 to the isolated interpreter. Reuse this entry point; do not create temporary
@@ -17,7 +17,7 @@ APC leaves the final input token for local computation in this pinned release (`
 
 ## Sites
 
-For an N-block model, the public site indices remain compatible with `HFDecoderAdapter`: indices 0..N-2 are complete decoder outputs; index N-1 is final norm. Native `tact_states` also exposes the final pre-norm block output, so public index N-1 maps to native index N. Other indices map identically. The native capture implementation combines the split residual outputs. The final token of the marker is used if the marker consists of multiple token IDs.
+For an N-block model, public site indices 0..N-2 are complete decoder outputs and index N-1 is final norm. Native `tact_states` also exposes the final pre-norm block output, so public index N-1 maps to native index N. The final token of a marker is used if it consists of multiple token IDs.
 
 Only eager is implemented: `enforce_eager=True`, asynchronous scheduling disabled, no speculative configuration, no torch.compile or CUDA Graph capture. Kernel JIT compilation is still part of ordinary eager execution. The pinned runtime does not support batch-invariant mode for Qwen GDN, so extraction explicitly disables that mode rather than bypassing its compatibility checks.
 
@@ -35,7 +35,7 @@ The environment has its own vLLM, Triton and FlashInfer caches. The launcher set
 
 ## Configuration and execution
 
-The only editable configuration is still `config.yaml`. `hidden.vllm` is optional; old files and resolved HF config hashes are preserved exactly when it is absent. All settings can be placed under `hidden.vllm` or supplied with `--set`. Defaults:
+The only editable configuration is still `config.yaml`. `hidden.vllm` contains the required isolated replay settings. All settings can be placed under `hidden.vllm` or supplied with `--set`. Defaults:
 
 | Field | Default |
 |---|---|
@@ -49,6 +49,8 @@ The only editable configuration is still `config.yaml`. `hidden.vllm` is optiona
 | gpu_memory_utilization | 0.8 |
 | enable_chunked_prefill | true |
 | enable_prefix_caching | true |
+| allow_shared_gpus | false; diagnostic-only override |
+| min_free_gpu_bytes | 0; required when sharing a GPU |
 | moe_backend | auto (`triton` explicitly selects native Triton MoE kernels) |
 | capture_budget_bytes | 268435456 |
 | fetch_bytes | 16777216 |
@@ -73,7 +75,7 @@ On SM120 GPUs, the automatic MoE choice may trigger a lengthy FlashInfer C++ com
 
 ## Products and recovery
 
-Existing `hidden.extract.extract_hidden` handles both backends. It retains per-sample NPZ files, checksummed partial-result sidecars, final index/receipt, and bounded batch flushing. A failed window does not commit a final receipt; subsequent invocation with identical inputs/runtime/config reuses verified completed samples. Runtime/code/config changes require a new capture ID. Existing HF sample identities and default replay semantics are preserved.
+`hidden.extract.extract_hidden` uses the vLLM batch API. It retains per-sample NPZ files, checksummed partial-result sidecars, final index/receipt, and bounded batch flushing. A failed window does not commit a final receipt; subsequent invocation with identical inputs/runtime/config reuses verified completed samples. Runtime/code/config changes require a new capture ID.
 
 vLLM receipts additionally contain runtime/source fingerprints, inference dtype, engine options and window timing/cache metrics. Window metrics retain sample-to-native-request-ID mappings and target position/token labels. Index entries contain target token ID and absolute position. Both `enrichment/manifest.json` and `hidden/manifest.json` receive `native_captures` entries linking task ID, run ID, rollout ID, trajectory hash, explicit marker text and receipt. Existing migrated records and active extraction job records are preserved under the shared manifest lock. Capture output locations stay under `hidden/outputs/`; diagnostic results stay under `hidden/evaluation/outputs/`.
 
@@ -81,8 +83,23 @@ vLLM receipts additionally contain runtime/source fingerprints, inference dtype,
 
 CPU contract tests: `tests/test_vllm_hidden.py`. Native SDK CPU tests: `tests/test_vllm_native_capture.py` (run with the isolated interpreter). These cover layer mapping, request labels, failures, GPU admission, batched resume, manifest preservation and old config/snapshot compatibility.
 
-`python -m hidden.evaluation.smoke_vllm --output NEW_DIRECTORY` accepts `--config`/`--set`. It uses 129-, 2049- and 4097-token mixed-anchor prompts, checks cold/hot APC, reverse input order and singleton requests, verifies real cache hits, and checks cosine >= 0.999 and relative L2 <= 0.05. Failures remain failures and are retained in diagnostic reports.
+`python -m hidden.evaluation.smoke_vllm --output NEW_DIRECTORY` accepts `--config`/`--set`. It uses 129-, 2049- and 4097-token mixed-anchor prompts, checks cold/hot APC, reverse input order and singleton requests, verifies real cache hits, and checks cosine >= 0.999 and relative L2 <= 0.05. Failures remain failures and are retained in diagnostic reports. The default GPU admission rejects existing compute processes; a shared-GPU diagnostic must explicitly set `allow_shared_gpus=true`, a positive `min_free_gpu_bytes`, and a bounded `kv_cache_memory_bytes`.
 
-`python -m hidden.evaluation.compare_backends --smoke-dir DIRECTORY --gpu GPU` runs the same prefixes/sites through HF, with model/config overrides. It requires a passing vLLM smoke report and records numerical differences rather than asserting bitwise equality. Use the analysis interpreter for this command.
+Small GPU smoke tests are diagnostic evidence only; they do not establish whole-corpus speedup or bitwise equality across models.
 
-Small GPU smoke tests are diagnostic evidence only; they do not establish whole-corpus speedup or prove every checkpoint is numerically interchangeable with HF.
+### 2026-10-19 validation
+
+The replay comparison used four events from the same request in the complete online
+capture batch `capture-verified200-20261018-143317`. The source tensors came from
+the NAS publication and the prefixes came from the matching request ledger. With
+Qwen3.5-9B FP16, vLLM 0.29.0 eager, TP=1 and GPU 0 shared under an explicit
+12 GB free-memory floor, all cold/warm/reordered comparisons passed:
+
+| Samples | Worst cosine | Worst relative L2 | Report |
+|---:|---:|---:|---|
+| 4 | 0.9999958551 | 0.0028796251 | `hidden/evaluation/outputs/replay-online-smoke-20261019-4/report.json` |
+
+The APC smoke used the same checkpoint and shared-GPU admission. The first mixed
+window took 0.945 s; the repeated hot window took 0.229 s and reported 5,280 of
+6,275 prompt tokens cached (84.1%). Its report is
+`hidden/evaluation/outputs/smoke-online-cache-20261019/report.json`.
