@@ -1,0 +1,1917 @@
+[
+  {
+    "rollout_id": "r-3b8e3853d0e866017205880982505649",
+    "trajectory_sha256": "8358ebe394d0d7086d30501b9a73138524c2bdd2b029c8a62321a7d688c697af",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-8eeb237465b2d14c3a9a2edf55a6b92a",
+    "trajectory_sha256": "7c84f03ed5ad7b6cc9d3ab21a4d257014c54b9ed40d93c0cc38d4de37f9ad4b1",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-5db2cdc53674b387834b38baf79da435",
+    "trajectory_sha256": "cd19cf885ec06380927ef5fdd8fb391266bc5fb7b4dcc98bef7505201d53c671",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-553b43269f1413c8701fdbdc45f7875d",
+    "trajectory_sha256": "8ce607e0f627abbfb065b3d0b21865c297287b748a399782fd2e8afdfe66c758",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-4bfa15d539ffaf671c415a4fc72d503e",
+    "trajectory_sha256": "5dbb5a2b892707ec57d104d7d2c7049263d4d500eac4b0b0656d4f1215e142a4",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-176fc7109be3328f5f85056102aed9f5",
+    "trajectory_sha256": "ad0964778412fae44c9e906f04b31b79d5083005cde23759540a1945ff471b87",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-7bb1117f56468e6c6530fb20a5a7a943",
+    "trajectory_sha256": "1f01d785df38b532367ed2821546fb3e117807e902a659f273243589a377a836",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-48a98d22c018baa993a1b11ddf6fe140",
+    "trajectory_sha256": "406c7f8b9a7cea9b6185e0538967d2933c5afdf9008474332bb6744dd8157cbb",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-e3209f9758b745fad9ddf89676f5dffa",
+    "trajectory_sha256": "a19dfcaa6bc8235c5993c695ddfae9600320fb90b11f0122d200aaade1042747",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-350cba36ea59c510cf99ce4a7fb0a4f5",
+    "trajectory_sha256": "e5bcc9eb0e37ff187a3413fd266e85f0f8f189c92c2c31fb9d8cf7c1c2bc53b3",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-32bc42cafeab08e6fc6a3397d39ffe94",
+    "trajectory_sha256": "8487c2b2b45f697d2f91f04ac410c65998768dba59c3a4eca78584f1db52165a",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-f881cf1a0214b640424be230722a4882",
+    "trajectory_sha256": "64fbdd2e591f7daec8a8987af55078f1ccfc7987195fee06f1f0f0718fb25c7b",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-85c92367b862c2a8c12b023375412426",
+    "trajectory_sha256": "0328cb86db84c3e0b89c2ddd780b61989067dc7cb6a087c92bf7213c2e6686a3",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-75c61a9ebfcd8dc05c265eee437a7c57",
+    "trajectory_sha256": "e2540d19ebbb3d5a3a3989ed10a740b87ac4d88131615c08ec47ef712935547b",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-fea1a9d48236c34de0b012108501dce7",
+    "trajectory_sha256": "e0f576b489b4a7b2c37f9e6e954f8c35fdb2b718f07309e042b63b17927b907f",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-792a9237de335385f2a947de98337da7",
+    "trajectory_sha256": "d7139b25ba7d6d846168a4b4a88de88967032df13449f573b4d6f30cff0e96ea",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-c1d1ee4050943e02684dbfa673013809",
+    "trajectory_sha256": "5793cf3cec29b0e757c4d2926d9f8b20d4ed0aff8261c9ca670a484703c48f58",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-16b78df7c89f176362ff9b411364f5da",
+    "trajectory_sha256": "7c02a5414a26fb68921b49de274a967153978a7d322da4533e82615d8e5a96f7",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-1fca8d4e97e2445c03513ff0c343d4db",
+    "trajectory_sha256": "238de8e078eff2653a28b6b164154b520f415e96c70aaeafab34a65c37e1caac",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-f1a6ca914f51bc92554c63e749f2c75b",
+    "trajectory_sha256": "a3c027367dd1b574a77a1cc2864db610bb936890be9790b8809ed9c03c3f12e7",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-3927c4b7c1025dc0955026a1a4135bee",
+    "trajectory_sha256": "bf297dcca01f44b2552661f56d6f5aa4a41dd47f68a88aeb0ab402e5eaff376e",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-1beb0bb9b05a1f8240696a8842194e94",
+    "trajectory_sha256": "3e662b7d65c3dcb79794b71a64ada8d13ab246aa6588d705f90d839c5f01027f",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-64af2c89c6fbefe367ab6fa677dd60c9",
+    "trajectory_sha256": "aaba373cb1fa7bed2b7d8fe8fc17a6003509a0cd2d4a98cab6b2effbf3c85daa",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-7d09b04bc802412af80437864f141b5b",
+    "trajectory_sha256": "b5682d35da59ffaea3ad4de4646f5a86144a0a48e7e6f85b8570b20c0a28628d",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-156342c0b78ff583c12646e31150a0cb",
+    "trajectory_sha256": "5b96dfe929f1e49dc8a8d5e703b5ab64e21f1bbdb98089b4aaba5340ed0cee4f",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-1e0be2eb372d2e20b88281aeb99daa8e",
+    "trajectory_sha256": "d266197dad4d6ad4ad14d0d84ff731ed05fcc7219b1f17fe645254762cff6be2",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-43e3ed2b976270614acb7cc20ce562e0",
+    "trajectory_sha256": "8556bf592d432f03a439c21026315cd47512cc7d1e182f3858eaf64ce2e41f61",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-befcfffa841e3b40967ef2a35bb02a3c",
+    "trajectory_sha256": "f238bc470047612bffbf5676497e6b8ae3837a9ac899dfbee92d1b87c5728ada",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-40e4477c4a1d9c7799ed240655d29cd4",
+    "trajectory_sha256": "3c9082410aa4045e7f1558e8a0d3c5bcbefcf29112f7a93ad599491d5d22f6ab",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-f5cfa8cf156d01ad23bdaa3be36b5c26",
+    "trajectory_sha256": "4aa50e8da8a86d125a4d2cd86093c1259829d1072c70aff4a2c94fe90f23dc15",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-05533c59771e9476d39fc50e3cd9124a",
+    "trajectory_sha256": "41b1b628cfdab2e77e9a62917cadaf8e393cf0d76d54ce7c705b5c0960942ffb",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-3252a7a7a2141fce6a3eaa46ccd45e0b",
+    "trajectory_sha256": "3d571bd3411e0e7bcb14b188029f167eb4081ac60205bba232492a53c0f45799",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-309d19aa9109fea4889c184625368364",
+    "trajectory_sha256": "277358a92d3f02616632dcadc2740612932c7a32b0514b826e0f4d3afbbf1454",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-20e14b9816e648317f13e392d2ea650e",
+    "trajectory_sha256": "a88c300653e93a0081ac235730ec643be7d04cbd2595d90f8d75df76b219e240",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-333f1d1042f34337832954c174f32f62",
+    "trajectory_sha256": "66418534d28423dc2675817cf12377d2a54c82b72dfaecec55ebf68e202d6f18",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-3fce6f3a59ff7abdc07c09b9699f6399",
+    "trajectory_sha256": "2f1e4f8c277cc6db57d92ebcccd805930069be2565d5e80853480d46425a7247",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-029605ead35cb3a1f8ba70e46ff2dab8",
+    "trajectory_sha256": "53c14ae5d6e0e8566410f068c32f5ebe7c5dd7070323049b1d90867b5eca96cb",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-0a103ea65c8f1315b48bb503effcf3ac",
+    "trajectory_sha256": "58d4d7bcd5fbbd5f21242d4fec1397fcfc96482835af5a4df7517f5e3ac1a436",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-a7dee06859fe562c8281ad148ef66aa6",
+    "trajectory_sha256": "24372458ccd85097f5da9c5477781c81b845c9e7ed131521f7585d74b5de5c1e",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-060f340b7ef42d0fb22f9d5aac08e247",
+    "trajectory_sha256": "e314c47ec769e01ac3a55c9698aee05267aeb2a4e9d328c3a09f8585faa40a08",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-f9284e2bd7a28aa6462ffb6c964f2aa9",
+    "trajectory_sha256": "cd44b3a4daa63db5b55a03ccd26f4e235d7060338ab10ea9785c8a21ef5ed9ef",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-59be9bfa631555c4d8f1f9d340b29dcb",
+    "trajectory_sha256": "7249885ffc4b92e86aecc2ad4b319c47f9345e6d8209984c54d87ec851a50eed",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-264cea00a2f9f06656ccd0297beb1c0c",
+    "trajectory_sha256": "0c32c41db0ec5ccc9a1cfffbd44ba4689fae2c3ed37c719584788ccafcee6c45",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-163a898f3048a9a9ebb2269d7a42504f",
+    "trajectory_sha256": "22d134fb6e2cf7b1b516091feb7eac46702b3c28387507382ddba590bcf0da85",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-23fd726db171982b57e72a88e8946a54",
+    "trajectory_sha256": "98b02e8aff9536d0dd18047e59225e1be3ab67a0400ec77ffd7508798918fd72",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-94bf34ecb3064f7b06f5729d7d19e593",
+    "trajectory_sha256": "d3116df1b95770edfc9bfbbb3d93f72c1ec687309372846b76a8c4b611f54a03",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-5c33b9e866a0a1e3ba5cd602bce5922c",
+    "trajectory_sha256": "386d75dc0f035f9446096f0f2bbc7ae28d0fa59a5b9ce5df6acbbdb04aef17bd",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-fbfc9649948ddb52ba5194cf55f3f930",
+    "trajectory_sha256": "8499ee4fc57b9814ff0d9b3f55d4b8ba05c5ec5576595983a22339701c6741b2",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-869c9f6d96d9ca6d23c7c5104beb3285",
+    "trajectory_sha256": "25e83b8d6653ec33bb7bdad04ac529bff4a2b8431110de84b224eeb715e4ca52",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-699b0f14f8d8a5d336c66fb009d9c0b0",
+    "trajectory_sha256": "5d7c160e2c89ddd507ca217922c82258ec1d95d3d06b1dd80474bd14bcd8466c",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-10a7b680d41f46a8dea56c73a51c1073",
+    "trajectory_sha256": "ef915e329446d37c4c98c0d8c51d55adaf2927208ef1f8d3fb873f50a76c6f08",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-577e90e1fe6cb2a6b6a79310e44e4daa",
+    "trajectory_sha256": "239b3a9df13830bfa252dde5d2294a4a8a11f22bd0fef77e389f8c56d446e33e",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-bbbf5aa964f8cdf52842fdb08a847570",
+    "trajectory_sha256": "c479424d3a7d70a1d1abd16fece0325a01ebdabc3c921e033b0749b32d772745",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-ba83bdd74e4f6c269ee74869dcf0d283",
+    "trajectory_sha256": "f772c5765bfa3147bb569683d7071b34c0f13717c2b1ad49dbff5310b9948b64",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-34bdde782d4d5e04eeaf6a92399af576",
+    "trajectory_sha256": "67767212b5024ef47e338eae6dfe613367b54b6752f4885a1bcdbb1ad7729042",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-b39f88e1863946f591146e8e1ceb03e6",
+    "trajectory_sha256": "f7961ca6edbbb5662080de5f94fb07fc5be9c41c85fee4f85343beadeb20813d",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-8ab3591df098d957026800b6b00c78b9",
+    "trajectory_sha256": "3860be9706cdc7e6aa91efc4195a093366dbbb1110c1782871d2682cc8acd23d",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-5eb198fb09456283412742119cba2615",
+    "trajectory_sha256": "b2af8ba64c8fd8d3bf5892291b987eb7174c500e9c5179d7c30f950b27271297",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-642a450eb836cba1c6418739be2ff0c7",
+    "trajectory_sha256": "368472d10511c78831b1909108da896591c905b6f507add483341bcc6c5c29cb",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-b30cee9c5d51aed5ac9cccc32e7f9fc5",
+    "trajectory_sha256": "58783f237c25ce851ae8f78d3047ae58781182026e3fffafaccd3e74198d1f47",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-0d70aae2a3494cff05bd14457f62f76f",
+    "trajectory_sha256": "1d43fc1d38943bfe3afee8898ede8c7422c2ec89c2a2b0ea380aa56df7e3855d",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-b7b6f0d64db5aadc825a5254f6528077",
+    "trajectory_sha256": "2fe8142075545e2593c5e4cc798a423c8ae18a99da047b419f7e35e3704d3b11",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-5f1de3eafc3483bc17b06c4a20084c8d",
+    "trajectory_sha256": "5f768078fd3545e38ea7a7209d215c03c81414ad2af739d0141120b73cd094ac",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-2b91715e0ba0a38cacd9b3c6d9a7e023",
+    "trajectory_sha256": "d9df6142686582d61df0f30de0295fa88a321c6494a06617feb232c03971d24f",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-466cac0a9c4dc1ca8decad49a337eef8",
+    "trajectory_sha256": "ab8c298a800756c330fecef8f3a23a594823ee4b7ff94318376299733329cbc0",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-4ee2c8c222c31d39e13ad3306a21663e",
+    "trajectory_sha256": "e68b1b293483c81d17b6554e527670b88ee9e10fc047234445e49c64964eed62",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-9757b75eab60443112697613cf1bc72b",
+    "trajectory_sha256": "8a329609ef2322280907fac401b54097b7ab67c06e19445e19f75953f23196b4",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-9c7487962b19a9807690e0051828196f",
+    "trajectory_sha256": "0b2081325cbbc3468231b052e839cf57f2d0a1eca2bf7652b35edf600c441a13",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-3610940dae3341016391ebdf98a811a0",
+    "trajectory_sha256": "3296a5ae970a991f957cbdf6345b6f6a528a2b8fe234c63857e2469894e72740",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-214249a151bf7a7a710a13b27d613a46",
+    "trajectory_sha256": "dfe43df0f11fc9b7115d867a0f9e3936e1d6011af42aa4175b9ba7cea2f4fd10",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-f2fcb6bb0f849e7d4d2c58b910f8f69b",
+    "trajectory_sha256": "a4acbda740430b175362456677dbdffa4e9a1d0451fcf92d76c87555f0635ef0",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-205b9b29b7e7a3b1c2b214b0b7910779",
+    "trajectory_sha256": "b658a4d7ee57f1629a9246f4afdb496233be18a5fb804ab42368762b9023a067",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-0796b969112f3e7a7ebbdb6761d2342b",
+    "trajectory_sha256": "7d53905d9d4f17fbfd77d745cd0f06aeed9ed5017722234d225ebba28beeff48",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-f9a9a9b691a87e9ec4fa6868cfa08057",
+    "trajectory_sha256": "f0dad372e3c7e0a80f63e30e30cae1f847e3ab07188753d4c5336965d2448a70",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-a4d54f77211a24674dd579bea483bd74",
+    "trajectory_sha256": "b0312ee8ce7e4af85bb4b835dbf3b39fd1c723c7582e2c6ea88decd8fff8cc97",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-1fa9d48e4bce652e7e0ba26ebf813381",
+    "trajectory_sha256": "106de75d960ee1b7852bded23e36b6005636d90a9fc7bcaaf81b93044cf83f3c",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-2380a6a478f5789b01619b8cc22ca9da",
+    "trajectory_sha256": "e5a4a876c040aea3038485f4a58218db4ac0a66134f3dae3612d5323d48dd76f",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-44c5f9e2a98b39ceeb8f1d20289c5d23",
+    "trajectory_sha256": "5b23f37f4993b085dcdd7c1c790e79e0dcd56ab2adc00eaf9842b9d65afa94ac",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-3322d4f91ae4f0f0627cc69ffb8610fe",
+    "trajectory_sha256": "9d3bc735c1ade1809c94493ac053e220a4e7e857277d4442706f199a46d14e38",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-787df38dba998285a475d054c58a801c",
+    "trajectory_sha256": "4b87f9dec024adecd7cd7d6389dcf5596033430c1303091c557eade5a90fc436",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-ef58f396db16ec8e9bb34e577a3b7acb",
+    "trajectory_sha256": "7a877bb3043badba237fa392a24ee32cd1dbce80c76a348bf40a830b6c3e036c",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-dbb598b36b412e33297adda7a721867a",
+    "trajectory_sha256": "e017d98e015ec01f6b1eb1b5a39bea7f80aee24ecb1f01665db03cb77ae80f97",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-9685260400d36c682f221abb12ca6a61",
+    "trajectory_sha256": "5f9718a45581889b5a32850027c7e4a4c20d96f31ecdf702fe7e42481eabc129",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-4ef931fab24bc094a412964618c666ac",
+    "trajectory_sha256": "90a13f5f73ff6454110c2c0c4a065ddd8b4b5b68b77c2df3e49a6896e152a1c0",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-85952018a2fb8de20a86553d0fe24ea9",
+    "trajectory_sha256": "b4ff5816fa4a94eb0c13018fadd4fe67cc3dc4537c32b5557a1fb19bf555ca4f",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-ee65a19033ac0eefba4a797ee85974e3",
+    "trajectory_sha256": "77c9caa324b419273049328793dbe35dae9063e949362a73a8c2c0b26e825ece",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-57a83a3ec65de75175f40b6dc0e30c83",
+    "trajectory_sha256": "812864f744e60fbd8c24ff28552f78f767f984644d878b8e869fb50fe6334db9",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-7656aa05eb5587d6b1b600793dc3d725",
+    "trajectory_sha256": "afcbd76f98b715e30ed8accc58c0a60e2a9fb5978ad2ccdbad3a975f4cb2839c",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-0df4b41120c4af99e52f31479a01384b",
+    "trajectory_sha256": "b6d9390e57dee1c210604babf937e32667383aa2890d2b131bc21bbd52c79ec7",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-0990f7c7ee79bf66b205015594b995df",
+    "trajectory_sha256": "bc471801d2343cee81a3f0ac9a056916696551be95bda1aafdcba11f01f24214",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-bb1d88beb9795c7647143394671761bb",
+    "trajectory_sha256": "6ea158e031a73feebc33e631a42ea032c92bf675d3e1a84ed9253a7384529bdf",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-898eeb28d4de9995580ef8e145d27e38",
+    "trajectory_sha256": "42c92474bb4a43a5e13ee564dc5f9357ff23f6371d6515661d77e878957d057b",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-c3f4b7cbba3e8e6c64c88ed8256e7c47",
+    "trajectory_sha256": "e590b11883de38d8db7e950f3191b20762d4abb4fcc7c33be93e11d6dc882c83",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-8d8c9688c0f9a3d3b4cc326ac9febe10",
+    "trajectory_sha256": "906a80e2db8dfcfaf6097bdad3a1d358926291bdd1aa808c40ce7ee53cfad26a",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-7b7836d80b2642ea952560a81e5cb704",
+    "trajectory_sha256": "656db640a31c08b03b602919ae7966cde177b1749496751cfa5bdf2b82167939",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-0765ff2a89165341223100acedef8f75",
+    "trajectory_sha256": "3cb2d53dde731a2ab17e713af5bb8f90a215d6053e6ce088416a23236d858038",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-6a7be87fe1f81a1337d237f71bdc5dde",
+    "trajectory_sha256": "d9dc4b19c6905f5066076c457e41ea491c1b45438e918df1c215c6c92c972ed0",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-f3274c3163933e046d0501b5bf53cc67",
+    "trajectory_sha256": "c4754d4bee3e3eed7e2f572616d8d880194fe61fba55e434426a7f15235efc0e",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-b9ae3ed4609a5c4c28f3e0cae6ff05ce",
+    "trajectory_sha256": "ff18dae1077e7f97bad6a34f740bae752e4f1f1e46f1cd1cfa86c17f30be7543",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-19a6319ef3d9479d790ed95d9c12dbdd",
+    "trajectory_sha256": "5dbd1eab124a04bc1e393ecb82aa77c3f09b0fd81f979e3d56992bf8c09adfb0",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-0bf82e30fcea25741933741a5d0c47b6",
+    "trajectory_sha256": "702b350a50c9f527164ab5b3bf8e16440ebe9ee632a2fd30cf6f4e41375aa117",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-31e7332e5d08858764de669265f93906",
+    "trajectory_sha256": "655a733f3cfe5c55ba63a2e097075ff5b24e284dfbfc7367affa262582735405",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-4f7c67c83f116d643b9f93a2c0b6614e",
+    "trajectory_sha256": "43a37d1dfc3461f3d1b467658ee354415c0a5835ad384faf523908a5b1461aa3",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-4b5485a7d0b099cdd54e08f5e25e4577",
+    "trajectory_sha256": "ba8d0e153a10aafbb3f1623df81856f27c6d9314269fe4aa644c4c63f5d93b15",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-eab070e72ae613eaaa6db03dcc9b7ebb",
+    "trajectory_sha256": "c10384e9b786a81c555668d2b357c9445c81ed0b6cc612aa50fb95aef3e8639c",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-3219e9ae0ab38c6e8938195593684630",
+    "trajectory_sha256": "95704d92b097958bca7f7bf70dfc7e035a01ae4e49e4643884f6ba71b21f6014",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-078b860f8605946074e14cadef11f501",
+    "trajectory_sha256": "c83f3df5f1f3a474c9e5605bdb82ce79869cc9916bf94bf1b09a242eec3171f2",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-0c1a5c0aebfec877bfc7e463ecf6e7bf",
+    "trajectory_sha256": "5f57a80d649f831861cc8d754bfabc33fd48210337117e7144a7834de3f4326f",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-853bed8a2c13e161eb5de21d12ebc799",
+    "trajectory_sha256": "4e14fb8c44b603187f9e70f9709bd129cbb54c4ca9eaa83c6a2a03b7ed20d887",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-4d1a6382e0a329ffd710a47855b4ef8e",
+    "trajectory_sha256": "5452e6044c07398b6c7a895b462b1f4243aa1868b09eca347531a51ee5530ef1",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-9dadbec5623772e5eaee7d860d7019f3",
+    "trajectory_sha256": "52bc75224e095a139453452f4ba38173a571f25ffe5ab773edde9e659faaf7cd",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-125d2f2308a8ba57ca85f41e57eeef77",
+    "trajectory_sha256": "0d6bc075b946b51298df2be9de84a75ceaee0ef5a5487ab89295a2b3dcc45b8f",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-b66240a31f099cab59058d50e1be0021",
+    "trajectory_sha256": "d800b420a01611eac0a8e225d7d54e4b6ad7609c800124af05a7587746f2fd27",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-9d689a3c32f643f0bdcf4f4e917029e3",
+    "trajectory_sha256": "f5277df8a212c17655550b7350310b8ea487c3e45a3717a81dbfd34f8a6aff12",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-2a532ef6878cbe6b0ebfecd266ee0f3f",
+    "trajectory_sha256": "2bcfe172d48259116cfcff7970f73f3186b4a761ccc1920ab3945683863c4885",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-9cd536bbb4654bc31c588c42201ad7c1",
+    "trajectory_sha256": "7212a425ebfabdb7ea45c2e6479be86c611641384b257894e0b1cf292c3c5406",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-197be104eaef2d63d673f38e4ea352f3",
+    "trajectory_sha256": "5b50e85cb1fab150e30f24361f1de521a28aa3011bf61c27afd59ee3e7d2bf22",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-18f89ffd72bb7373e65919e34bafb11e",
+    "trajectory_sha256": "6471a205654ddeaf1e652eab94a6303c80acb12c2258b0f0e241c81bf2eabe24",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-bf06939d6bc24682d911b1654e71f42c",
+    "trajectory_sha256": "63e553cc49a5b396e551f6f26f0bcaf76aef3df1b92534e5c963a95d7b75c4f2",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-bc08295a925dbfd71f4214b2cbc4bf01",
+    "trajectory_sha256": "4d0614376154dd856b70ac82434b03befdea96538419fe5faa4e94b71cb66398",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-c160ee2a0eefc0ae322d17bb6e909a25",
+    "trajectory_sha256": "087c8c03819b8de7e8b95cdf6f8ddeaaeb5aed6d72bbec15e7c87af707c27339",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-004eb73ad2abe6eccbb213392708253d",
+    "trajectory_sha256": "ed64984c3721a399e3c61737b0c5f08fc42359e65179279afa73da94cc9fae04",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-58583f1a66974bd567db4d1d826a813d",
+    "trajectory_sha256": "c1e67196be558756b0699a55735a64acb08645e30be26c614c81bc8f531f6bf4",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-e970f00780c9927037cb8486535a7127",
+    "trajectory_sha256": "5e19f4b1b94f070eac81a7b1e7c3c9ddba78e0af382459c726a89bcac7ef31f0",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-7c00f5da826a40353540921db720decd",
+    "trajectory_sha256": "92140938cec167a303b20c8b642cdf5b0cfdc47f4c5e69a2e4de844edb6fd8d1",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-8f71c3dfb22b1d41b13ba7a503f94905",
+    "trajectory_sha256": "3c5492f4dea5e8a0b583da02cfda7b022462b8d052e02631591ed34049453c10",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-8a9fab7bd287c64a1aed0f8caec16d49",
+    "trajectory_sha256": "4fddc266e5012980ce0d9913f8ab34f6367f58f7b52b51f8ed61217ea049cfe1",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-98ec4f9ddf10ca14091d0877493a4853",
+    "trajectory_sha256": "4ea4995399bebf265d0044a636adce0e6817bdd7340b9f74bdebde84399a5d6b",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-71f36e92642d7f15e8613764c9262791",
+    "trajectory_sha256": "939db7fc46e37b4a52d0fab4fb333cd8a6ed372a4b19bb6129e269170284680b",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-a08036b75c25db779c55e6abfa4b8d67",
+    "trajectory_sha256": "cf7461504c80030a66ee726e0315e4f7f37822ff8caec80ca4c87ed434090886",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-b071e54a0315c200222a63b621a9681f",
+    "trajectory_sha256": "d3d5234290bc4f780651a8d4cb9bf472e6bda6734b1ce7dc3aa3866f9e6302d6",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-12ea9d31051106f29a5b16e9e246016b",
+    "trajectory_sha256": "59a0b250b2d44f3e4cf2ea476661732451cbfa11ada4208af3de3d7f3e2173f1",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-e58fb4140891758814b13269c043cd99",
+    "trajectory_sha256": "4e090094a2159f59fe7c8af22d44175884fdac87ce8c11a7c6197739a8908a82",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-cce04761c15db533114ab50c69b5abcd",
+    "trajectory_sha256": "acfe88c04adc8be86f80bda704a022cdce4700fef06f13b3f95e891394551b34",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-760db2d0f4fe2058e789d36ca4a5b4eb",
+    "trajectory_sha256": "7c4b4a932b929519bce0cc2544893c90e9b9d946aee45a8df032b2eeb7611be9",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-d491a63dd820e790d27b810f87f48bf2",
+    "trajectory_sha256": "fcc98f3057e2e1c2733a99a6217d8f92501fdcf0db92a410f309a9169d4c0b7b",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-68d3f8857604ca6b27b84813d12d9463",
+    "trajectory_sha256": "58170d1404d038e0ff9f52569a00a784837db86d70e376bcea84e1009b81f4f3",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-7922e1424785f6bcebdcd0892c225f5d",
+    "trajectory_sha256": "684a97b2d70c0b596c80eda45ea88cc2e238f2c59ea125596f0c9d5f9022479b",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-fe25c31b773b81d571d32c0208eea1e1",
+    "trajectory_sha256": "75da7db919d6aebc6b06efbf0dd9d1bdde8e5c4832dd860e3af96af67bb99c78",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-d87f7a633e1b518b5bb55c125b4e91e9",
+    "trajectory_sha256": "9db81ab191a51ef2d61f2d19028927da7844dfebb7f4407c7aad82dadcc81603",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-40b6dfafd2c64eed18d8015f58e8c5fd",
+    "trajectory_sha256": "668577a4f57331432a058a305945fc02868f65ee448b5ab13a4a93c1bd16f28d",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-0bb87da6aa19003c0afb596b991dae82",
+    "trajectory_sha256": "a701cd84e9114bea16ee3e4a16ee2eb935e6e5f7ceab6e7a051899fd75ad9aa5",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-8d99340f226cf64edd6602bda1320d8e",
+    "trajectory_sha256": "5e02d6a717fabc5d5f91c672458e50957689622d952839ad69295fc60e667a0c",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-e843a46b87c3e02e9f38456c45dad35e",
+    "trajectory_sha256": "1c103decfc37515e81f3f2748edc282c554f36b74820bd7481d2adfb381ae230",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-b71908a72b6767424158bdd86da62279",
+    "trajectory_sha256": "4c2462526543893b163c505592552aa4901fad3ac0ee060a572f9a135c6e42fd",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-162a623367a79ac66c5930b77b32cd04",
+    "trajectory_sha256": "2376c2c4dd29e3d9a8eadd625e53ab0b2ab92a0134a62923ef3675d295e0af70",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-86f1cfe91c8965de90121713a3994ea8",
+    "trajectory_sha256": "d823753d7c061fc87fb3e75c014b83535ae9117490f52ec990cfea356a68f38a",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-4bf3eacef2f064f6420a784f693b40c1",
+    "trajectory_sha256": "ac64ea630fefa0d914cbf1aa78c1a08c8e6ca1df1bc30e87e77378d818a7ef48",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-7af5c71948726e146d216558431f91d2",
+    "trajectory_sha256": "f06803603786a5eb540a5fef0eea42aba470a490c7f797e477002c672dae7d05",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-c6fdf5d24771e17f9bca70656d04779f",
+    "trajectory_sha256": "7a7f938f9b3e35b8bb9bffb13029c311ad00ce1dee2006d0ae4c654067cd059b",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-e5106281355a0ff86b9d302791cca716",
+    "trajectory_sha256": "e044d5352647e4b743332bb66b0421f3539c1e3544b2f9d2375c79c889ae8409",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-7ace458503d89a41d88efe427224b430",
+    "trajectory_sha256": "9864666d9d8447be9e2d47354aae5845b7e82722c9922255a4a9a5102d0659f3",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-85af462a3ca23c62f44ec258cb4990b2",
+    "trajectory_sha256": "1f23b55501324ec11c61cba2456bd8eeee0b0b55e118b7433442b9c42858554e",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-e7c0cbe9b2a859a6a36cff974efd7f12",
+    "trajectory_sha256": "0f91dcfc622fb662012bef736ae7ba8e02c2d74a41d88fa41e8b9520e37119ec",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-0d540c00ea9d4a2b8f1d49f1997b727d",
+    "trajectory_sha256": "f31a6225fa7957525845778430de87064e0a13ff6ebc80850967d3495fd07549",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-ce8c0d1bb2d0d5a8de3bda10802a4503",
+    "trajectory_sha256": "abfe8dfba29662f30870c9273eb997f0b6149aae3a8e6a71db70c1ef624a6485",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-bc9f9d8fc7c4388418d472f62196fb75",
+    "trajectory_sha256": "9e6fdd6365bb5db6faf5a7bf272191bf251a28e63fc44ffbc5782d235db2f4e4",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-abf95f7a03db8162a02e241bca08d641",
+    "trajectory_sha256": "8aed8220f775aaf425335e676a758c854a9ccafba3848916eccffd4908a2eef8",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-3d9b3673a6e474a48aadc143cd8f2577",
+    "trajectory_sha256": "b5c8afd2ff0c39291b19c1272e8d8f4cc5f8718692a78272e5f878084824c7b4",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-9240659574f4aca01fad7269db5d13ba",
+    "trajectory_sha256": "b6d64769232ee2f34cbd839558d85873a1dbb9c91017b28770870f056728c2f0",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-8a5de3a6efc013d7922e8ccd44f43800",
+    "trajectory_sha256": "0d11142d182d5a6cc4be28325f095238491c4122e5165ceee0ffd0dc1dda8ec8",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-00196eb5695ef84e4abe0386b817109e",
+    "trajectory_sha256": "ed0040064feb40d7ea0430d119a23e029bd3a645d4dedbc73d52368e6650e7ca",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-ba9af736d654f82858ec044d9d37b72c",
+    "trajectory_sha256": "a3da04fbfaa21b45779a0e68cdbe858936ea0b9f0cdb8160733de3e78e401491",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-433f1e25319ffda54f0f464f04180ff5",
+    "trajectory_sha256": "a7c9a3e9178e5f0a8465d54c77698bb1f16e8c4e55065a38dc752aa9400d845d",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-22df42a7d1c3a65c033fc1b070921470",
+    "trajectory_sha256": "3eae71a3c9322b6c67c6d29eecf69d3f62311fe19f5886bf07000336abc14102",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-82af0b65e11d19dc4dd041f0bfbb55bb",
+    "trajectory_sha256": "4411fd0939ea45a42d13efed39d9d5aa2643a97eb88eed916c3ae10f7105aade",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-f3cd5715380b07d85900e7abe8c76bf4",
+    "trajectory_sha256": "221ba640b276f76e154c4e087fa87f4742352e3abde87dc4a195657a4c88fe29",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-dd38d7e67d0e8ac73d34ac93588453d2",
+    "trajectory_sha256": "8b3575585d44f9e366ee832892e5aeb9c2912dbc49b09e80fe5545fe963e902d",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-69a7aaaabc3dee9f1175133ef3e62209",
+    "trajectory_sha256": "46aa54251f08c4c777a62da878c8c82626cb6885e117aa2ec5aea73b0516f57a",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-91f2388ff1265e7b00089b963c195ac7",
+    "trajectory_sha256": "b8f4cfc0d6d9bde9e937afd96e6b4bb79db5a5ac89183fb8ded84d07c7bd2ebf",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-f06709ed31b27ebe2efc806bfa9a96e9",
+    "trajectory_sha256": "6c933793726abf9ca32464526bc7f4a6641a666f731f10b3c544b3cc3ea34182",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-ff4f95c2ae0a5a17366574835aa00edb",
+    "trajectory_sha256": "fa6c0d43abf08f976f4c50e530e03aa00393b5d0d12177885a94f6825c98a4ef",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-fc6f7a609fe233829f8101ff50036180",
+    "trajectory_sha256": "7e2becf38d60bfa2169a09c8749896654220b044eedeeddb306ff1f5f1535cd4",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-ec3fa198b5e4c7fe369f06875f8bb0ef",
+    "trajectory_sha256": "dd7a0abfc4108addddfb82f0e7f0f89f87c51104edab9fa23022eb1cf6ddc777",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-4991684c3f44f28dc7e650b603662746",
+    "trajectory_sha256": "a20ae1d84ab397f1b7f5353835927b0a6f275de7f19a762fc89e5de6124f5633",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-20f4b64944bd246f22c27c626f1d8148",
+    "trajectory_sha256": "a05cc92cef204d2dd4775af9899e414d6b6ae1a0b73aeb6c72bbde8f9e7da719",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-666a63f481c8d9ae4e258a30f387ab9e",
+    "trajectory_sha256": "23af44da111081f010e8d2a93fe7b4e41890c744b54c6503eafdfa14de97bcc2",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-fe68ae281c8e7957846cad05ecbee852",
+    "trajectory_sha256": "5a8a524857d7b914c59ef712560edf91dafb0076d0c1413ee41088b298e3a19e",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-8f03e1592122f4b1ac941282c24be994",
+    "trajectory_sha256": "d8587993bf3a3574b6d58dfef0e46e037d73378131172457dd69472bebdff19e",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-875a6d5625aac4dcb9d377ee24bcceeb",
+    "trajectory_sha256": "042facaf14d8a35adfaf2696f0903071ffe44a966adfc645268b96a9cb6e04f2",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-97e4f7b1a026bfdc486f39317ca20d4d",
+    "trajectory_sha256": "5feb32668f75df3ff7e0e10046ea6e9eb51f38b8765cd1fdb99192b54d8e67e7",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-bed7a3d4557ff35ba906a6fd5267d280",
+    "trajectory_sha256": "db0cf93a3cdf910461dc8778269fa783bf4605e34de5e0fa9a8ba76b65b1b8ae",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-1b9b2c1b02ddc34f6654099259c0d975",
+    "trajectory_sha256": "c4e5c7b7169d0a05a4e02260c9a5de7cc946c539f9778296bef0c7197f608147",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-babc47f8f92182dbcddadd4ae551a0ba",
+    "trajectory_sha256": "355e7c0deac71998561a731396215e994a18b378d5c1d71852ad3489b10763d6",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-354547e2c7a7bfc4e68a6572bf463a13",
+    "trajectory_sha256": "3c97b71cacf26a9254dcda1496e05441706282ee4b8509a2ddb11c00eff2a11d",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-149c0881baac0c5838cbf5812e225391",
+    "trajectory_sha256": "8f086a47a4a4d64527eb8e1ba3b8b1ed4c0f1b4dde8a2baa51b23a0ddc1c314a",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-cdbac87d5f14721f99b90fbcdd41b9fd",
+    "trajectory_sha256": "93638d04170b7d2afa8cc01fec6d6ec348cc25b0af7efae43187177cc5802751",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-71402a5de9658e58fa4648b79a67326c",
+    "trajectory_sha256": "39a97aa2d588267ec10f0b446e36280206e84c51567031949d4fbc5536a2942d",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-d2bfc658497ec461c2fb7f21d9664aa4",
+    "trajectory_sha256": "8f6c5076804592ebfd9e3b0e83c1c817f753b5dd0fd18511a6cf324006cb2624",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-cf63af92d754bac5cadd28ad83e2d59f",
+    "trajectory_sha256": "16fd9c272581c6b3055ffc3fb03b06220ec1dbe3363c787f62c8fce623a7b6f9",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-0e41f65557ce4e873869c7949204d5eb",
+    "trajectory_sha256": "2304ce335c7df52ec1db104eb6b39e7c107b52c44cb57e538b5f2a87adfe9cf5",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-847ac258263b0428c36efd3453d956b8",
+    "trajectory_sha256": "82c807c06aba73a48c1bdd2fa9b18cdbe127d0994ca9cad6d50170b56c162816",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-99ed7f10e65cf169eefe481494033024",
+    "trajectory_sha256": "4e5a5ba951e07b3fb645cb4b705416bfc1c050d04b7b92966b62664c0656fef7",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-6f7176fd2aac93b5bdc7ab52cfa206d4",
+    "trajectory_sha256": "52010f24e9fbe3eebc6d8972ab9526f6999b939a4fa6085b9246c75199305909",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-9e5f5556e550d36ee82ed0d4430d573d",
+    "trajectory_sha256": "f3f7c8c7da01959f788369cb898dceff2418c8b4d0bd4f099390f40bc5599346",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-6654697908b973fa002fe5b23f301247",
+    "trajectory_sha256": "e9f545f00fe84495ffde862cded81c5abfbf7d7fcca22175178bd293baa10bc6",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-849d27df8801779354f2d8de082c388b",
+    "trajectory_sha256": "9c86d02bd0760ed8d43b99c90cdd3486bb3f87594a0b7756fc83a4fb09d25f8b",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-d2844bfe1678a8ccc9fbca5ff9e4e958",
+    "trajectory_sha256": "702978a642ca895ffdd4eb68fa76cf772d434c83bdd9ac1d5efa597645b8ec2d",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-732cd02e9f94a818c4446d3b51354279",
+    "trajectory_sha256": "14eda6cc2a1db1bcd7809b024ac904c708771cd73fe126e505d07a223c9e4958",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-60099b46ab7d0130ce97d8d856c15d0c",
+    "trajectory_sha256": "74b74d3c360446ec6a63713cf69c1afc6d3caa4de6f1b173618dfb3bf1d731f6",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-3f40cf1042ad0dd7eeff57f2c7c45163",
+    "trajectory_sha256": "96adeeb7327de72dfbc5567dd1dc6947507163c20090b6424359c8044f180a08",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-20c5d3597169cfde14bfcf158bb31bbb",
+    "trajectory_sha256": "93a44ab36ba1a5a0a35a74faca2202ffb2fa27f0632658e120e7347c4df800f4",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-039cc5d371ea0e29317d302a68954655",
+    "trajectory_sha256": "52226d2744f34d2c79385535faa5f742843af34b287c817e1130436b6ea54acd",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-c4b9b6e490a02ebfe0670014cb414019",
+    "trajectory_sha256": "e38421a08595b345c6fbf7182ffa55016513f093d86a61fd79209d0b38c8fa35",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-f10de4e77f8f073c76cdee6a669c072c",
+    "trajectory_sha256": "7670c554962ff631e6d6cb2212ef4bd28526bd7e3da2af987115ee438fa0a093",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-32ed3500331cdb6e5cf5f20195c1cb3c",
+    "trajectory_sha256": "14e748f6a28416ce28876fc4dfbb9b7795cc2ec2ca67081cdae0b1aaabbbdddd",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-9c8affc63f9b441dfae7b8116568dbe0",
+    "trajectory_sha256": "07d01cb63cf2bde896b27200a159da87a0ebbda68592aa2a97c0b68cc3998116",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-987c2273205776709ecdc8eac6e981f6",
+    "trajectory_sha256": "de4a7f9687a0959e1db1eb41adcbcb7a31108faa97824dee3bdf78fa2f9b4665",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-115b295462a5023d7bf7b7ea820b057c",
+    "trajectory_sha256": "09f71898f4b968c813e250c109bf8c0871d701f849038cb42f2e8e8bf6e063c7",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-60c0dfeae9bdbc3d228965a90ce53bbc",
+    "trajectory_sha256": "6946f2e5d2ad4a630f7248ea529e15a29763b7bdaba715844edef3bb6204a4b4",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-f650668bd0c28abec73b3c66b7469fcb",
+    "trajectory_sha256": "44512e48d50c9d9036810c8395a7c4447f9b75ef72e43057cb19437cb2191379",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-217b5a12342396c129c704d48176bbca",
+    "trajectory_sha256": "8d561c07f1997a5a464c99b8f7b500057ea9795883e45c7614e9c5f491808a75",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-7f607034b9db8a854c28ded275795987",
+    "trajectory_sha256": "d63ddc28f38f94b9a452771ee8b2f5e13ea2e0618c92e030b3a8ec128946adc7",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-b827be3dc1b16b99a1953a5f80a85cda",
+    "trajectory_sha256": "93a177b381f5711a67b3f3417e8292907cff87f7ac113a99aea5fb3110beedd4",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-b2b3c1e3bc46e589c968e73b9d1e8176",
+    "trajectory_sha256": "1455b508f81eb6f5d298c13cdd4696866f3a86d144d6909a0d20d1b05fca7e93",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-5be57f7f844640e355b2941cfee7b164",
+    "trajectory_sha256": "73186b951fb81dea9452a7c5525c5ee18a5386db5dd3f79f54d5c23faef57286",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-cb32d915872ad708380ccc1c2c7f5999",
+    "trajectory_sha256": "dfb8840f5eb86b3db5d7554ca1bc4ccf2ccde04ae5492013f21872215dcff284",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-faddff021bab4ff5b9ea1da2127925b0",
+    "trajectory_sha256": "8c8002519b5d25cf8b3c916204a17b15158984518c8dfb107cd555b24164ff0f",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-1027ca571e6c10b51dbe5c823e53fdab",
+    "trajectory_sha256": "8aaf0ed07aa650afa02497fbc6f2dcf8c31d1b712a3f908246c3b2d8fcd64e26",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-6ea80d32b26f71bac4dcfaa4da47d622",
+    "trajectory_sha256": "38cee5357096c987285b785201d30110216160e9ac12607cbe35474364e08162",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-8ea9747ef8461a895e0e5327dd0a4001",
+    "trajectory_sha256": "3c6fc7d093d8aaba021dd4b436ad2d0eb8e908292c04cae54bdd51663088f6e0",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-723e653e1ecb9fc89b2429a098899705",
+    "trajectory_sha256": "d6c04137b6c743760d6598a59400befe24c826926220d98faa9a47a3b5924da8",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-4768207cd552daa5ab4716e2142ddcbf",
+    "trajectory_sha256": "962f0d5e8d39baa4a706756bf97069af008e971ed1df93cb3b30309a54daf2f2",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-64dc3a05f10dced18fb08576836f8c11",
+    "trajectory_sha256": "c8dcbf81b9c55e961f83d2415e90b75ed48d2ad227c39ec4aaea17d6f54dca63",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-79f2dc1f9458edb8d40fe9938a61af38",
+    "trajectory_sha256": "07fa37c76f691a3509c2be651ef6a2a5fed64aeb5dfb2948b30ddf1031a0f1ec",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-a23efe99a4b33a24136b87551df6d02a",
+    "trajectory_sha256": "7e8bbd5883c26cb7084ec10a818b03511de26b2c85bbe137858647a6bb089619",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-546fe85524dc42290c20fe3243d368c0",
+    "trajectory_sha256": "ca500d33d71434a07ea595d77b1d8ce2fba90a77761125d005e353d3ec19c9fb",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-777c3d9ee08bef905a92d0840712cc21",
+    "trajectory_sha256": "c0b0ba5f3aa3246fbdb301159905745fad6e932c02112206cf5b8acd55d741a5",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-aa7b8c267eeadc93bcda998f9c10d9ce",
+    "trajectory_sha256": "d41c9fc24d362debf3855edec1586313c246be48cc35c7968479f79a8325988a",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-067e2eba41f0145c77207c24d74ce591",
+    "trajectory_sha256": "98efdda449d6a3581dcbf38690a8b79b3a5907a18e85fed6548bc3affaad66e2",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-3d907a2cf9f4396482d9bd8daa2ec98c",
+    "trajectory_sha256": "e642ad10141b4c50b3863a82956d677bd3abceced8170de10f242140684dcc6d",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-fa523a0f9f9fb264c5fbd1e71d750d70",
+    "trajectory_sha256": "0b995534a9fbdb8031dfe88efc9d358fd5ef78ade9a569990dae94b46aaf6c3c",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-554f3c660d2cc41a65fa2345eb4b4351",
+    "trajectory_sha256": "99bc6ecd32209df605c81c39e94790f1ccdf16b40accf6b0028f1bf85caf9bce",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-64144362249c18e6d8bf932e5c508993",
+    "trajectory_sha256": "cbd8f183be8fadf43fc215214ba899cf162f30902f02fd23299887e1d667526a",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-390e2aa37545ef89285bffc28b976e8e",
+    "trajectory_sha256": "ea1ba22b2d0abdb6df105eed1761bd62a2f1a75074c4089b98b17e3ad4081844",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-9d427c77ddcd38856cf9a0a460f24dc4",
+    "trajectory_sha256": "b1b8fc5cb251b1da77cb10c7e1fb75982679c14597f3bacd82cf898597e6c715",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-a4da794a74503ff8930ed2f39160f929",
+    "trajectory_sha256": "bf080bfc37f536d0350653fac54ab6bb7ada0862793ff5a760687dde74d6047b",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-6d4528583b3b9756d3d9d97bf16cdafa",
+    "trajectory_sha256": "cee1809b87eb77ec79c88767cc8ddf6fafed34887cdd24d521146fcb6204e52b",
+    "cohort": "ridge238"
+  },
+  {
+    "rollout_id": "r-543ac9047c9f82ab654b4fbd912d29d6",
+    "trajectory_sha256": "968602dba47e2a178e375e536416321c9af052f8cfb83b9ee9b4fcf9ef26898d",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-ab341ffabe0cf3afb1277621f5b74b44",
+    "trajectory_sha256": "e0d1c04e3412ed5286f7ca6f3561c8c008670b746de722a409e3d161cb75a048",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-3b36a4d51e0637050ac2c3b62ea244dc",
+    "trajectory_sha256": "e163ee71a058fccfa904884475b939a682b33b144a599a8628f6d0760da4b194",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-f71b60b17ecee40f675a27269de4175e",
+    "trajectory_sha256": "ce9aa3aa2e2ffeaaa7c40478913952425933045e462d553e4a675ce5e9fcb44f",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-54b0162989694f6c3d968a23fdc33cad",
+    "trajectory_sha256": "22be602ecab66280ca59c06fbc7825ac5afbb7d1894df2c68ac556d9832b76d6",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-53c0d9e405124ae367ba995f6ba54d04",
+    "trajectory_sha256": "6ad8b95eb608485ca0507873b4b306285e043ad3860dc2a8a18d73254ccc5183",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-6d2f5b52bcdc0e0331a810474f3a3273",
+    "trajectory_sha256": "e3d1fdd47be4fb83b38c2bdf4de91a3ab852fb5a64029f67da2e2219463cbda4",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-083764147eb750fa82db754fbf4dcf98",
+    "trajectory_sha256": "fa4a8ea647c387ea1626f02ccac158efb989b4cea7b289e21a652dc3cfb56006",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-f4494995635d7fb84694820515b60e8c",
+    "trajectory_sha256": "67889121c23d24c9767c891206c33c91b2ec28391fd088d16af84fd744cba61e",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-b96af920144c382032d5b8ac3fa36ae2",
+    "trajectory_sha256": "bee4b17e3615573f2f1b834c3d209ea6ee11eba2eb5f020882040b7b32345481",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-f6506c0d33e3bd614d1bb3c9abd291b4",
+    "trajectory_sha256": "dc5b06b541c59f908101978450e29c459b95159734f6639cd3ac46371929b100",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-67b63b73972edf92f1b900a310654c3e",
+    "trajectory_sha256": "31b25e6aaee8464a74ba13e4f67621b04807c0058d9ecef2c8dae0d8a07163b7",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-1ed3cf41e87c06720f202f269177a0b3",
+    "trajectory_sha256": "0f0cfe31c2ac0c92522f850dd9cf13b80d43c0aa6f6709a3e17ef1ace9471d85",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-c2214791de1a244fae93feb3b85716d0",
+    "trajectory_sha256": "ba7e8bde14761e32e0f7feb33d22282618256fb010db9e16fdd5fc16e8fccc6e",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-73c7455536b5d93126022d9e849234b7",
+    "trajectory_sha256": "86e2b449ea003d88d7f1842e15fbde52be2e96c1da58562df55da42e52e6fc19",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-a65e020abd41dd06bc491c9e198cb771",
+    "trajectory_sha256": "1e8f3db50f0ebb25a0eeb08f39cccbe14e373b6af7988e26e641b4298ee7e56f",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-5cb38fd3be861cecb76b359a474e9340",
+    "trajectory_sha256": "06b643538d44430041621149f7b0fc928558f886a2c07a199951cc8e811695f9",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-389d9952d5142dfaf1d73279d3bbc38f",
+    "trajectory_sha256": "9f596173a85203ebff17925ae82a97f259b57a27ce85c5c80efb205295fdc4a6",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-9d16874dc16811d812c991148c4092bb",
+    "trajectory_sha256": "d72d6f600c0b97df1af640fc87e851a92149ccb528a6b2c5e707b4964145f44e",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-c3c1415afa529f78e0157dadb106ebb6",
+    "trajectory_sha256": "79a9bce41d77e4a59938dd7e5d5cb128b240b98baa9cde7e3bd220da2a4f37cf",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-495e7f65eae2eaeff334b150888a3b72",
+    "trajectory_sha256": "db86c33d5f09fc1824ae69592a7f0aad373632828fa46f541557027e326b85f1",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-28a1c32091be288896b2a23dd6c4d2a5",
+    "trajectory_sha256": "3ab9a4af34a6fa018b92ba4de89667c049209346d42e43766567ffe17f6c824f",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-72779117b5cba72f301718c80a336455",
+    "trajectory_sha256": "470927ac2172340dbbc54a441e89f26738cca0fd46a0850f4aabbdca210b52b9",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-89a145c7e6dad8c7ba6949bc421d5925",
+    "trajectory_sha256": "78c56854b39620312b2e5663883c804c1adf654fdcef5e1c6655a657a4e9d3b6",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-28491aed6c33527c798e03695d6a83de",
+    "trajectory_sha256": "7f2e9199be0704a6f76730ba3db7f37298ba7110d247ea653650d243dd89003f",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-b8e46bcf42d1a4e4de4506e97cfd6af3",
+    "trajectory_sha256": "59c214dccb51f3c6963a3b6c25684bfdf5d4dfae313d80920e35c97cd323b0e5",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-a5e90ef2f7b1ef36c5ce9d18e738ff86",
+    "trajectory_sha256": "9fc529f43c2415e87cf0d29858bde9805011599683ef1762d7fc84e5349cc3b0",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-f81808280311fc68921d553b618086a7",
+    "trajectory_sha256": "204b1820bf21418e121757fc36e9447f58bbd222204a374d00ffd8eb2c2da9ec",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-6caa0d6680a44eb8411385718a5b3a52",
+    "trajectory_sha256": "ae14a28657ac223174c92d7af131e2506570dac2411fbfcc051e311888aebd92",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-1b18a20ed0f0860fa946de1d356b8fa3",
+    "trajectory_sha256": "398f20916b41d92141672f0c786412acb9ab3874779e6151c1e9d1f8f2669588",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-da9fdb620f31c3ce692cfe3e7a5c9269",
+    "trajectory_sha256": "e019c6d43b19b2fd2392f824fb548c94fc3dfabdcffdfb6fe04ac25f9bd46f5e",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-70a6decb8ed3906807c5e506297aa1d9",
+    "trajectory_sha256": "6e2a3cf8570d48d9bef7e2a34ade0fbb638ecb59d21c9ee3f7e305be3941d13c",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-a7d7db6b6e34f564a6fca88d6061f86d",
+    "trajectory_sha256": "eb6d7fbb803ea06fa326e93c8ffbd3ff763f97526002760d5be4d90e2ce134f4",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-d931172771166c7e504b2b03236702f9",
+    "trajectory_sha256": "655a9f544beb9984706542474dd7efd6e4f768c61c2d890add8fb14e8a0769a0",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-1f89839eee6545576f400781b4c41d8e",
+    "trajectory_sha256": "69a53cc43f821a34d6c8f596b3c0c19f06a26e3408a2d3773f50b12bd781b6cf",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-13da269c8def06a2e2504eddcfeef908",
+    "trajectory_sha256": "8a7521f2926f66a01164e5b8537da548e77a546a886a89715c6c4a0d2498c5b1",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-147314b792f2936a1be4584dd329c128",
+    "trajectory_sha256": "d3417e0637bccfcb0197ed409e80ce3da228cc77c4f80ba3e7bb81b31dd720d8",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-9e4711455c7e21d18e3aa3b094a0984a",
+    "trajectory_sha256": "e175f23858dfd00e9c6e18f33215abcede310a119b45ce0ebe8b679ab30d593e",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-4a2a96440958e42d938829579c70ea9a",
+    "trajectory_sha256": "f3147a4a570c93046d1e4143d004a71ab6e059904ab30b578fd800aebb9e824e",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-d98ed498e2def65af008e86e51c7630c",
+    "trajectory_sha256": "96595eb6bca041e693eeee6573ccd394e45531ad66ae80e27927d3520b05a206",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-3cf20370fffcbae0f662a597a70ec3fc",
+    "trajectory_sha256": "0a5733905a9b0280fce0e37acce6985c99efbe1d8b6df636b09829ed822bd1cf",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-2509e185f3f6acfc215768bd1584c238",
+    "trajectory_sha256": "81f5594fa0e37e8a92bcc5c2c5a984335ef636e7a638af47bc1fec87c9fd611a",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-aec1f81ade0d1199799e161df14bca4b",
+    "trajectory_sha256": "1aa0cf7a8c1ce2e7779704b31493a7af3caad79d70ec7b2d99b271fcd285b4ca",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-7cc24f64c6e95d0d4e99785a6f28db00",
+    "trajectory_sha256": "5afee1c2a2b116698b897b8685655f0b779479ea7b0b5818e34e25f8de4da47a",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-d033cbe51bd27d3a9aba393b0bd984b9",
+    "trajectory_sha256": "c1de940b42efee69a42bbf3d569a0b6604b7025cadfb0ba3761de27c4c98005b",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-3a9a7d5dcaaa79ef3c4db4d03b88f794",
+    "trajectory_sha256": "592a1c41d57c546a12bd6ac56ffa2849d66c66ea42a4d7891f90a409bad9f6fb",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-918280ea8ca32059a9b7229c20e93caa",
+    "trajectory_sha256": "0e318a08b6a3e58153f4561179da6e74d0c4adabdf52b78af78f569499c46755",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-4f03dd9839a14a9557f8b7ed8de33212",
+    "trajectory_sha256": "1671485d217b609d8f027aec44b918dc40e5bd73b5a4e4ba63498a9a7047b113",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-b37ed86cbd6d6b152420eb63b87afe81",
+    "trajectory_sha256": "fa3f5e37e2c02937dd0063baaed9280e7f7bf402aff09f401b7371ac60542804",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-1c26151e8e630fdff8d770d70734c3dc",
+    "trajectory_sha256": "31459fb5386d28095dbc78b3d6d10d39f3ce43e5c65063e0aae12ca78cced8ff",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-7217ca80e0d8fc036d2711ea086ed483",
+    "trajectory_sha256": "5b8b7fc42b3112fbdb39e7e95e223939d067353f78c7aeb0d9b9b83426eb2aea",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-4c7f97436d8d69457f671cc3ee12d2d9",
+    "trajectory_sha256": "3b363172a443e6d49b4bb91c9bc98ea727e5427474e803506a8b913dc5054318",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-7513c2b4572b613e40f11bcb661e2291",
+    "trajectory_sha256": "3d3441f99579077938ecce285cc80acb3cb30f516a093dcdcfb43ef08ecd570c",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-daf3c079b554bb336810d90d325d654f",
+    "trajectory_sha256": "ac4dfb94b9da3d593b4a50e7e53472cad1baa99d7a2d5cfdab41c5d09fd54b09",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-670e2100376f8afa6f9286d994e3be47",
+    "trajectory_sha256": "c5185181ffd7a02e6af065820dc1d618167e7f5bc38c14f2dd303c4e559ce4ce",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-8478405941c6d63fc1f8a85d7cc191fc",
+    "trajectory_sha256": "2f28082dc6a1cec840456b6c03b3ae6c7d2a959337bfebcb3a7e100f4b2f58eb",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-b48434858f047bd1cbd01c989e1626d6",
+    "trajectory_sha256": "863a916d9ac5524ea180aaae99068f8ba4e5288da7dce5d6ab8a6b4d827b9a92",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-097fa52b4adeb90896616163414f134a",
+    "trajectory_sha256": "b25a2128870b2a71b9a479f896bd1832746b8f2fa5258dbb1f5d73f664c8a2f4",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-3c85bfea1ca8a590fdb83e14456696e2",
+    "trajectory_sha256": "cff5e81170c95b3d60ab5ff83ff2d5758a2c3f20bf645f9390c0a020bb19ced2",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-56c5599e08475acff4ab5940d0dd94de",
+    "trajectory_sha256": "ca7afff726b7aea6244668bbccdacac1ac1d54448664caac7e08a07563a8de66",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-b72f42627981fdabf30ccc5f75c9afc1",
+    "trajectory_sha256": "e17a257f1de4317add600384098517930459e3abbf23c4a46597397b754f4e54",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-57c3ab63862ea979a174afcbdb928a09",
+    "trajectory_sha256": "eb4ae7b4ac0ef3eebb36fabf06e4e0467129d595b8d6125a1c1a51e0beb682cf",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-ac72d9c674123111ac974850d4ace46f",
+    "trajectory_sha256": "568674f03dc89b51c36b7c72a7f12e0203c56852432efce10d3dd25f6d0cdcc3",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-9d91e505e101823ddd63848c1fb75f84",
+    "trajectory_sha256": "79ab73ce9b8dc400bf092e7c98dcf2f4483ebb5b3c58f2f7dda4e7c18899dd34",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-a188f3217a475ea0bd5408395d416f5d",
+    "trajectory_sha256": "2a928dc86a3ac493781ea15fc37ba70b907bb19c8d4205cb230d08e880a38898",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-ec397895ad1c35f5fad09583df18ad57",
+    "trajectory_sha256": "327b169f030182ebd57c4b83addcc966fcdd79bbc546ecb259865509b454fed9",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-290974581f033d228fbca521af16ab0b",
+    "trajectory_sha256": "1b9b7e2ae2809eefe4b3321bced9a7c20255de94410e082cf89aaf23469f1620",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-4b2ea66ca5917bbbf4cf75307c11b0bd",
+    "trajectory_sha256": "d9f3812182288505592d171ba8e8f306544b7384cd6ea831966f75cfe75e345c",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-26b532d670bfe416baef0060ab6bfb7c",
+    "trajectory_sha256": "2b1fbeb7fae2390d0242c5fdb3ff4b06559da1c546de81ca366792b70b1d9fc4",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-705f488ceb600b976bd7c9ebb27949df",
+    "trajectory_sha256": "d431295d84af8349c580e6e98ee8aefcdf8a963dd23cb294e3655c801809f187",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-fb91a65142de4c366d30bce4aeff731d",
+    "trajectory_sha256": "ce132af8fd74ec74c1c370a24a7b97892e31a6233ee2ed4ac4e039daec7c0c80",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-85465cf41ff3ac91a0bb78acdfb1ca1d",
+    "trajectory_sha256": "1795af4e0d9d9864698be6d879d1ce00ab7c6a8506eab7d930addd679cbd11d3",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-b444e24547bafee47c9dc3f5d127246a",
+    "trajectory_sha256": "8c31ebf24095dfb71b3fb18e056fa52dec3d07c69e6b18a7cf6a1a9e080096ba",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-54a8567a438ed6a17e620c999bd02643",
+    "trajectory_sha256": "360157750657e7f4aa57a924aa5163867a629ba9ac8afd504649d46ad086516a",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-76dab89fced3538b15f5b70898783987",
+    "trajectory_sha256": "ed3b83f1d2e5242874ccc073f63c0b03db90e0441506375ef54a98fcf78dac6b",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-84c8a641474606e07d748c22486a6269",
+    "trajectory_sha256": "cad5adc124c7b4fbc8b7559e62d728bfec0035c813d3a6b78fea71748c5a1afe",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-541d2ae3c929ccea6ea878a857f41251",
+    "trajectory_sha256": "f6b0dea48c0081ac6fac86ffbeba22761d70db1f6521db03cb69748fbc21b56c",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-73fd49caaa79d0aa5a459bc331fc3327",
+    "trajectory_sha256": "94ea52aab0fe012e9ac53fb34c837ffc38b9b385bde82167d35558b5b271217b",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-2ff7ce9bf2a29c540077a07b9a796396",
+    "trajectory_sha256": "64d9113e9fdf59bb5395b1d1532492936ad0a66e3e1222ab6d5637cf9793839e",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-f6234ff98b8f24ca8b237b5cbf612f26",
+    "trajectory_sha256": "9f66a7f1571f1556d86a0c949aac07d0bf1574c8a0f1c67dc54412aceb3b8594",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-3526be8ae2daa789b6228d3d314a6f8d",
+    "trajectory_sha256": "3c73f0a8ad825be81dada5656a4abbcd6907b326048854aefe745e8f8360916f",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-bcb12cfcc7c3ce551adfce7683fa7f66",
+    "trajectory_sha256": "50dcc7e0d32e2389f05b4a3a7dc4f7176efd5a359946ecb369a75580928f1d86",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-9ffa104e6cad8ac82b7c5e33564087dd",
+    "trajectory_sha256": "f3aff884fcef4ae52791342a3b5324b46834bd2f851af37112c2cf2cb9621bf1",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-28b403f8653781b284e5633e304e6870",
+    "trajectory_sha256": "5dba15b5b556a7fc0e24012b81c567e0123b20826765d3aaffda6ea8ae8675cf",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-f2040d0a279831b9b52c68b035d36a0c",
+    "trajectory_sha256": "1ef28fb95dfcf2615f6167009dfaea467052ead2385aa8a8f0de57e8c6e07114",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-db8a5cef2a883532b140947426a3df65",
+    "trajectory_sha256": "5b0034ffdb157aec5146d07e9bc40fc550e24187a3447f6538c614b9f8ffd140",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-5f33662c37536738728b0f84ff437313",
+    "trajectory_sha256": "1dba5c16f84ff52c67927151ae18dddf6a697fd490ef068818d783935535c354",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-b68941ede80047905ec12cf4ec06008f",
+    "trajectory_sha256": "73be74d74a52c93ab9f55e6b0bc4951382d01cc87d83513b846ef3b86059c9cf",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-5ac5a6fc7fbb6856c8b3f18275096900",
+    "trajectory_sha256": "bf9acb2b7ffefbdd0556b8841b3be01f35918dc03ea6f659826638e0b1c77007",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-477a5bef62d1b2ccc893a56481dcb041",
+    "trajectory_sha256": "8dc406e2de035483f7609a88aa0dd6918d54ac551ac1709d6b1894dbf4385e91",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-77b80cd3d423e9db834a5d2327220728",
+    "trajectory_sha256": "2966cb14291f385178b938a9a6a1ffd764a43455f85bbaab79231a17f692a223",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-57542218ebed062fb73048ba84c88ea6",
+    "trajectory_sha256": "8d9c5c0985ce4395e1dd2bb0f4d59042671524f66accfce4182f43dc98408748",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-f0aa568769ecd6576e1c8016558f2199",
+    "trajectory_sha256": "b6a2669da9b0892f75e17526ccd2cb1b3695bdbe55c9d784e7cfbc8ca010437f",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-9c34809b24d4d61e77760fecaf568886",
+    "trajectory_sha256": "767bae5088981ebccf56a30645e96acc611707d9f071395f5602badd0e396257",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-92fcfa6470b619474c7048b235a4220e",
+    "trajectory_sha256": "fb017dd5aac58c1edac65d558eabc041f191be97a6361b7e508da4d700ed83d2",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-6bf4a56422a034342957d979e1360d1f",
+    "trajectory_sha256": "ecb911c1c8179d7761db5b82b6631a42ff70d9e47482b7d4d2aa060411ccbbe8",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-ddb4304bd514bc76ba50bbeef7842cfd",
+    "trajectory_sha256": "2d840abeffa7ebf2bd3cd8f08faefb06467e9ef24021230c2e78e3bc65c0b966",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-c7dc1bffaaef12e1d85ee4244db04cdf",
+    "trajectory_sha256": "c101ae7cafe17e5bc27c6f425f9f1b15903e2e802469d5090b07669d76be5b92",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-1847c349efc4b83455976f699e5f9a38",
+    "trajectory_sha256": "b2d3eab47ba15c332bdb3af99c33315cd037c0bc660577c27d144ff628f1486b",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-7f40e1ac96a5ab4005af8e9460407533",
+    "trajectory_sha256": "8a756fd38b654fef0d74a84db0fed923157f099c145e13b61b78ebd30056b46a",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-82732a769d8c813644680e94c6510909",
+    "trajectory_sha256": "d32ee1b0bc40b28034271719d13786fbfafba00c366722ac5c512fecf3e1de20",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-47dd314c7e6c7ca3a81d3ee39dda2145",
+    "trajectory_sha256": "24345ccf36abc5a8fc08f62211967b2732f7964122e5398cda243744a1d2bd2f",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-f0c0012c42183a028f408fee158ac756",
+    "trajectory_sha256": "37ef2a1879fe29fb809eab7c273433c57502d9c9ff525f6beec20ff5645a54d0",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-e0514c3acf704df707306961170511e8",
+    "trajectory_sha256": "74e5630dcde9ed5f98d4b142c5d0919e49420b0b680c7c9c0ee62e32d7afcd6f",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-4288259743aa1fcb043859b1a7b3cd04",
+    "trajectory_sha256": "f2139db6373a09e8db837e5e3c9dae3e76893def876c0b0a506a5e80811af289",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-f0f01b644bbf9a1dacd82af7845d9388",
+    "trajectory_sha256": "0e8febe2539cc576cf22138e14560fae622ccf6e8dd8992694fed2b7ece2face",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-45f311c331edac04c6c8a0fef84ad325",
+    "trajectory_sha256": "463c52495cf74c8b6bb828a1f6b2382c5d5460179e60c18ac62fa2abdf556416",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-a7875d4dab52a1d332f68542c8c1da35",
+    "trajectory_sha256": "a7b69532d5e03fec0d76bc18375ac46e12557b61666cae2f95e826a6957bf26f",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-9aaa9bf5faffed9f3aa0d218c10c50b5",
+    "trajectory_sha256": "df495b8a2123f77b0cbeab42cdc497beb4a022fa92f77c237eccfc268cb90e46",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-5940483af8177690980c1a356b06a64b",
+    "trajectory_sha256": "2cc4f9e56f4a4162104c797d81dcaf919d2687bb922bb0bc4e80c8804c014f87",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-0a988ea26bde3aede012a500fe9d01cd",
+    "trajectory_sha256": "a39b09bc7bdde365fc1fb351ea620504308d7fd51bfce7651edeac6b09341152",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-c4ea908e04adcfafcf5bfa99e5acc89a",
+    "trajectory_sha256": "8a8b9edeb376c9065cd4374045c272f42dab7fc3f7dbb43f55d49a4834718714",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-738c689d51ffb2647a10d284ba511d08",
+    "trajectory_sha256": "bbc61f73d1af2e44d7c9537eace35e7125a005bfc86fb02b96c62ef1e021bf4c",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-fed2f9b60b105c2afc9b2bb7c272d028",
+    "trajectory_sha256": "8707ac3c9b1ef155d1915249c3392c6a9709df73d92c823c2e4197a8edcc8f35",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-3f633b45ef4c75570764c70e8b572c71",
+    "trajectory_sha256": "9605eb07b33bf91b03c3ee2c4fe36e2bad1574752581891cd8eb4cccb155e8c2",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-ce5c652211b85f2c92e8e6021b3edefa",
+    "trajectory_sha256": "5b262e4a1869987b8c785ce2328213a86349eff51dbacc79c9acfc82b70f7987",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-d6d8ac0d2ff147e0c47f6b4e5c86fb64",
+    "trajectory_sha256": "94f23ffd113b48fd49539023cbca6869b70b9d1f0b13dd14fdc5aa923d66d71f",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-5174176536e1f119d46142a16523c898",
+    "trajectory_sha256": "4da066af5f7208cd5e7c4519552f3fc5e9b4937ad2cb7396c0b60ba4e87eddce",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-6854bafd52fc3fee9e374a867cedd523",
+    "trajectory_sha256": "9530884babbbdf4e5083998edf7f5031b04e070c7a5a45c8a3627406946382b8",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-2f3590f1c3aa7a2b5b7ceb5824252895",
+    "trajectory_sha256": "f1148dd8842d4647eded1164035f9b64ba6242464d91006a3d0c51027db61a0a",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-04c6b0443b374656a1913e17731ef4ee",
+    "trajectory_sha256": "f9072869155d7f03e7715423f6a74174700d0423e29af6c9015ddfdb641ca0ea",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-b7e22690b741777f2265ee161e039cd9",
+    "trajectory_sha256": "8b159127a9757bbdbc5051391c3642b060531f2fa06d2d033de85b59dffe6cc1",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-fb36a1da4bf8d3d72603e0aafbf6e748",
+    "trajectory_sha256": "2e3f44b9d85aae0133509e8fdab9f00949f2852afd4c37eecbda90a5c321e88d",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-7e629dc523748ae62b885185ab9e4ac6",
+    "trajectory_sha256": "d63d787f6dc448ea80a4a0820781cd67de69377351c224fe5bcba6b614fad78e",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-16b6d932e757f1457152551fac5b0fba",
+    "trajectory_sha256": "ee2304f440bd8917af4e3dfc3bd0a2ee311ea4bae09cef54f128adaa46a09722",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-c07e8fefa2aa313a8c02c2c2e005f3d0",
+    "trajectory_sha256": "d77051164a2eacd15b22f437489920e9cb9a040ee501b90234a4049426b98163",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-4e2452483f489562eb50cb9886e269d7",
+    "trajectory_sha256": "186afbfdd04d4b04df47a98741545362cd51d09c25c71aa7d826cab045bb4336",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-063585d293ee925fb3c79fe1d25fcd91",
+    "trajectory_sha256": "d229156c19f892fe5b874df2756d444fc40d1aad0d46215c577e0bc8fa313f81",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-1f3f0e3f3ee005702ce0923e5a01f680",
+    "trajectory_sha256": "580e69c2acfc919d1dcc12e1aae1f8a530e93d46e6dc5d3e7b087401c1d79d89",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-9276c04ca4385487371d000e3dd8f3a9",
+    "trajectory_sha256": "ca2abd8a5e08cccce5e3a245203a3f4ebbaab5443318b15c5cc9f4f729c6a8af",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-24958d0b11d6f68997aefe5b5fff2bde",
+    "trajectory_sha256": "a84ffa3bb12792f441e917b7c145b6d9c416cc37b75d78e2e165e764395347c2",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-84b7103f8140c5f2b157bda18deb7483",
+    "trajectory_sha256": "53472f3a497f49db5fad003d04db1711c8652a9c856229c2037149e715fc0762",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-bf5affa3cf5bddda13ccaa09ddc10e0e",
+    "trajectory_sha256": "f81f06a8fc6e435ae867e150b2373ae78630b68cb4de68fa174fa009380d978b",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-0943b0781230e8c8d233e5dae7fb91f8",
+    "trajectory_sha256": "0e74f0e6bd1b42106b44bf248aaec1f4e259323d590e875a38bf8a6ae5162990",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-2cf322a02dd80a359ee5cdbe16b811aa",
+    "trajectory_sha256": "ad24df2d6224273718c1e243e4fc9d113d3a93fb67cfee2ffbcda988b64e6a0c",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-f10efa24fd60a11852c66f89b86bb2a9",
+    "trajectory_sha256": "e145b0ceff2dce9816e8ef9ea5b6165f66e22ba12c34fd95d2afdfa90ac92d22",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-0b9cc8d9851485d55d6d4d1afee2e8d9",
+    "trajectory_sha256": "ac230d2b3549d5e8bbb0db0b78c96de3fae6edccb908b2f76835cb27a5abe5f4",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-e1243cccc5fb8d1fd17f2d86e7c06564",
+    "trajectory_sha256": "b63c35d9dbafd45dc6f686a330c9b8e7ccb0482daf225132c05e719b539d172c",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-d17f7722c6d3b950d140def2f6585313",
+    "trajectory_sha256": "44d1022c0d54b1366657a60a70f355a9f0dc2a4b5dc68d4a791d68a8869f8aee",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-b04f5ea0503372364a2feeb6b8bc0754",
+    "trajectory_sha256": "7e50534684566c271610a8f8bf13e1cd9e86f9927e0e5217ef14bde965357dfe",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-982395143fd946c84859b29b0db24e7f",
+    "trajectory_sha256": "855c9f6827731b803766930e9aedfb707454138f52f5e24248d7ffdbc621c00d",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-8e6d45b66e930756ace20e4e05838fe2",
+    "trajectory_sha256": "2caebfd375669c1eee13db9f2c1a899646f441fe2dc6953c08e632b09b86fb73",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-2e8557fbe5f70031d4a8ace26cefea35",
+    "trajectory_sha256": "f8b5399201c0c24c184662f0e697eb461310a8f73a61b285e613d0295fc0bde9",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-c3db389dd3cc225aa77fcdf32745493c",
+    "trajectory_sha256": "7ced1d38c68ecbf3fb2ef20f2c8367099f629a8516672c3fc7f37f79ebe54a5e",
+    "cohort": "run_outcome_supplement"
+  },
+  {
+    "rollout_id": "r-0a68fbe0ab7d3e17796fc8045c6d5e2a",
+    "trajectory_sha256": "65f9c3c71d7f0c67699b695120401ce84c673add08f57b09eaa813524b7c75f6",
+    "cohort": "run_outcome_supplement"
+  }
+]

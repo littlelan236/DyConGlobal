@@ -20,6 +20,8 @@ cd /home/wangtianyi/DyConGlobal
 
 ## 正式 CLI 全表
 
+Action trajectory 分类直接读取 manifest 绑定的 canonical rollout trajectory，不需要 enrichment 或 hidden。已有统一入口时不得另建临时脚本。
+
 下表中的 `dycon` 表示使用指定环境的 `.venvs/<环境>/bin/dycon`，不是系统 Python。每个子命令均在 `core/cli.py` 分发。
 
 | 任务 | 环境 | 命令 | 实现与主要产物/作用 |
@@ -52,6 +54,10 @@ cd /home/wangtianyi/DyConGlobal
 | 容器恢复清理 | runner | `dycon recover` | `runtime.containers.recovery`；只清理无活跃 run 锁的本工程容器 |
 
 输入清单格式见 [INPUTS.md](INPUTS.md)。`baseline/scripts/rollout.py`、`evaluate.py`、`prepare_run.py`、`import_rollouts.py`、`verify.py`，以及 `enrichment/scripts/enrich.py`、`hidden/scripts/extract.py`、`runtime/scripts/images_check.py`、`recover.py`、`difficulty/evaluation/scripts/evaluate.py` 是 `core.cli.module_main` 的兼容薄封装，不是第二套工作流。
+
+## Action trajectory 分类
+
+analysis 环境执行 action-classify ACTION_ANALYSIS_ID，可重复使用 --rollout-id 或提供 --rollout-list；action-check ACTION_ANALYSIS_ID 校验 selection、trajectory SHA、labels coverage、summary 和 receipt。该路径直接读取 manifest 绑定的 canonical trajectory，不需要 enrichment 或 hidden，也不执行 command。详细类别边界见 action/TAXONOMY-CN.md。
 
 ## rollout、capture 和 steering 共用执行链
 
@@ -130,7 +136,7 @@ dycon / python -m core.cli
 
 schema 3 loader 按 manifest task partition 读 train/val；当前观察到的 458 个 task 全为 train，不能据此声称具备 task 级 validation。schema 1 loader 按 rollout ID 排序取约 80%/20%，只保证同 rollout 不跨组，不保证同 task 不跨组。FFN 当前使用 CPU tensor/模块；不能把它写成已支持 GPU 训练。详细 API、目标变换和限制见 [difficulty/README.md](../difficulty/README.md)。
 
-action 目前只有共享索引，taxonomy、labels、analyzers、训练和动作评测尚未实现，见 [action/README.md](../action/README.md)。
+action 现在包含直接 trajectory 分类、共享 hidden 索引和 receipt 审计；action 训练、taxonomy 学习和动作评测尚未实现，见 [action/README.md](../action/README.md)。
 
 ## 环境、验收和维护工具
 

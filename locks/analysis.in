@@ -10,3 +10,5 @@ requests==2.34.2
 pytest==9.1.1
 ruff==0.17.0
 setuptools==84.0.0
+tree-sitter==0.26.0
+tree-sitter-bash==0.25.1

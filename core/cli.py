@@ -66,6 +66,12 @@ def main(argv=None):
     p.add_argument("dataset_id")
     p.add_argument("capture_id")
     p.add_argument("index_id")
+    p = sub.add_parser("action-classify", help="Classify canonical rollout trajectories without enrichment")
+    p.add_argument("analysis_id")
+    scope = p.add_mutually_exclusive_group()
+    scope.add_argument("--rollout-id", action="append", default=[])
+    scope.add_argument("--rollout-list", type=Path)
+    sub.add_parser("action-check").add_argument("analysis_id")
     p = sub.add_parser("action-index")
     p.add_argument("shared_index_id")
     p.add_argument("index_id")
@@ -212,6 +218,14 @@ def main(argv=None):
         from difficulty.datasets.index import build_index
 
         result = str(build_index(cfg, a.dataset_id, a.capture_id, a.index_id))
+    elif a.command == "action-classify":
+        from action.analyzers.trajectories import classify_trajectories
+
+        result = classify_trajectories(cfg, a.analysis_id, a.rollout_id, a.rollout_list)
+    elif a.command == "action-check":
+        from action.analyzers.trajectories import check_analysis
+
+        result = check_analysis(cfg, a.analysis_id)
     elif a.command == "action-index":
         from action.datasets.index import create_action_index
 

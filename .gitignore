@@ -83,6 +83,9 @@ desktop.ini
 /difficulty/evaluation/outputs/**
 /action/datasets/*/
 /action/evaluation/outputs/**
+/action/outputs/**
+/action/reports/**
+# Curated action/provenance summaries and frozen selections remain versioned.
 /action/checkpoints/**
 
 # Runtime caches and machine-specific observations

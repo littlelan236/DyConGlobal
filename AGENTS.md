@@ -10,6 +10,7 @@
 - 批量历史 extraction 使用 `enrichment.scripts.launch_extraction`；queue worker 由 launcher 调度。该 launcher 固定 `anchors-20261017` 批次及 GPU 0–3，不是通用批次创建工具。
 - 诊断先查找已有 `hidden/evaluation/`、`runtime/scripts/` 工具，核对参数、硬编码范围和副作用。历史 speed-test/验收脚本不能替代生产入口。
 - 只有 Python API 的能力应明确说明边界。需要新增正式任务时，应在既有 CLI/模块中实现可维护入口并补充文档；不要用临时训练/提取脚本填补入口空缺。
+- action trajectory 分类使用 dycon action-classify，直接读取 manifest 绑定的 canonical trajectory；不得要求 enrichment 作为隐含前置，也不得另写 trajectory 读取脚本。
 
 ## 配置与数据
 

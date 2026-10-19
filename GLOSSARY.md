@@ -26,3 +26,17 @@ _Avoid_：最小必要推理量、已被证明的真实难度。
 **Time to termination（距终止长度）**：从指定锚点到任意原因导致的轨迹终止所经历的剩余长度。失败轨迹也能观测此量，但它与剩余成功工作量不同。
 
 **Action information（动作信息）**：锚点处表示对随后动作或此前动作的可预测信息；两种时间方向需要分别定义。
+
+## Action 分类
+
+**Action observation unit（动作观测单位）**：一个 assistant message 及其提交的 tool-call 记录；action 分类以此为一行统计单位。
+
+**Primitive component（原子组成）**：从一个 shell tool-call AST 中识别出的读取、修改、执行、环境、清理或交付行为；一个观测单位可包含多个组成。
+
+**Primary action category（主动作类别）**：按固定优先级从组成集合得到的唯一类别；同一个观测单位不会同时拥有两个主类别。
+
+**Compound action（复合动作）**：一个 tool-call 同时包含多个不同组成，例如先写入脚本再运行它；保留 components，但只输出一个主类别。
+
+**Unknown action（未判定动作）**：静态规则无法安全确定目的的观测单位；标为 OTHER，不强行解释为模型意图。
+
+**Inspect / Edit / Environment / Run / Clean / Deliver**：分别表示信息获取、修改实现、环境准备、执行验证、清理状态和交付结果六类可观察目的。

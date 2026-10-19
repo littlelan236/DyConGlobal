@@ -1,0 +1,245 @@
+{
+  "taxonomy_version": "observable-action-v1-draft",
+  "snapshot_sha256": "efdfcb42f053e04ade0236f0a28563f794a47ba9d34f1077dc052cfed479f995",
+  "catalog_revision": 1974,
+  "catalog_sha256": "65008979c03003305d76fe7a546afa942eaac5437e9219bea14b1d7262877657",
+  "sources": 383,
+  "repos": 17,
+  "models": 4,
+  "steps": 28381,
+  "cohort_rollouts": {
+    "ridge238": 238,
+    "run_outcome_supplement": 145
+  },
+  "category_counts": {
+    "INSPECT": 13890,
+    "RUN": 7562,
+    "EDIT": 5642,
+    "DELIVER": 676,
+    "CLEAN": 180,
+    "OTHER": 389,
+    "ENV": 42
+  },
+  "category_fractions": {
+    "DELIVER": 0.023818751981959763,
+    "EDIT": 0.198794968464818,
+    "ENV": 0.0014798632888199852,
+    "RUN": 0.2664458616680173,
+    "CLEAN": 0.006342271237799937,
+    "INSPECT": 0.48941193051689513,
+    "OTHER": 0.013706352841689863
+  },
+  "compound_actions": 3884,
+  "uncertainty_counts": {
+    "script_source_unavailable": 477,
+    "python_parse_error": 364,
+    "nested_dynamic_execution": 107,
+    "shell_parse_error": 7
+  },
+  "rules": {
+    "text_or_path_inspection": 16252,
+    "xargs_reader": 236,
+    "python_ast": 9334,
+    "python_execution": 7279,
+    "in_place_edit": 422,
+    "python_module_execution": 2566,
+    "git_inspection": 1092,
+    "git_worktree_change": 415,
+    "protocol_marker_emission": 444,
+    "explicit_file_construction": 4567,
+    "patch_export": 243,
+    "git_package": 3,
+    "python_open_write_mode": 1683,
+    "script_invocation_source_unavailable": 477,
+    "filesystem_remove": 350,
+    "python_parse_error": 364,
+    "filesystem_construct": 159,
+    "python_explicit_write": 81,
+    "nested_dynamic_execution": 107,
+    "shell_parse_error": 7,
+    "unsupported_xargs": 5,
+    "patch_apply": 5,
+    "external_read": 29,
+    "dependency_inspection": 12,
+    "unsupported_git_operation": 6,
+    "python_input_unavailable": 6,
+    "dependency_management": 40,
+    "test_or_check_runner": 76,
+    "python_environment_module": 2,
+    "runtime_environment": 1
+  },
+  "phase_definition": "min(4, floor(5*s/max(1,T-1))); post-hoc action position, not a future-free feature",
+  "phase_counts_micro": [
+    {
+      "INSPECT": 4546,
+      "RUN": 709,
+      "EDIT": 475,
+      "OTHER": 21,
+      "ENV": 13
+    },
+    {
+      "RUN": 1231,
+      "INSPECT": 2975,
+      "EDIT": 1290,
+      "OTHER": 85,
+      "ENV": 13,
+      "CLEAN": 2
+    },
+    {
+      "RUN": 1618,
+      "INSPECT": 2448,
+      "EDIT": 1407,
+      "OTHER": 102,
+      "CLEAN": 6,
+      "ENV": 13
+    },
+    {
+      "EDIT": 1436,
+      "RUN": 1971,
+      "INSPECT": 2086,
+      "CLEAN": 11,
+      "OTHER": 91,
+      "ENV": 1
+    },
+    {
+      "RUN": 2033,
+      "INSPECT": 1835,
+      "DELIVER": 676,
+      "EDIT": 1034,
+      "CLEAN": 161,
+      "OTHER": 90,
+      "ENV": 2
+    }
+  ],
+  "phase_fractions_macro": [
+    {
+      "DELIVER": 0.0,
+      "EDIT": 0.07013984227213753,
+      "ENV": 0.0016308786643402557,
+      "RUN": 0.10516762787322038,
+      "CLEAN": 0.0,
+      "INSPECT": 0.8196488893328956,
+      "OTHER": 0.003412761857406193
+    },
+    {
+      "DELIVER": 0.0,
+      "EDIT": 0.23809546426616637,
+      "ENV": 0.0019394110108427872,
+      "RUN": 0.22330025597790956,
+      "CLEAN": 0.00010910448835618903,
+      "INSPECT": 0.5280214859209013,
+      "OTHER": 0.008534278335823795
+    },
+    {
+      "DELIVER": 0.0,
+      "EDIT": 0.2457518494635013,
+      "ENV": 0.0023787055188943815,
+      "RUN": 0.3256075437262007,
+      "CLEAN": 0.001016641565077298,
+      "INSPECT": 0.4129655382929334,
+      "OTHER": 0.012279721433392902
+    },
+    {
+      "DELIVER": 0.0,
+      "EDIT": 0.22334486710857532,
+      "ENV": 0.00026455026455026457,
+      "RUN": 0.4026590899637528,
+      "CLEAN": 0.003610520872425634,
+      "INSPECT": 0.3610356276670718,
+      "OTHER": 0.009085344123624056
+    },
+    {
+      "DELIVER": 0.17388671321139015,
+      "EDIT": 0.12549951620902475,
+      "ENV": 0.0005905756558498072,
+      "RUN": 0.3433444116826861,
+      "CLEAN": 0.041198592629425546,
+      "INSPECT": 0.3053072324446466,
+      "OTHER": 0.010172958166976978
+    }
+  ],
+  "cohort_phase_counts": {
+    "ridge238": [
+      {
+        "INSPECT": 2487,
+        "RUN": 348,
+        "EDIT": 172,
+        "OTHER": 5,
+        "ENV": 8
+      },
+      {
+        "RUN": 634,
+        "INSPECT": 1639,
+        "EDIT": 616,
+        "OTHER": 20,
+        "ENV": 9
+      },
+      {
+        "RUN": 919,
+        "INSPECT": 1238,
+        "EDIT": 713,
+        "OTHER": 35,
+        "CLEAN": 2,
+        "ENV": 8
+      },
+      {
+        "EDIT": 710,
+        "RUN": 1137,
+        "INSPECT": 1032,
+        "CLEAN": 7,
+        "OTHER": 32
+      },
+      {
+        "RUN": 1164,
+        "INSPECT": 905,
+        "DELIVER": 440,
+        "EDIT": 432,
+        "CLEAN": 96,
+        "OTHER": 22,
+        "ENV": 2
+      }
+    ],
+    "run_outcome_supplement": [
+      {
+        "INSPECT": 2059,
+        "EDIT": 303,
+        "RUN": 361,
+        "OTHER": 16,
+        "ENV": 5
+      },
+      {
+        "INSPECT": 1336,
+        "EDIT": 674,
+        "RUN": 597,
+        "OTHER": 65,
+        "ENV": 4,
+        "CLEAN": 2
+      },
+      {
+        "INSPECT": 1210,
+        "EDIT": 694,
+        "RUN": 699,
+        "OTHER": 67,
+        "ENV": 5,
+        "CLEAN": 4
+      },
+      {
+        "EDIT": 726,
+        "RUN": 834,
+        "INSPECT": 1054,
+        "CLEAN": 4,
+        "OTHER": 59,
+        "ENV": 1
+      },
+      {
+        "RUN": 869,
+        "INSPECT": 930,
+        "EDIT": 602,
+        "DELIVER": 236,
+        "CLEAN": 65,
+        "OTHER": 68
+      }
+    ]
+  },
+  "scope_note": "Draft operational taxonomy; unique rule output is not proof of semantic intent accuracy."
+}

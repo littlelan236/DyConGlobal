@@ -77,7 +77,7 @@ smoke 报告位于 `hidden/evaluation/outputs/`，这些诊断产物不会进入
 | `enrichment/` | trajectory labels、prefix、token traces、online token-event finalize；outputs/reports/manifests |
 | `hidden/` | vLLM adapter、提取、artifact reader、online recovery；outputs、spool、online capture 产物 |
 | `difficulty/` | 共享索引、Ridge/FFN/残差估计器、训练 Python API、预测评分与轨迹图 |
-| `action/` | shared hidden 无标签索引；taxonomy/analyzers 预留 |
+| `action/` | canonical trajectory action 分类、receipt/provenance、shared hidden 索引；训练/评测预留 |
 | `runtime/` | 容器、NAS OCI、serving/capture/cache/spool、EasySteer、安装/验收/恢复 |
 | `runs/`、`state/` | run 快照/进度、启动证据、supervisor、批量任务和修复状态 |
 | `docs/` | 当前入口、实现约定和数据接口 |
@@ -88,7 +88,7 @@ smoke 报告位于 `hidden/evaluation/outputs/`，这些诊断产物不会进入
 
 仅 `resolved=true` 轨迹产生成功剩余量标签；unresolved、未评测和基础设施故障保留 null。缺原始 prompt/output IDs 的历史轨迹明确标记重建证据；长度吻合不能冒充 exact。动作只存于分析证据，不能进入当前 anchor prefix。
 
-Ridge、FFN MLP、Ridge+FFN 和训练 API 已实现。单层 Ridge × alpha 的 submission-remainder pilot 已有正式 `dycon difficulty-ridge` CLI、task 划分和参数/验证报告，见 [实验指南](docs/ridge-submission-pilot.md)；通用 FFN/残差训练 CLI、完整 checkpoint 管理和动态 difficulty 控制仍未实现。action taxonomy/labels/analyzers 未实现。当前 task 全属 train，不能声称已有 task 级 train/val/test 验证。
+Ridge、FFN MLP、Ridge+FFN 和训练 API 已实现。单层 Ridge × alpha 的 submission-remainder pilot 已有正式 `dycon difficulty-ridge` CLI、task 划分和参数/验证报告，见 [实验指南](docs/ridge-submission-pilot.md)；通用 FFN/残差训练 CLI、完整 checkpoint 管理和动态 difficulty 控制仍未实现。action trajectory 分类已有正式 `dycon action-classify`/`action-check` 入口，action taxonomy 学习、训练和评测仍未实现。当前 task 全属 train，不能声称已有 task 级 train/val/test 验证。
 
 ## 环境、镜像与验证
 

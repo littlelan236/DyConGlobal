@@ -14,7 +14,7 @@
 | [vllm-eager-extraction.md](vllm-eager-extraction.md) | 独立 eager runtime、site 映射、离线 replay 与恢复 |
 | [ridge-submission-pilot.md](ridge-submission-pilot.md) | 单层 Ridge 参数实验入口、数据核验、拟合产物和验收边界 |
 | [difficulty/README.md](../difficulty/README.md) | estimator/loader API、目标变换、索引和划分限制 |
-| [action/README.md](../action/README.md) | action 共享索引与未实现边界 |
+| [action/README.md](../action/README.md) | trajectory action 分类、共享索引、receipt 和未实现边界 |
 | [AGENTS.md](../AGENTS.md) | 协作约定，已有统一入口时禁止临时脚本绕行 |
 | [GLOSSARY.md](../GLOSSARY.md) | 工程术语 |
 
