@@ -6,6 +6,8 @@
 
 | 文档 | 内容 |
 |---|---|
+| [parallel-score-instability.md](parallel-score-instability.md) | 同 action 不同 reasoning 的四类不稳定性指标、去重/采样口径、聚类 CI 与发布证据 |
+| [parallel-score-visualization.md](parallel-score-visualization.md) | 并行轨迹的选中分支逐步评分折线、全部候选散点、评分 CSV 与证据校验 |
 | [工程 README](../README.md) | 目标、代码/产物职责、数据路径和验证边界 |
 | [ENTRYPOINTS.md](ENTRYPOINTS.md) | 全部 CLI、环境、配置、rollout/capture/steering、恢复、队列与维护入口 |
 | [IMPLEMENTATION.md](IMPLEMENTATION.md) | 当前实现、数据观察和未完成项 |

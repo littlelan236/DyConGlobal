@@ -79,10 +79,42 @@ def main(argv=None):
     p.add_argument("index_id")
     p.add_argument("predictions")
     p.add_argument("evaluation_id")
+    p = sub.add_parser("difficulty-plot-parallel", help="Plot stored branch scores on a finalized trajectory")
+    p.add_argument("run_id")
+    p.add_argument("plot_id", nargs="?")
+    scope = p.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--rollout-id")
+    scope.add_argument("--task-id")
+    scope.add_argument("--list", action="store_true", help="List catalog trajectory/attempt IDs in this run")
+    p.add_argument("--attempt-id")
+    p.add_argument("--step-start", type=int, default=0)
+    p.add_argument("--step-end", type=int)
+    p = sub.add_parser("difficulty-evaluate-parallel", help="Measure score instability at fixed tool actions")
+    p.add_argument("run_id")
+    p.add_argument("evaluation_id")
+    scope = p.add_mutually_exclusive_group()
+    scope.add_argument("--rollout-id", action="append", default=[])
+    scope.add_argument("--task-id", action="append", default=[])
+    p.add_argument("--attempt-id")
+    p.add_argument("--reasoning-identity", choices=["text", "tokens"], default="text")
+    p.add_argument("--score-space", choices=["auto", "log1p", "native"], default="auto")
+    p.add_argument("--multipliers", type=float, nargs="+", default=[1.25, 1.5, 2.0, 3.0])
+    p.add_argument("--bootstrap-samples", type=int, default=2000)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--skip-unavailable", action="store_true")
     p = sub.add_parser("difficulty-ridge")
     p.add_argument("experiment_id")
     p.add_argument("--mode", choices=["dry-run", "check-data", "fit"], default="fit")
     a = parser.parse_args(argv)
+    if a.command == "difficulty-plot-parallel":
+        if a.list and (a.plot_id or a.attempt_id or a.step_start != 0 or a.step_end is not None):
+            parser.error("--list takes only RUN_ID; omit PLOT_ID, attempt and step range")
+        if not a.list and not a.plot_id:
+            parser.error("plotting requires PLOT_ID")
+        if a.attempt_id and not a.task_id:
+            parser.error("--attempt-id requires --task-id")
+    if a.command == "difficulty-evaluate-parallel" and a.attempt_id and not a.task_id:
+        parser.error("--attempt-id requires --task-id")
     if a.command == "rollout" and a.set:
         parser.error("rollout rejects --set; edit the unique config.yaml or resume its immutable snapshot")
     if a.command == "rollout" and a.resume and (a.task_id or a.unrolled):
@@ -243,6 +275,22 @@ def main(argv=None):
         from difficulty.training.ridge_probe import run_probe
 
         result = run_probe(cfg, a.experiment_id, mode=a.mode)
+    elif a.command == "difficulty-plot-parallel":
+        from difficulty.evaluation.parallel import list_parallel_trajectories, visualize_parallel
+
+        result = list_parallel_trajectories(cfg, a.run_id) if a.list else visualize_parallel(
+            cfg, a.run_id, a.plot_id, rollout_id=a.rollout_id, task_id=a.task_id,
+            attempt_id=a.attempt_id, step_start=a.step_start, step_end=a.step_end,
+        )
+    elif a.command == "difficulty-evaluate-parallel":
+        from difficulty.evaluation.parallel_instability import evaluate_parallel_instability
+
+        result = evaluate_parallel_instability(
+            cfg, a.run_id, a.evaluation_id, rollout_ids=a.rollout_id, task_ids=a.task_id,
+            attempt_id=a.attempt_id, reasoning_identity=a.reasoning_identity, score_space=a.score_space,
+            multipliers=a.multipliers, bootstrap_samples=a.bootstrap_samples, seed=a.seed,
+            skip_unavailable=a.skip_unavailable,
+        )
     else:
         from runtime.containers.recovery import recover
 

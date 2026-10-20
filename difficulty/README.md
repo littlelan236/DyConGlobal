@@ -1,5 +1,15 @@
 # 剩余工作量估计与数据接口
 
+同 action、不同 reasoning 的评分不稳定性评测使用 `dycon difficulty-evaluate-parallel RUN_ID EVALUATION_ID`，
+实现与已有并行轨迹可视化同在 `difficulty/evaluation/` 并复用轨迹对齐。
+支持平均两两差、标准差/极差、log1p 倍数分歧率和相对 Q，以及去重/原采样两种口径和 task/repo CI。
+参数、分组、汇总与产物见 [使用说明](../docs/parallel-score-instability.md)。
+
+并行解码的在线评分可使用 `dycon difficulty-plot-parallel RUN_ID PLOT_ID --rollout-id ROLLOUT_ID`
+绘制实际选中轨迹的逐步预测折线及全部候选分支散点，并导出 PNG/SVG、评分 CSV 和来源 receipt。
+无需加载 checkpoint、hidden tensor 或启动 GPU；具体选择、单位、缺失评分与噪音解释见
+[并行轨迹评分可视化](../docs/parallel-score-visualization.md)。
+
 新增正式 `dycon difficulty-ridge EXPERIMENT_ID`：在 analysis 环境消费冻结的 submission 选择，执行 task 分组的单层 Ridge × alpha 搜索、验证R²选优和参数/报告保存。`--mode dry-run` 只核验/划分，`--mode check-data` 另检查真实hidden及缓存，默认fit。见 [实验入口与语义](../docs/ridge-submission-pilot.md)。这是到该次提交的独立标签视图，允许已提交但未成功/未评测的轨迹，原成功标签不改。
 
 2026-10-19 按实际代码更新。正式命令见 [任务入口表](../docs/ENTRYPOINTS.md)。已有索引、评分和 hidden 提取入口时直接复用，不另写临时脚本拼接数据或重定义标签。

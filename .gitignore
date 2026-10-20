@@ -140,3 +140,14 @@ desktop.ini
 
 # Preserve deliberate placeholders in otherwise empty functional directories
 !.gitkeep
+
+# Machine-local experiment exports; keep curated Markdown summaries visible.
+/artifacts/*
+!/artifacts/*.md
+
+# One-off run-specific root drivers (supported commands live in package modules).
+/finalize_eval27_report.py
+/launch_eval27.py
+/launch_retry6.py
+/start_eval27_background.py
+/start_retry6_bg.py

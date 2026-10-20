@@ -52,6 +52,8 @@ Action trajectory 分类直接读取 manifest 绑定的 canonical rollout trajec
 | 在线发布数据索引 | analysis | `dycon online-index RUN_ID ONLINE_INDEX_ID` | `difficulty.datasets.online.build_published_index` → schema 3 `index.json`，直接引用 NAS shard |
 | action 共享视图 | analysis | `dycon action-index SHARED_INDEX_ID ACTION_INDEX_ID` | `action.datasets.index` → `action/datasets/`；action label 为空，不重复提 hidden |
 | 显式预测评分 | analysis | `dycon difficulty-evaluate INDEX_ID PREDICTIONS.json SCORE_ID` | `difficulty.evaluation.run` → `difficulty/evaluation/outputs/` 的指标与轨迹图；当前读取 schema 1 label-shard 索引 |
+| 并行轨迹评分可视化 | analysis | `dycon difficulty-plot-parallel RUN_ID PLOT_ID --task-id INSTANCE_ID [--attempt-id attempt-000]`；`RUN_ID --list` 列出轨迹 | `difficulty.evaluation.parallel`；核验最终轨迹与已发布分支记录，生成 PNG/SVG、评分表及 receipt，见 [使用说明](parallel-score-visualization.md) |
+| 并行评分不稳定性评测 | analysis | `dycon difficulty-evaluate-parallel RUN_ID EVALUATION_ID [--rollout-id ID ... / --task-id ID ...]` | 复用绘图对齐；输出平均两两差、std/range、倍数分歧率、相对 Q 及 task/repo CI，见 [使用说明](parallel-score-instability.md) |
 | capture 发布恢复 | runner | `dycon capture-recover RUN_ID` | `hidden.recover_online`；读取原 run 快照，重试 spool 发布，不发起新模型请求 |
 | 容器恢复清理 | runner | `dycon recover` | `runtime.containers.recovery`；只清理无活跃 run 锁的本工程容器 |
 

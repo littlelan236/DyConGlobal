@@ -1,5 +1,11 @@
 # Parallel complete-response rollout
 
+Stored selected-path and all-branch scores can be plotted with the unified
+`dycon difficulty-plot-parallel RUN_ID PLOT_ID --rollout-id ROLLOUT_ID` command.
+It aligns finalized canonical action steps, preserves missing-score gaps and
+exports PNG/SVG plus CSV without reloading a predictor or running a model.
+See [parallel score visualization](parallel-score-visualization.md).
+
 Implementation date: 2026-10-19. Uses the existing `dycon rollout` entry point.
 The default configuration and old snapshots retain the original single-branch
 path. No `difficulty/` code or production config is changed by this implementation.
