@@ -6,9 +6,10 @@ from collections import defaultdict
 
 import numpy as np
 
-from core.io import artifact_dir, read_json
+from core.io import artifact_dir, owned_path, read_json
 from difficulty.models.estimators import build_estimator, inverse_target, transform_target
 from hidden.artifacts import read_arrays
+from difficulty.datasets.paths import dataset_directory, source_directory
 
 TARGETS = {
     "remaining_reasoning_tokens_log1p": "remaining_reasoning_tokens",
@@ -20,7 +21,7 @@ TARGETS = {
 def load_training_data(cfg, index_id, target, split="all"):
     if target not in TARGETS:
         raise ValueError(f"Unknown target: {target}")
-    idx_path = artifact_dir(cfg, "difficulty", index_id, "datasets") / "index.json"
+    idx_path = dataset_directory(cfg, index_id) / "index.json"
     idx = read_json(idx_path)
     if idx["schema_version"] == 3:
         selected = [
@@ -40,7 +41,8 @@ def load_training_data(cfg, index_id, target, split="all"):
             transform_target(np.array([r["labels"][TARGETS[target]] for r in selected]), target),
             [r["sample_id"] for r in selected],
         )
-    source = artifact_dir(cfg, "enrichment", idx["dataset_id"])
+    source = source_directory(cfg, idx, idx_path.parent, "enrichment")
+    capture_root = source_directory(cfg, idx, idx_path.parent, "hidden")
     labels = {}
     for name in {r["label_shard"] for r in idx["samples"]}:
         labels.update({r["sample_id"]: r for r in read_json(source / name)})
@@ -51,7 +53,7 @@ def load_training_data(cfg, index_id, target, split="all"):
         if value is None:
             continue
         hidden = read_arrays(
-            artifact_dir(cfg, "hidden", idx["capture_id"], "outputs"), {"path": item["hidden_path"]}
+            capture_root, {"path": item["hidden_path"]}
         )["hidden"]
         rows.append(
             {

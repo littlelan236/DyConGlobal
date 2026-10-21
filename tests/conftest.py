@@ -67,9 +67,11 @@ def task(iid="t-1", partition="train"):
 
 def import_fixture(cfg, *, resolved=None, iid="t-1"):
     from catalog.store import Catalog
+    from application.execution.evidence import RunEvidence
     from rollout.artifacts import import_rollout
 
     root = Path(cfg["project_root"])
+    Catalog(root).register_tasks([task(iid)])
     raw = root / (iid + ".traj.json")
     write_json(
         raw,
@@ -119,9 +121,9 @@ def import_fixture(cfg, *, resolved=None, iid="t-1"):
         },
     )
     if resolved is not None:
-        row = Catalog(root).read()["rollouts"][rid]
-        report = root / f"runs/imported-evaluations/harness/e-{iid}/summary.json"
+        row = RunEvidence(root, "source").read()["rollouts"][rid]
+        report = root / f"runs/source/harness/e-{iid}/summary.json"
         outcomes = {rid: {"patch_sha256": row["patch_sha256"], "status": "completed", "resolved": resolved}}
         write_json(report, outcomes)
-        Catalog(root).record_evaluation("e-" + iid, report, outcomes, {"fixture": True})
+        RunEvidence(root, "source").record_evaluation("e-" + iid, report, outcomes, {"fixture": True})
     return rid

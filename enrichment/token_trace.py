@@ -9,7 +9,6 @@ from pathlib import Path
 
 import numpy as np
 
-from catalog.store import Catalog
 from core.io import artifact_dir, hash_json, sha256, write_json
 from enrichment.reader import TrajectoryReader
 
@@ -139,7 +138,6 @@ def _append_row(
 
 def trace_rollout(cfg, rollout_id, tokenizer, dataset_id=None, *, selection=None, token_text_cache=None):
     root = Path(cfg["project_root"])
-    catalog = Catalog(root)
     selected = (
         selection
         if selection is not None

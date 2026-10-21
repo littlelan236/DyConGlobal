@@ -130,16 +130,16 @@ class BatchAdapter:
 
 def test_native_batches_resume_and_keep_manifests(cfg):
     import_fixture(cfg, resolved=True)
-    enrich(cfg, "dataset", ToyTokenizer())
+    enrich({**cfg, "source_run_id": "source"}, "dataset", ToyTokenizer())
     cfg["hidden"]["layers"] = [0]
     root = cfg["project_root"]
     write_json(root + "/hidden/manifest.json", {"schema_version": 1, "legacy": "preserve"})
     adapter = BatchAdapter(fail_at=2)
     with pytest.raises(RuntimeError, match="interrupted"):
-        extract_hidden(cfg, "dataset", "capture", adapter)
+        extract_hidden({**cfg, "source_run_id": "source"}, "dataset", "capture", adapter)
     assert [len(x) for x in adapter.calls] == [3, 1]
     resumed = BatchAdapter()
-    out = extract_hidden(cfg, "dataset", "capture", resumed)
+    out = extract_hidden({**cfg, "source_run_id": "source"}, "dataset", "capture", resumed)
     assert [len(x) for x in resumed.calls] == [1]
     receipt = read_json(out / "receipt.json")
     assert receipt["backend"]["name"] == "vllm_eager"
@@ -149,20 +149,20 @@ def test_native_batches_resume_and_keep_manifests(cfg):
     binding = next(iter(manifest["native_captures"]["capture"]["rollouts"].values()))
     assert binding["task_id"] == "t-1" and binding["run_id"] == "source"
     assert {a["text"] for a in binding["anchors"]} == {"<think>", "</think>"}
-    assert extract_hidden(cfg, "dataset", "capture", resumed) == out
+    assert extract_hidden({**cfg, "source_run_id": "source"}, "dataset", "capture", resumed) == out
     assert len(resumed.calls) == 1
     with pytest.raises(ValueError, match="different inputs"):
         changed = BatchAdapter()
         changed.metadata = {"name": "changed-runtime"}
-        extract_hidden(cfg, "dataset", "capture", changed)
+        extract_hidden({**cfg, "source_run_id": "source"}, "dataset", "capture", changed)
 
 
 def test_batch_failure_never_commits_receipt(cfg):
     import_fixture(cfg)
-    enrich(cfg, "dataset", ToyTokenizer())
+    enrich({**cfg, "source_run_id": "source"}, "dataset", ToyTokenizer())
     cfg["hidden"]["layers"] = [0]
     with pytest.raises(ValueError, match="mismatched sample"):
-        extract_hidden(cfg, "dataset", "bad", BatchAdapter(mismatch=True))
+        extract_hidden({**cfg, "source_run_id": "source"}, "dataset", "bad", BatchAdapter(mismatch=True))
     from pathlib import Path
 
     assert not (Path(cfg["project_root"]) / "hidden/outputs/bad/receipt.json").exists()
@@ -170,7 +170,7 @@ def test_batch_failure_never_commits_receipt(cfg):
 
 def test_prefix_is_verified_before_capture(cfg):
     rid = import_fixture(cfg)
-    dataset = enrich(cfg, "dataset", ToyTokenizer())
+    dataset = enrich({**cfg, "source_run_id": "source"}, "dataset", ToyTokenizer())
     cfg["hidden"]["layers"] = [0]
     path = dataset / f"{rid}.samples.json"
     rows = read_json(path)
@@ -181,7 +181,7 @@ def test_prefix_is_verified_before_capture(cfg):
     write_json(dataset / "receipt.json", receipt)
     adapter = BatchAdapter()
     with pytest.raises(ValueError, match="Prefix checksum"):
-        extract_hidden(cfg, "dataset", "bad", adapter)
+        extract_hidden({**cfg, "source_run_id": "source"}, "dataset", "bad", adapter)
     assert not adapter.calls
 
 
@@ -326,9 +326,9 @@ def test_failed_wave_does_not_submit_later_anchors(cfg, monkeypatch):
 
 def test_receipt_metrics_exclude_previous_queue_jobs(cfg):
     import_fixture(cfg)
-    enrich(cfg, "dataset", ToyTokenizer())
+    enrich({**cfg, "source_run_id": "source"}, "dataset", ToyTokenizer())
     cfg["hidden"]["layers"] = [0]
     adapter = BatchAdapter()
     adapter.metrics.append({"sample_id": "another-queue-job"})
-    out = extract_hidden(cfg, "dataset", "isolated-metrics", adapter)
+    out = extract_hidden({**cfg, "source_run_id": "source"}, "dataset", "isolated-metrics", adapter)
     assert read_json(out / "receipt.json")["execution_metrics"] == []

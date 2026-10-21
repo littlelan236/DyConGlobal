@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from action.datasets.trajectories import select_trajectories
-from catalog.store import Catalog
+from application.execution.evidence import RunEvidence
 from core.io import artifact_dir, identifier, now, sha256, write_json
 from core.locking import exclusive_artifact
 from difficulty.evaluation.instability import aggregate_steps, metric_names, summarize_groups
@@ -41,11 +41,11 @@ def _select(cfg, run_id, rollout_ids, task_ids, attempt_id):
                 raise ValueError(f"Task {task} is ambiguous/missing; specify attempt or rollout. Matches: {choices}")
             ids.append(matches[0]["rollout_id"])
     else:
-        eligible = Catalog(cfg["project_root"]).select()["rollouts"]
+        eligible = RunEvidence(cfg["project_root"], run_id).read()["rollouts"]
         ids = [r["rollout_id"] for r in available if r["rollout_id"] in eligible]
     if not ids or set(ids) - {r["rollout_id"] for r in available}:
         raise ValueError("No trajectories selected, or requested rollout belongs to another run")
-    return select_trajectories(cfg, ids)
+    return select_trajectories(cfg, run_id, ids)
 
 
 def _csv(path, rows):
@@ -103,7 +103,7 @@ def evaluate_parallel_instability(cfg, run_id, evaluation_id, *, rollout_ids=(),
         raise ValueError("Multipliers must be finite and greater than one")
     if not isinstance(bootstrap_samples, int) or bootstrap_samples < 0 or seed < 0:
         raise ValueError("Bootstrap samples and seed must be nonnegative integers")
-    out = artifact_dir(cfg, "difficulty", evaluation_id, "evaluation/outputs")
+    out = artifact_dir(cfg, "difficulty", evaluation_id, "evaluations")
     if out.exists():
         raise FileExistsError(f"Use a new evaluation ID: {out}")
     selection = _select(cfg, run_id, rollout_ids, task_ids, attempt_id)
@@ -194,7 +194,7 @@ def evaluate_parallel_instability(cfg, run_id, evaluation_id, *, rollout_ids=(),
                     stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
         (stage / "report.md").write_text(_markdown(summary), encoding="utf-8")
         write_json(stage / "receipt.json", {
-            "schema_version": 1, "created_at": summary["created_at"], "parameters": summary["parameters"],
+            "schema_version": 1, "state": "complete", "created_at": summary["created_at"], "parameters": summary["parameters"],
             "code": {name: sha256(Path(__file__).resolve().parents[2] / name) for name in CODE_FILES},
             "files": {p.name: sha256(p) for p in sorted(stage.iterdir()) if p.is_file()}})
         stage.rename(out)

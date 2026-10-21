@@ -1,17 +1,21 @@
-"""Select canonical trajectories using the catalog, without enrichment or model IO."""
+"""Select canonical trajectories inside one source run."""
 
 import hashlib
 import json
 from pathlib import Path
 
-from catalog.store import Catalog
+from application.execution.evidence import RunEvidence
 from core.io import hash_json, owned_path
 
 
-def select_trajectories(cfg, rollout_ids=(), rollout_list=None):
+def select_trajectories(cfg, run_id=None, rollout_ids=(), rollout_list=None):
     if rollout_ids and rollout_list is not None:
         raise ValueError("Use --rollout-id or --rollout-list, not both")
-    catalog = Catalog(cfg["project_root"]).read()
+    run_id = run_id or cfg.get("source_run_id") or cfg.get("run_id")
+    if not run_id:
+        raise ValueError("Trajectory selection requires a source run before rollout IDs")
+    catalog = RunEvidence(cfg["project_root"], run_id).read()
+    run_catalog = catalog
     expected, cohorts = {}, {}
     selection_source = None
     if rollout_list is not None:
@@ -40,31 +44,16 @@ def select_trajectories(cfg, rollout_ids=(), rollout_list=None):
     elif rollout_ids:
         ids = list(rollout_ids)
     else:
-        benchmark = cfg["benchmark"]
-        profile = benchmark["profile"]
-        if profile is not None and profile not in catalog["baseline_selections"]:
-            raise ValueError("Unknown baseline selection profile")
-        ids = [
-            rid
-            for rid, row in catalog["rollouts"].items()
-            if (
-                benchmark["partition"] is None
-                or catalog["tasks"][row["task_key"]]["partition"] == benchmark["partition"]
-            )
-            and (not benchmark["purposes"] or set(row["purposes"]).intersection(benchmark["purposes"]))
-            and (profile is None or catalog["baseline_selections"][profile].get(row["task_key"]) == rid)
-            and not row["provenance"].get("quarantined")
-            and catalog["tasks"][row["task_key"]]["partition"] != "excluded"
-        ]
+        ids = RunEvidence(cfg["project_root"], run_id).select()["rollout_ids"]
     if not ids or len(ids) != len(set(ids)):
         raise ValueError("Rollout selection must be nonempty and contain no duplicate IDs")
     sources, seen, aliases = [], {}, {}
     for rid in sorted(ids):
-        if rid not in catalog["rollouts"]:
+        if rid not in run_catalog["rollouts"]:
             raise ValueError(f"Unknown rollout: {rid}")
-        row = catalog["rollouts"][rid]
+        row = run_catalog["rollouts"][rid]
         task = catalog["tasks"][row["task_key"]]
-        if row["provenance"].get("quarantined") or task["partition"] == "excluded":
+        if row.get("provenance", {}).get("quarantined") or task["partition"] == "excluded":
             raise ValueError(f"Quarantined/excluded rollout cannot be analyzed: {rid}")
         if rid in expected and expected[rid] != row["trajectory_sha256"]:
             raise ValueError(f"Selection/manifest trajectory SHA mismatch: {rid}")
@@ -94,8 +83,9 @@ def select_trajectories(cfg, rollout_ids=(), rollout_list=None):
             }
         )
     return {
-        "catalog_revision": catalog["catalog_revision"],
-        "catalog_sha256": hash_json(catalog),
+        "run_id": run_id,
+        "evidence_revision": catalog["revision"],
+        "evidence_sha256": hash_json(catalog),
         "selection_source": selection_source,
         "requested_rollout_ids": sorted(ids),
         "duplicate_trajectory_aliases": aliases,

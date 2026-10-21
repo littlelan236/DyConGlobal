@@ -8,6 +8,100 @@ from rollout.parallel import ParallelReasoningCoordinator, ParallelSelectionErro
 from rollout.runner import TERMINAL
 
 
+@pytest.mark.parametrize("other,expected", [("normal", "winner"), ("loop", "all_parallel_branches_reasoning_loop"),
+    ("context", "ContextWindowExceededError"), ("format", "format"), ("timeout", "ParallelSelectionError")])
+@pytest.mark.parametrize("diagnostic", [False, True])
+@pytest.mark.parametrize("client_finish", ["abort", "stop"])
+def test_loop_branch_is_excluded_from_all_fallbacks(native_errors, other, expected, diagnostic, client_finish):
+    from minisweagent.exceptions import FormatError, LimitsExceeded
+
+    evidence, terminations, parses = [], [], []
+
+    class Client:
+        def call(self, action, payload):
+            if action == "results":
+                return {"results": terminations, "estimator_sha256": "sha", "target": "target", "endpoint": "submission"}
+            return {}
+
+    class Response:
+        def __init__(self, finish, branch):
+            self.choices = [SimpleNamespace(finish_reason=finish)]
+            self.branch = branch
+
+        def model_dump(self, **kwargs):
+            return {"choices": [{"finish_reason": self.choices[0].finish_reason}], "usage": {"completion_tokens": 2048}}
+
+    cfg = {"parallel": {"branch_count": 2, "score_timeout_ms": 1, "fallback_policy": "first_valid"},
+           "generation": {"seed": 42}, "capture": {"control_seconds": 1}}
+
+    def record(value, timeout):
+        evidence.append(value)
+        return value
+
+    coordinator = ParallelReasoningCoordinator(cfg, SimpleNamespace(record_decision=record), Client(),
+        diagnostic_mode="first_valid_unscored" if diagnostic else None)
+
+    def generate(messages, md, seed):
+        branch = md["branch_id"]
+        if branch == 0 or other == "loop":
+            loop = {**{k: md[k] for k in ("session_id", "decision_id", "branch_id", "api_attempt_id")},
+                    "native_request_id": f"native-{branch}", "abort_completed": True}
+            terminations.append({"branch_id": branch, "api_attempt_id": md["api_attempt_id"],
+                "native_request_id": f"native-{branch}", "reason": "reasoning_loop", "status": "failed",
+                "reasoning_loop": loop})
+            return Response(client_finish, branch)
+        if other != "normal":
+            raise native_errors(other, branch)
+        return Response("tool_calls", branch)
+
+    def parse(response):
+        parses.append(response.branch)
+        return {"role": "assistant", "extra": {"actions": [{"command": "good"}]}}
+
+    args = ([], {"session_id": "s", "step_id": 0, "query_id": "q"}, generate, parse, lambda response: {"cost": 0})
+    if expected == "winner":
+        assert coordinator.run(*args)["extra"]["actions"] == [{"command": "good"}]
+        assert evidence[0]["selected_branch_id"] == 1
+    elif expected == "format":
+        with pytest.raises(FormatError):
+            coordinator.run(*args)
+    elif expected == "all_parallel_branches_reasoning_loop":
+        with pytest.raises(LimitsExceeded) as raised:
+            coordinator.run(*args)
+        assert raised.value.messages[0]["extra"]["limit_reason"] == expected
+    else:
+        with pytest.raises(Exception) as raised:
+            coordinator.run(*args)
+        assert type(raised.value).__name__ == expected
+    assert 0 not in parses
+    assert evidence[0]["candidates"][0]["reason"] == "reasoning_loop"
+    assert evidence[0]["candidates"][0]["status"] == "ineligible"
+
+
+def test_unproven_native_abort_is_not_mislabeled_as_loop():
+    pytest.importorskip("minisweagent")
+    response = SimpleNamespace(choices=[SimpleNamespace(finish_reason="abort")],
+                               model_dump=lambda **kwargs: {"choices": [{"finish_reason": "abort"}]})
+    records = []
+
+    class Client:
+        def call(self, action, payload):
+            return {"results": [], "estimator_sha256": "sha", "target": "t", "endpoint": "submission"}
+
+    def record(value, timeout):
+        records.append(value)
+        return value
+
+    cfg = {"parallel": {"branch_count": 2, "score_timeout_ms": 1, "fallback_policy": "first_valid"},
+           "generation": {"seed": 42}, "capture": {"control_seconds": 1}}
+    coordinator = ParallelReasoningCoordinator(cfg, SimpleNamespace(record_decision=record), Client())
+    with pytest.raises(ParallelSelectionError):
+        coordinator.run([], {"session_id": "s", "step_id": 0, "query_id": "q"},
+                        lambda *args: response, lambda response: pytest.fail("Abort cannot be parsed"),
+                        lambda response: {"cost": 0})
+    assert all(row["reason"] == "ParallelSelectionError" for row in records[0]["candidates"])
+
+
 @pytest.fixture
 def native_errors():
     pytest.importorskip("minisweagent")

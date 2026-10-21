@@ -1,3 +1,4 @@
+from application.execution.evidence import RunEvidence
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ from enrichment.trajectory import enrich, reasoning_count, reconstruct
 
 def test_success_labels_and_causal_boundaries(cfg):
     rid = import_fixture(cfg, resolved=True)
-    out = enrich(cfg, "dataset", ToyTokenizer())
+    out = enrich({**cfg, "source_run_id": "source"}, "dataset", ToyTokenizer())
     rows = read_json(out / f"{rid}.samples.json")
     assert len(rows) == 4
     opened, closed = rows[:2]
@@ -21,13 +22,13 @@ def test_success_labels_and_causal_boundaries(cfg):
     assert "FUTURE_ACTION_SECRET" not in text and "OBSERVATION_SECRET" not in text
     assert opened["labels"] == {"remaining_steps": 2, "remaining_reasoning_tokens": 5}
     assert closed["labels"] == {"remaining_steps": 2, "remaining_reasoning_tokens": 2}
-    assert enrich(cfg, "dataset", tok) == out  # verified idempotence
+    assert enrich({**cfg, "source_run_id": "source"}, "dataset", tok) == out  # verified idempotence
 
 
 @pytest.mark.parametrize("resolved", [False, None])
 def test_failed_or_ungraded_has_no_success_labels(cfg, resolved):
     rid = import_fixture(cfg, resolved=resolved)
-    out = enrich(cfg, "dataset", ToyTokenizer())
+    out = enrich({**cfg, "source_run_id": "source"}, "dataset", ToyTokenizer())
     for row in read_json(out / f"{rid}.samples.json"):
         assert row["labels"]["remaining_steps"] is None
         assert row["labels"]["remaining_reasoning_tokens"] is None

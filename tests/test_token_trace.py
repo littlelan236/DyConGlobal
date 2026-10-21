@@ -1,3 +1,4 @@
+from application.execution.evidence import RunEvidence
 from pathlib import Path
 
 from conftest import task
@@ -47,7 +48,7 @@ def test_global_remaining_reasoning_label(cfg):
         },
     )
     rid = import_rollout(root, {"source": str(raw), "task": task("trace-task"), "run_id": "trace", "attempt_id": "a0", "purposes": ["training"], "model_fingerprint": "fixture-model"})
-    out = trace_rollout(cfg, rid, TraceTokenizer())
+    out = trace_rollout({**cfg, "source_run_id": "trace"}, rid, TraceTokenizer())
     meta = read_json(out / "token_trace.json")
     assert meta["reasoning_blocks"][0]["content_token_count"] == 3
     assert meta["reasoning_blocks"][1]["content_token_count"] == 1

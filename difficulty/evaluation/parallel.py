@@ -10,7 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from action.datasets.trajectories import read_actions, select_trajectories
-from catalog.store import Catalog
+from application.execution.evidence import RunEvidence
 from core.config import load_snapshot
 from core.io import artifact_dir, identifier, now, owned_path, read_json, sha256, write_json
 from core.locking import exclusive_artifact
@@ -25,12 +25,13 @@ class ParallelEvidenceUnavailable(ValueError):
 def list_parallel_trajectories(cfg, run_id):
     """List catalog identities, including attempts; never silently pick the latest."""
     identifier(run_id)
-    catalog = Catalog(cfg["project_root"]).read()
+    catalog = RunEvidence(cfg["project_root"], run_id).read()
+    run_catalog = catalog
     return sorted(
         [{"rollout_id": rid, "task_id": catalog["tasks"][r["task_key"]]["instance_id"],
           "attempt_id": r["attempt_id"], "termination_reason": r["termination_reason"],
           "resolved": r["resolved"], "quarantined": bool(r["provenance"].get("quarantined"))}
-         for rid, r in catalog["rollouts"].items() if r["run_id"] == run_id],
+         for rid, r in run_catalog["rollouts"].items()],
         key=lambda r: (r["task_id"], r["attempt_id"], r["rollout_id"]),
     )
 
@@ -55,7 +56,7 @@ def _session(root, rollout_id):
 def collect_parallel_scores(cfg, run_id, rollout_id, *, identity_mode=None):
     """Join receipt-checked decisions with finalized actual assistant steps."""
     root = Path(cfg["project_root"])
-    selection = select_trajectories(cfg, [rollout_id])
+    selection = select_trajectories(cfg, run_id, [rollout_id])
     source = selection["sources"][0]
     if source["run_id"] != run_id:
         raise ValueError("Requested rollout belongs to a different run")
@@ -209,7 +210,7 @@ def visualize_parallel(cfg, run_id, plot_id, *, rollout_id=None, task_id=None,
         raise ValueError("Choose one --rollout-id or --task-id; --attempt-id requires --task-id")
     if step_start < 0 or (step_end is not None and step_end < step_start):
         raise ValueError("Step range must be nonnegative and inclusive end >= start")
-    out = artifact_dir(cfg, "difficulty", plot_id, "evaluation/outputs")
+    out = artifact_dir(cfg, "difficulty", plot_id, "evaluations")
     if out.exists():
         raise FileExistsError(f"Use a new plot ID: {out}")
     if task_id:
@@ -254,7 +255,7 @@ def visualize_parallel(cfg, run_id, plot_id, *, rollout_id=None, task_id=None,
         write_json(stage / "selection.json", data["selection"])
         write_json(stage / "summary.json", summary)
         write_json(stage / "receipt.json", {
-            "schema_version": 1, "created_at": summary["created_at"],
+            "schema_version": 1, "state": "complete", "created_at": summary["created_at"],
             "source_hashes": data["source_hashes"],
             "code": {str(p): sha256(Path(__file__).resolve().parents[2] / p)
                      for p in ["difficulty/evaluation/parallel.py", "difficulty/evaluation/visualize.py"]},

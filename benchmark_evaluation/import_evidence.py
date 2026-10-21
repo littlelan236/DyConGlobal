@@ -3,7 +3,7 @@
 import shutil
 from pathlib import Path
 
-from catalog.store import Catalog
+from application.execution.evidence import RunEvidence
 from core.io import identifier, read_json, sha256, write_json
 from core.locking import file_lock
 
@@ -15,8 +15,12 @@ def import_evaluation(root, spec):
     if sha256(source) != spec["report_sha256"]:
         raise ValueError("Source report checksum mismatch")
     original = read_json(source)
-    catalog = Catalog(root)
-    current = catalog.read()
+    # Imported evidence is bound to the run named by each rollout.
+    run_id = spec.get("run_id")
+    if not run_id:
+        raise ValueError("Evaluation import requires run_id")
+    run_catalog = RunEvidence(root, run_id)
+    current = run_catalog.read()
     outcomes = {}
     for rid, binding in spec["bindings"].items():
         rollout = current["rollouts"][rid]
@@ -36,7 +40,7 @@ def import_evaluation(root, spec):
     if not outcomes:
         raise ValueError("No explicit rollout bindings in evaluation import")
     with file_lock(root / f"state/evaluation-import-{eval_id}.lock"):
-        out = root / "runs" / ("import-" + eval_id) / "harness"
+        out = root / "runs" / run_id / "harness" / "imports" / eval_id
         if out.exists():
             raise FileExistsError(out)
         out.mkdir(parents=True)
@@ -49,7 +53,7 @@ def import_evaluation(root, spec):
             "source_report": str(source),
         }
         write_json(out / "summary.json", report)
-        catalog.record_evaluation(
+        RunEvidence(root, run_id).record_evaluation(
             eval_id,
             out / "summary.json",
             outcomes,

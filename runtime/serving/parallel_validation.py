@@ -12,10 +12,10 @@ from pathlib import Path
 import numpy as np
 import requests
 
-from rollout.model import make_model
 from core.io import read_json, sha256, write_json
 from hidden.artifacts import event_records, read_arrays, read_branch_index
 from hidden.backends.vllm.online import capture_request_metadata
+from rollout.model import make_model
 from runtime.serving.parallel import artifact_contract
 
 
@@ -121,6 +121,9 @@ def validate_parallel_queries(cfg, run_id, factory, runtime):
         # Rotate modes so C is not always favored by warmup/cache order.
         for mode in modes[repeat % len(modes):] + modes[:repeat % len(modes)]:
             run_case(repeat, *mode)
+    loop_check = None
+    if cfg["parallel"].get("reasoning_loop", {}).get("enabled"):
+        loop_check = validate_reasoning_loop_abort(cfg, run_id, factory, runtime, out)
     # Exercise the configured task/branch concurrency through the same model
     # wrapper, admission controller and concurrent publication/finalization.
     branches = cfg["parallel"]["branch_count"]
@@ -143,10 +146,73 @@ def validate_parallel_queries(cfg, run_id, factory, runtime):
     overlap = grouped["parallel_overlap"]
     window = max(r["query_finished_monotonic"] for r in overlap) - min(
         r["query_started_monotonic"] for r in overlap)
-    report = {"passed": True, "cases": cases, "metrics": metrics,
+    report = {"passed": True, "cases": cases, "metrics": metrics, "reasoning_loop_abort": loop_check,
               "overlap": {"groups": groups, "branches_per_group": branches,
                           "query_window_ms": window * 1000,
                           "completion_tokens_per_wall_second": sum(r["completion_tokens"] for r in overlap) / window},
               "scope": "small natural-query diagnostic; shared GPUs, variable lengths, no success-rate claim"}
     write_json(out / "report.json", report)
     return {"passed": True, "metrics": metrics, "report": str(out / "report.json")}
+
+
+def validate_reasoning_loop_abort(cfg, run_id, factory, runtime, out):
+    """Controlled token repetition through the same real non-streaming transport.
+
+    This check-only case uses the existing native allowed-token diagnostic
+    mechanism. It never executes tools and does not create training trajectories.
+    """
+    from minisweagent.exceptions import LimitsExceeded
+
+    controller, inventory = runtime["capture_controller"], runtime["capture_token_inventory"]
+    sid = f"startup-loop-{run_id}"
+    md = capture_request_metadata(sid, "startup-loop", run_id, sid, 0, cfg["capture"]["anchors"],
+        newline_token_ids=inventory["newline_token_ids"], close_token_ids=inventory["close_token_ids"],
+        tokenizer_fingerprint=inventory["tokenizer_fingerprint"], capture_select=inventory["capture_select"])
+    controller.start(md)
+    model = make_model(cfg, factory.deadline, md, runtime)
+    model.config.model_kwargs["extra_body"]["allowed_token_ids"] = [inventory["newline_token_ids"][0]]
+    options = cfg["parallel"]["reasoning_loop"]
+    max_tokens = max(options["min_generated_tokens"], options["min_repeated_tokens"],
+                     options["repeat_count"]) + options["check_interval_tokens"] * 8 + 1024
+    model.config.model_kwargs["max_tokens"] = max_tokens
+    messages = [{"role": "user", "content": "Controlled reasoning loop abort diagnostic; do not execute tools."}]
+    started = time.monotonic()
+    try:
+        model.query(messages)
+    except LimitsExceeded as exc:
+        if exc.messages[-1]["extra"].get("limit_reason") != "all_parallel_branches_reasoning_loop":
+            raise
+        exit_message = exc.messages[-1]
+    else:
+        raise ValueError("Controlled repeated-token branches did not stop with LimitsExceeded")
+    decisions = [row for row in controller.parallel_decisions.values() if row["session_id"] == sid]
+    if len(decisions) != 1 or decisions[0]["selected_branch_id"] is not None:
+        raise ValueError("Loop abort must preserve exactly one decision with no winner")
+    branches = []
+    for candidate in decisions[0]["candidates"]:
+        receipt = controller.request_outputs[candidate["native_request_id"]]
+        evidence = receipt.get("reasoning_loop") or {}
+        if (candidate["reason"] != "reasoning_loop" or receipt.get("finish_reason") != "abort"
+                or not evidence.get("abort_completed") or len(receipt["output_token_ids"]) >= max_tokens):
+            raise ValueError("Native loop branch did not abort before its output limit")
+        branches.append({"branch_id": candidate["branch_id"], "native_request_id": receipt["request_id"],
+                         "output_tokens": len(receipt["output_token_ids"]), "limit": max_tokens,
+                         "reasoning_loop": evidence})
+    path = out / "reasoning-loop-abort.json"
+    write_json(path, {"messages": [*messages, exit_message], "branches": branches, "diagnostic": True})
+    endpoint = cfg["serving"]["base_url"].removesuffix("/v1").rstrip("/")
+    response = requests.post(endpoint + "/dycon/capture/engine/flush", timeout=cfg["capture"]["finalize_seconds"])
+    response.raise_for_status()
+    controller.stop(sid)
+    controller.prepare_trajectory(sid, path)
+    finalized = controller.finalize(sid, rollout_id=sid, trajectory_path=str(path),
+        trajectory_sha256=sha256(path), model_fingerprint=cfg["model"]["fingerprint"])
+    # An all-aborted diagnostic has no accepted assistant and no close hidden.
+    # Its partial session is retained explicitly; normal cases require complete.
+    coverage = read_json(controller.export_root / f"sessions/{sid}/parallel/branch-coverage.json")
+    if coverage["missing"] or len(coverage["not_required"]) != len(branches):
+        raise ValueError("Loop abort close requirements were not classified")
+    return {"passed": True, "query_ms": (time.monotonic() - started) * 1000,
+            "session_id": sid, "branches": branches, "actions_executed": False,
+            "capture_status": finalized["capture_status"],
+            "scope": "controlled native allowed-token diagnostic; no accepted assistant or close tensor"}

@@ -3,8 +3,6 @@ paths:
   nas_root: /VM/wangtianyi/DyConGlobal
 benchmark:
   partition: null
-  purposes: []
-  profile: null
 model:
   path: /VM/wangtianyi/DyConGlobal/models/Qwen3.5-9B
   fingerprint: f97643c15ea3cb04517379dd13482b48548458c3a3f6c3a7eb93dcaa6adf86a2
@@ -41,6 +39,8 @@ generation:
   preserve_thinking: true
   thinking_token_budget: null
 agent:
+  loop_repeat_limit: 8
+  loop_max_period: 7
   step_limit: 250
   cost_limit: 0.0
   max_consecutive_format_errors: 10
@@ -316,6 +316,13 @@ capture:
     upload_max_elapsed_seconds: 600
 
 parallel:
+  reasoning_loop:
+    enabled: true
+    min_generated_tokens: 2048
+    repeat_count: 8
+    max_period_tokens: 2048
+    min_repeated_tokens: 1024
+    check_interval_tokens: 64
   enabled: true
   branch_count: 4
   policy: every_step

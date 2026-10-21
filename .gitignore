@@ -52,7 +52,7 @@ desktop.ini
 /capture/**
 /online/**
 
-# Generated business indexes and import/maintenance evidence (source stays tracked)
+# Generated task catalog and run-independent capture indexes (source stays tracked)
 /catalog/manifest.json
 /catalog/manifest.lock
 /catalog/imports/**
@@ -73,11 +73,15 @@ desktop.ini
 /hidden/evaluation/outputs/**
 /hidden/evaluation/*.json
 
-# Estimator/action implementation remains tracked; generated experiments do not
+# Shared difficulty datasets/splits, caches, attempts and derived results
 /difficulty/datasets/*/
+/difficulty/cache/**
 /difficulty/checkpoints/**
 /difficulty/predictions/**
+/difficulty/evaluations/**
 /difficulty/evaluation/outputs/**
+
+# Generated action analysis products
 /action/datasets/*/
 /action/checkpoints/**
 /action/evaluation/outputs/**
@@ -134,6 +138,9 @@ desktop.ini
 *.sqlite3-wal
 *.db-shm
 *.db-wal
+
+# This upstream example is an intentional vendored source asset
+!/vendor/EasySteer/replications/sharp/task_vector_layer-10.npy
 
 # Pinned overlay is separate from EasySteer's redundant embedded vLLM tree
 /vendor/EasySteer/vllm-steer/

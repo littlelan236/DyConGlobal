@@ -91,7 +91,8 @@ class ParallelReasoningCoordinator:
                     candidate.response = generate(messages, candidate.metadata,
                                                   self.cfg["generation"]["seed"] + candidate.branch_id)
                     candidate.cost = calculate_cost(candidate.response)["cost"]
-                    candidate.message = parse(candidate.response)
+                    if candidate.response.choices[0].finish_reason == "abort":
+                        candidate.error = ParallelSelectionError("Native branch aborted without loop evidence")
                 except Exception as exc:
                     candidate.error = exc
                 return candidate
@@ -118,6 +119,29 @@ class ParallelReasoningCoordinator:
             formatted = []
             for candidate in candidates:
                 score = scores.get(candidate.branch_id, {})
+                loop = score.get("reasoning_loop") or {}
+                loop_terminated = (score.get("reason") == "reasoning_loop" and loop.get("abort_completed") is True
+                        and score.get("api_attempt_id") == candidate.metadata["api_attempt_id"]
+                        and score.get("native_request_id") == loop.get("native_request_id")
+                        and all(loop.get(k) == candidate.metadata[k] for k in (
+                            "session_id", "decision_id", "branch_id", "api_attempt_id"))
+                        and candidate.response is not None)
+                if loop_terminated:
+                    from minisweagent.exceptions import LimitsExceeded
+
+                    candidate.message = None
+                    candidate.error = LimitsExceeded({
+                        "role": "exit", "content": "Parallel reasoning loop detected",
+                        "extra": {"exit_status": "LimitsExceeded", "submission": "",
+                                  "limit_reason": "parallel_branch_reasoning_loop", "reasoning_loop": loop},
+                    })
+                elif candidate.response is not None and candidate.error is None:
+                    # LiteLLM normalizes native 'abort' to 'stop'. Bind native
+                    # loop evidence before parsing any partial tool output.
+                    try:
+                        candidate.message = parse(candidate.response)
+                    except Exception as exc:
+                        candidate.error = exc
                 row = {"branch_id": candidate.branch_id, "api_attempt_id": candidate.metadata["api_attempt_id"],
                        "seed": self.cfg["generation"]["seed"] + candidate.branch_id,
                        "native_request_id": score.get("native_request_id"),
@@ -128,6 +152,9 @@ class ParallelReasoningCoordinator:
                        "status": "ineligible", "reason": score.get("reason", score.get("status", "missing")),
                        "response": candidate.response.model_dump(mode="json") if candidate.response else None,
                        "cost": candidate.cost}
+                if loop_terminated:
+                    row["reasoning_loop"] = loop
+                    row["native_finish_reason"] = "abort"
                 if candidate.message is not None:
                     formatted.append(candidate)
                     if self.diagnostic_mode and score.get("status") == "unscored":
@@ -138,7 +165,8 @@ class ParallelReasoningCoordinator:
                         row.update(status="eligible", reason=None)
                         eligible.append(candidate)
                 else:
-                    row["reason"] = type(candidate.error).__name__ if candidate.error else "missing_response"
+                    row["reason"] = "reasoning_loop" if row.get("reasoning_loop") else (
+                        type(candidate.error).__name__ if candidate.error else "missing_response")
                 records.append(row)
             fallback = None
             selection_error = None
@@ -166,6 +194,12 @@ class ParallelReasoningCoordinator:
                         (error for error in branch_errors if isinstance(error, ContextWindowExceededError)),
                         branch_errors[0],
                     )
+                    if all(row["reason"] == "reasoning_loop" for row in records):
+                        selection_error = LimitsExceeded({
+                            "role": "exit", "content": "All parallel branches ended in reasoning loops",
+                            "extra": {"exit_status": "LimitsExceeded", "submission": "",
+                                      "limit_reason": "all_parallel_branches_reasoning_loop"},
+                        })
                 elif not errors:
                     winner = None
                     selection_error = ParallelSelectionError("All parallel API requests failed")

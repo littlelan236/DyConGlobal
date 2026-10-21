@@ -1,6 +1,7 @@
 """Frozen task split, single-site Ridge grid, model selection and artifacts."""
 
 import json
+import hashlib
 import platform
 import sys
 from collections import Counter, defaultdict
@@ -15,15 +16,12 @@ from difficulty.datasets.submission import load_selection, prepare_cache
 from difficulty.models.estimators import inverse_target, transform_target
 from difficulty.models.ridge_grid import RidgeGrid, load_model, predict_model, save_model
 from difficulty.probe_config import RidgeProbe
-from difficulty.training.split import (
-    inherit_task_split,
-    make_event_split,
-    make_split,
-    make_task_threeway_split,
-)
+from difficulty.training.splits import create_split, load_split
 
 LABELS = {"submission_remaining_reasoning_tokens_log1p": "remaining_reasoning_tokens_to_submission",
-          "submission_remaining_steps_linear": "remaining_steps_to_submission"}
+          "submission_remaining_steps_linear": "remaining_steps_to_submission",
+          "submission_remaining_steps_log1p": "remaining_steps_to_submission",
+          "submission_remaining_reasoning_tokens_linear": "remaining_reasoning_tokens_to_submission"}
 
 
 def report(y, prediction):
@@ -84,9 +82,20 @@ def write_jsonl(path, rows):
             stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
 
 
+def save_checkpoint(path, model, metadata):
+    save_model(path, model, metadata)
+    write_json(path.with_suffix('.json'), {
+        'schema_version': 1, 'checkpoint': path.name, 'checkpoint_sha256': sha256(path),
+        'metadata': metadata,
+        'parameter_shapes': {key: list(np.asarray(value).shape) for key, value in model.items()},
+    })
+
+
 def code_evidence(root):
-    names = ["core/config.py", "core/cli.py", "difficulty/probe_config.py",
+    names = ["core/config.py", "core/cli.py", "core/io.py", "difficulty/probe_config.py",
              "difficulty/datasets/submission.py", "difficulty/training/split.py",
+             "difficulty/training/splits.py", "difficulty/datasets/compose.py",
+             "difficulty/receipts.py", "difficulty/datasets/paths.py",
              "difficulty/models/estimators.py", "difficulty/models/ridge_grid.py",
              "difficulty/training/ridge_probe.py"]
     return {name: sha256(root / name) for name in names}
@@ -144,14 +153,40 @@ def draw_plots(output, settings, trials, champions):
 
 
 @exclusive_artifact("difficulty-ridge", "experiment_id")
-def run_probe(cfg, experiment_id, *, mode="fit"):
+def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None):
     assert_frozen(cfg)
     if mode not in {"fit", "dry-run", "check-data"}:
         raise ValueError("Unknown probe mode")
     settings_raw = cfg["difficulty"].get("ridge_probe")
     if settings_raw is None:
         raise ValueError("Configure difficulty.ridge_probe in the unique config.yaml")
+    settings_raw = dict(settings_raw)
+    if dataset_id is not None:
+        from core.io import identifier
+        source = Path(cfg['project_root']) / 'difficulty/datasets' / identifier(dataset_id)
+        rows = read_json(source / 'rollouts.json')['rollouts']
+        n_samples = sum(bool(line.strip()) for line in (source / 'samples.jsonl').read_text().splitlines())
+        settings_raw.update(dataset_id=dataset_id, dataset_receipt_sha256=sha256(source / 'receipt.json'),
+                            expected_tasks=len({(row['repo'], row['instance_id']) for row in rows}),
+                            expected_rollouts=len(rows), expected_samples=n_samples)
+        if split_id is not None:
+            frozen_split = read_json(source / 'splits' / identifier(split_id) / 'split.json')
+            settings_raw.update(split_strategy=frozen_split['strategy'], split_seed=frozen_split['seed'])
     settings = RidgeProbe.model_validate(settings_raw)
+    split_id = split_id or settings.split_id
+    explicit_split = split_id is not None
+    if split_id is None:
+        identity = {"strategy": settings.split_strategy, "seed": settings.split_seed,
+                    "validation_fraction": settings.validation_fraction,
+                    "test_fraction": settings.test_fraction,
+                    "validation_tasks": settings.validation_tasks,
+                    "dataset_receipt_sha256": settings.dataset_receipt_sha256,
+                    "parent_experiment_id": settings.parent_experiment_id,
+                    "parent_receipt_sha256": settings.parent_receipt_sha256}
+        split_id = "auto-" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
+    from core.io import identifier
+    split_id = identifier(split_id)
+    settings = settings.model_copy(update={"split_id": split_id})
     output = artifact_dir(cfg, "difficulty", experiment_id, "checkpoints")
     if output.exists():
         raise FileExistsError(f"Experiment ID already exists (including partial): {output}")
@@ -162,49 +197,41 @@ def run_probe(cfg, experiment_id, *, mode="fit"):
     root = Path(cfg["project_root"])
     before_code = code_evidence(root)
     rollouts, samples, evidence = load_selection(cfg, settings)
-    threeway = settings.split_strategy in {"event_random_v1", "task_random_v1"}
-    if threeway:
-        if settings.split_strategy == "task_random_v1":
-            split = make_task_threeway_split(rollouts, samples, settings.validation_fraction,
-                                            settings.test_fraction, settings.split_seed)
-        else:
-            split = make_event_split(samples, settings.validation_fraction, settings.test_fraction, settings.split_seed)
-        roles = split["role_by_sample"]
-    elif settings.split_strategy == "inherit_task_split_v1":
-        parent_path = Path(cfg["project_root"]) / "difficulty/checkpoints" / settings.parent_experiment_id
-        parent_receipt = parent_path / "receipt.json"
-        if sha256(parent_receipt) != settings.parent_receipt_sha256:
-            raise ValueError("Parent experiment receipt SHA mismatch")
-        proof = read_json(parent_receipt)
-        if proof.get("state") != "complete" or sha256(parent_path / "split.json") != proof["files"]["split.json"]:
-            raise ValueError("Parent split not bound to completed experiment")
-        parent = read_json(parent_path / "split.json")
-        split = inherit_task_split(rollouts, samples, parent, settings.validation_tasks, settings.split_seed)
-        roles = {task["rollout_id"]: task["split"] for task in split["rollouts"]}
-    else:
-        split = make_split(rollouts, samples, settings.validation_tasks, settings.split_seed)
-        roles = {task["rollout_id"]: task["split"] for task in split["tasks"]}
-    role_key = "sample_id" if threeway else "rollout_id"
+    split_path = root / "difficulty/datasets" / settings.dataset_id / "splits" / split_id
+    if not split_path.exists():
+        if explicit_split:
+            raise FileNotFoundError(f"Create the dataset split with dycon difficulty-split first: {split_path}")
+        create_split(root, settings.dataset_id, split_id, strategy=settings.split_strategy,
+                     seed=settings.split_seed, validation_fraction=settings.validation_fraction,
+                     test_fraction=settings.test_fraction, validation_tasks=settings.validation_tasks,
+                     parent_experiment_id=settings.parent_experiment_id,
+                     parent_receipt_sha256=settings.parent_receipt_sha256)
+    split, split_receipt = load_split(root, settings.dataset_id, split_id,
+                                      settings.dataset_receipt_sha256, samples)
+    settings = settings.model_copy(update={
+        "split_strategy": split["strategy"], "split_seed": split["seed"],
+        "validation_fraction": split.get("validation_fraction", settings.validation_fraction),
+        "test_fraction": split.get("test_fraction", settings.test_fraction),
+    })
+    threeway = {"train", "validation", "test"} <= set(split["sample_ids"])
+    roles = {sample_id: role for role, ids in split["sample_ids"].items() for sample_id in ids}
 
     def role_for(sample):
-        return roles[sample[role_key]]
+        return roles[sample["sample_id"]]
 
-    split["dataset_receipt_sha256"] = settings.dataset_receipt_sha256
-    split.pop("role_by_sample", None)
-    split["distributions"] = {}
     split_roles = ("train", "validation", "test") if threeway else ("train", "validation")
-    for role in split_roles:
-        rows = [s for s in samples if role_for(s) == role]
-        task_groups = {s["task_group"] for s in rows}
-        split["distributions"][role] = {
-            "repo_tasks": dict(Counter(repo for _, repo in {(s["task_group"], s["repo"]) for s in rows})),
-            "source_tasks": dict(Counter(source for _, source in {(s["task_group"], s["source_kind"]) for s in rows})),
-            "source_samples": dict(Counter(s["source_kind"] for s in rows)),
-            "task_count": len(task_groups),
-            "rollout_count": len({s["rollout_id"] for s in rows}),
-        }
-    split_sha = hash_json(split)
-    experiment = {"schema_version": 2, "mode": mode, "created_at": now(), "fit_scope": "train",
+    split_sha = sha256(split_path / "split.json")
+    split_receipt_sha = sha256(split_path / "receipt.json")
+    experiment = {"schema_version": 3, "artifact_layout_version": 2,
+                  "attempt_id": experiment_id, "dataset_id": settings.dataset_id, "split_id": split_id,
+                  "dataset_receipt_sha256": settings.dataset_receipt_sha256,
+                  "split_receipt_sha256": split_receipt_sha,
+                  "model_contract": {"model_kind": "ridge", "architecture_id": "linear-ridge-v1",
+                      "feature_schema": "public-hidden-last-token-v1", "input_width": 4096,
+                      "layer_policy": settings.layers, "targets": settings.targets,
+                      "target_transforms": {target: "log1p" if target.endswith("_log1p") else "identity"
+                                            for target in settings.targets}},
+                  "mode": mode, "created_at": now(), "fit_scope": "train",
                   "config": cfg, "settings": settings.model_dump(), "input": evidence,
                   "split_sha256": split_sha, "code": before_code,
                   "environment": {"python": sys.version, "numpy": np.__version__, "platform": platform.platform()},
@@ -213,7 +240,7 @@ def run_probe(cfg, experiment_id, *, mode="fit"):
                                          else "selection validation score, not independent test R^2")}
     output.mkdir(parents=True)
     write_json(output / "experiment.json", experiment)
-    write_json(output / "split.json", split)
+    write_json(output / "attempt.json", experiment)
     if mode == "dry-run":
         finish(output, experiment, root, before_code)
         return {"path": str(output), "mode": mode, "task_counts": split["task_counts"],
@@ -254,9 +281,21 @@ def run_probe(cfg, experiment_id, *, mode="fit"):
                     model = {"coef": coef[:, i], "intercept": intercept[i],
                              "feature_mean": grid.scaler.mean, "feature_scale": grid.scaler.scale}
                     relative = f"models/{target}/site-{layer:02d}/alpha-{alpha:.17g}.npz"
-                    save_model(output / relative, model, {"target": target, "layer": layer, "alpha": alpha,
+                    input_spec = {"source": "public_hidden", "feature_schema": "public-hidden-last-token-v1",
+                                  "public_sites": [layer], "native_site": layer if layer < 31 else 32,
+                                  "feature_transform": "single-site-vector", "dtype": "float32", "width": 4096}
+                    save_checkpoint(output / relative, model, {"target": target, "target_transform":
+                               "log1p" if target.endswith("_log1p") else "identity",
+                               "model_kind": "ridge", "architecture_id": "linear-ridge-v1",
+                               "feature_schema": "public-hidden-last-token-v1",
+                               "input_spec_json": json.dumps(input_spec, sort_keys=True),
+                               "layer": layer, "alpha": alpha,
                                "native_site": layer if layer < 31 else 32, "split_sha256": split_sha,
                                "dataset_receipt_sha256": settings.dataset_receipt_sha256,
+                               "attempt_id": experiment_id,
+                               "model_fingerprint": rollouts[0]['model_fingerprint'],
+                               "dataset_id": settings.dataset_id, "split_id": split_id,
+                               "split_receipt_sha256": split_receipt_sha, "input_width": 4096,
                                "train_sample_ids_sha256": hash_json(split["sample_ids"]["train"]),
                                "fit_scope": "train", "loss": "sum_squared_error; intercept_unpenalized"})
                     trial.update(model=relative, model_sha256=sha256(output / relative))
@@ -290,9 +329,23 @@ def run_probe(cfg, experiment_id, *, mode="fit"):
             refit_model = {"coef": refit_coef[:, i], "intercept": refit_intercept[i],
                            "feature_mean": refit_grid.scaler.mean, "feature_scale": refit_grid.scaler.scale}
             refit_relative = f"models/{target}/site-{winner['layer']:02d}/selected-refit.npz"
-            save_model(output / refit_relative, refit_model, {"target": target, "layer": winner["layer"],
+            input_spec = {"source": "public_hidden", "feature_schema": "public-hidden-last-token-v1",
+                          "public_sites": [winner["layer"]],
+                          "native_site": winner["layer"] if winner["layer"] < 31 else 32,
+                          "feature_transform": "single-site-vector", "dtype": "float32", "width": 4096}
+            save_checkpoint(output / refit_relative, refit_model, {"target": target, "target_transform":
+                       "log1p" if target.endswith("_log1p") else "identity",
+                       "model_kind": "ridge", "architecture_id": "linear-ridge-v1",
+                       "feature_schema": "public-hidden-last-token-v1",
+                       "input_spec_json": json.dumps(input_spec, sort_keys=True),
+                       "layer": winner["layer"],
                        "alpha": winner["alpha"], "native_site": winner["layer"] if winner["layer"] < 31 else 32,
                        "split_sha256": split_sha, "dataset_receipt_sha256": settings.dataset_receipt_sha256,
+                       "attempt_id": experiment_id,
+                       "model_fingerprint": rollouts[0]['model_fingerprint'],
+                       "dataset_id": settings.dataset_id, "split_id": split_id,
+                       "split_receipt_sha256": split_receipt_sha, "input_width": 4096,
+                       "train_sample_ids_sha256": hash_json(split['sample_ids']['train'] + split['sample_ids']['validation']),
                        "fit_scope": "train_validation", "loss": "sum_squared_error; intercept_unpenalized"})
             pfit, ptest = refit_z @ refit_coef[:, i] + refit_intercept[i], test_z @ refit_coef[:, i] + refit_intercept[i]
             validation_model = load_model(output / winner["model"])
@@ -364,8 +417,17 @@ def run_probe(cfg, experiment_id, *, mode="fit"):
 def finish(output, experiment, root, before_code):
     if code_evidence(root) != before_code:
         raise ValueError("Implementation changed during experiment")
+    dataset = root / 'difficulty/datasets' / experiment['dataset_id']
+    if sha256(dataset / 'receipt.json') != experiment['dataset_receipt_sha256']:
+        raise ValueError('Dataset changed during experiment')
+    split = dataset / 'splits' / experiment['split_id']
+    if (sha256(split / 'receipt.json') != experiment['split_receipt_sha256']
+            or sha256(split / 'split.json') != experiment['split_sha256']):
+        raise ValueError('Split changed during experiment')
     write_json(output / "receipt.json", {"schema_version": 1, "state": "complete", "mode": experiment["mode"],
                "completed_at": now(), "dataset_receipt_sha256": experiment["input"]["receipt_sha256"],
+               "dataset_id": experiment["dataset_id"], "split_id": experiment["split_id"],
+               "split_receipt_sha256": experiment["split_receipt_sha256"],
                "split_sha256": experiment["split_sha256"], "code": before_code,
                "files": {str(p.relative_to(output)): sha256(p) for p in sorted(output.rglob("*"))
                          if p.is_file() and p.name != "receipt.json"}})

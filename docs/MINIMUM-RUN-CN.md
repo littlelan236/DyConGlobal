@@ -28,7 +28,7 @@ cd /home/wangtianyi/DyConGlobal
 .venvs/runner/bin/dycon benchmark-pull COHORT_ID --count 600
 ```
 
-历史轨迹、评测、hidden 元数据先显式筛选，再由隔离转换工具生成新版产物和 provenance；不得把旧 progress/PID 转成可 resume 状态。历史隔离、备份和转换边界见 [入口约定](ENTRYPOINTS.md#2-run-与产物)。跨轨迹比较可用 `baseline-select PROFILE TASK_KEY ROLLOUT_ID` 冻结参考轨迹；baseline 是比较用途。
+历史轨迹、评测、hidden 元数据先显式筛选，再由隔离转换工具生成新版产物和 provenance；不得把旧 progress/PID 转成可 resume 状态。历史隔离、备份和转换边界见 [入口约定](ENTRYPOINTS.md#2-run-与产物)。跨运行比较须明确来源 run，并用冻结 selection 指定轨迹；全局 baseline profile 已删除。
 
 ## 3. 创建 run，启动 rollout
 
@@ -119,29 +119,37 @@ enrichment 生成 open/close prefix、remaining labels 和 coverage；token trac
 
 上述 `--run-id RUN_ID` 指定输出和配置归属，rollout IDs 指定来源轨迹；也可用同样的方式绑定预测和绘图。分类直接读取 canonical trajectory，生成互斥 taxonomy 标签、统计与 receipt，不依赖 enrichment。action-index 引用已有 hidden，不重复提取。action taxonomy 学习、训练与独立评测尚无正式实现。
 
-## 10. Difficulty 训练、发布和预测评估
+## 10. Difficulty 数据、划分、训练和评估
 
 ```bash
-.venvs/analysis/bin/dycon --run-id RUN_ID difficulty-ridge EXPERIMENT_ID --mode dry-run
-# 数据、split、targets 确认后才运行 fit。
-.venvs/analysis/bin/dycon --run-id RUN_ID difficulty-ridge EXPERIMENT_ID --mode fit
-.venvs/runner/bin/dycon --run-id RUN_ID predictor-publish PREDICTOR_ID \
-  --experiment runs/RUN_ID/difficulty/checkpoints/EXPERIMENT_ID --target reasoning_length
-.venvs/runner/bin/dycon --run-id RUN_ID difficulty-predict INDEX_ID \
-  runtime/parallel-artifacts/PREDICTOR_ID/manifest.json PREDICTION_ID
-.venvs/analysis/bin/dycon --run-id RUN_ID difficulty-evaluate INDEX_ID \
-  runs/RUN_ID/difficulty/predictions/PREDICTION_ID/predictions.json SCORE_ID
+# 每个 SOURCE_RUN 单独生成索引/成功轨迹训练集；可组合多个训练集。
+.venvs/analysis/bin/dycon online-index SOURCE_RUN INDEX_ID
+.venvs/analysis/bin/dycon difficulty-dataset resolved DATASET_ID --source-run SOURCE_RUN --index-id INDEX_ID
+.venvs/analysis/bin/dycon difficulty-dataset compose COMBINED_ID --source-dataset DATASET_A --source-dataset DATASET_B
+.venvs/analysis/bin/dycon difficulty-split DATASET_ID SPLIT_ID --strategy event_random_v1 --seed 42
+.venvs/analysis/bin/dycon difficulty-ridge PLAN_ID --dataset-id DATASET_ID --split-id SPLIT_ID --mode dry-run
+.venvs/analysis/bin/dycon difficulty-ridge ATTEMPT_ID --dataset-id DATASET_ID --split-id SPLIT_ID --mode fit
+.venvs/analysis/bin/dycon artifact verify ATTEMPT_ID --scope difficulty-attempt
+.venvs/runner/bin/dycon predictor-publish PREDICTOR_ID --experiment difficulty/checkpoints/ATTEMPT_ID --target reasoning_length
+.venvs/runner/bin/dycon difficulty-predict INDEX_ID runtime/parallel-artifacts/PREDICTOR_ID/manifest.json PREDICTION_ID
+.venvs/analysis/bin/dycon difficulty-evaluate INDEX_ID difficulty/predictions/PREDICTION_ID/predictions.json SCORE_ID
 ```
 
-训练输入 dataset/receipt 在根配置指定；已存在的全局实验也可显式传其真实路径发布。Ridge CLI 负责冻结数据/split、层×alpha 选择及报告；predictor 发布模型 fingerprint、sites、target、checkpoint hash，供 parallel 在线评分。`difficulty-evaluate` 读取真实外部 predictions；不能用 GT 伪造预测验收。通用 MLP/Ridge+FFN 有 Python API，尚无完整通用训练 CLI。不同 index schema 的适用范围见入口表。
+训练参数仍在唯一 `config.yaml` 的 `difficulty.ridge_probe`；允许的 `--set` 只影响新 attempt，effective settings 与源码/环境 hash 写入 attempt.json。
+dataset、split、attempt 均有独立 ID 和不可覆盖的 receipt；输出始终位于 `difficulty/`，无需 analysis run。
+dataset split 在 `difficulty/datasets/DATASET_ID/splits/SPLIT_ID/`；模型/报告在 `difficulty/checkpoints/ATTEMPT_ID/`。
+checkpoint 的 NPZ 与 JSON 标明架构、输入 site/维度、target/变换、数据/划分 receipt 和 fit scope。
+独立预测与评估分别写入 `difficulty/predictions/ID/`、`difficulty/evaluations/ID/`。
+schema 1 scorer/predictor 的现有能力边界保持；通用 MLP/Ridge+FFN 当前仍是 Python API。
+旧 run 目录保持原样，可显式提供旧 index/experiment 目录读取，不能用相同 ID 隐式回退。
 
 ## 11. 并行分支可视化和评分稳定性
 
 ```bash
-.venvs/analysis/bin/dycon --run-id RUN_ID difficulty-plot-parallel SOURCE_RUN_ID --list
-.venvs/analysis/bin/dycon --run-id RUN_ID difficulty-plot-parallel SOURCE_RUN_ID PLOT_ID \
+.venvs/analysis/bin/dycon difficulty-plot-parallel SOURCE_RUN_ID --list
+.venvs/analysis/bin/dycon difficulty-plot-parallel SOURCE_RUN_ID PLOT_ID \
   --rollout-id ROLLOUT_ID
-.venvs/analysis/bin/dycon --run-id RUN_ID difficulty-evaluate-parallel SOURCE_RUN_ID INSTABILITY_ID \
+.venvs/analysis/bin/dycon difficulty-evaluate-parallel SOURCE_RUN_ID INSTABILITY_ID \
   --rollout-id ROLLOUT_ID
 ```
 
@@ -156,3 +164,7 @@ enrichment 生成 open/close prefix、remaining labels 和 coverage；token trac
 日常清单不承载单批次结果。2026-10-21 的两题回归、baseline/parallel、离线重放数值对照和迁移记录保存在各 run、工程外 `/home/wangtianyi/dycon-isolation-20261021/` 以及本次 docs 原文归档；位置见 [入口约定](ENTRYPOINTS.md#9-文档历史与追溯)。旧 snapshot/receipt 不因文档整理而变更。
 
 没有真实匹配 payload 时不执行 steering 验收；已有数值 checkpoint 的发布/推理不等于训练完成。`run cancel` 当前只是写取消请求，`reconcile` 当前主要做快照一致性检查；执行和恢复边界见入口表。
+
+## Run 级轨迹选择
+
+Catalog 只维护 benchmark tasks；轨迹/评测写到 `runs/RUN_ID/evidence.json`。本次仅迁移 `migration-closeonly331-20261021`。新建数据集可用 `online-index SOURCE_RUN INDEX_ID --rollout-list FILE`，随后 `difficulty-dataset resolved DATASET_ID --source-run SOURCE_RUN --index-id INDEX_ID --rollout-list FILE`。列表中的轨迹必须属于给出的来源 run。

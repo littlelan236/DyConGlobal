@@ -22,8 +22,9 @@ TARGETS = {
 }
 
 
-def _experiment_checkpoint(directory, target, fit_scope, fingerprint):
-    experiment = read_json(directory / "experiment.json")
+def _experiment_checkpoint(directory, target, fit_scope, fingerprint, project_root):
+    attempt_path = directory / "attempt.json"
+    experiment = read_json(attempt_path if attempt_path.is_file() else directory / "experiment.json")
     selected = read_json(directory / "selected.json")
     metrics = read_json(directory / "metrics.json")
     if experiment["config"]["model"]["fingerprint"] != fingerprint:
@@ -50,14 +51,37 @@ def _experiment_checkpoint(directory, target, fit_scope, fingerprint):
     if metrics[target]["selected"] != winner:
         raise ValueError("Metrics and selected checkpoint disagree")
     model = owned_path(directory, metrics[target]["refit_model"] if fit_scope == "refit" else winner["model"])
+    root = Path(project_root).resolve()
     scope = "train_validation" if fit_scope == "refit" else "train"
     with np.load(model, allow_pickle=False) as data:
         expected = {"target": target, "layer": winner["layer"], "alpha": winner["alpha"],
                     "fit_scope": scope, "split_sha256": experiment["split_sha256"],
-                    "dataset_receipt_sha256": experiment["input"]["receipt_sha256"]}
+                    "dataset_receipt_sha256": experiment.get("dataset_receipt_sha256") or experiment["input"]["receipt_sha256"]}
+        input_spec = {"source": "public_hidden", "feature_schema": "public-hidden-last-token-v1",
+                      "public_sites": [winner["layer"]],
+                      "native_site": winner["layer"] if winner["layer"] < 31 else 32,
+                      "feature_transform": "single-site-vector", "dtype": "float32", "width": 4096}
+        if experiment.get("artifact_layout_version", 1) >= 2:
+            expected.update({"dataset_id": experiment["dataset_id"], "split_id": experiment["split_id"],
+                             "split_receipt_sha256": experiment["split_receipt_sha256"],
+                             "model_kind": "ridge", "architecture_id": "linear-ridge-v1",
+                             "feature_schema": "public-hidden-last-token-v1", "input_width": 4096,
+                             "target_transform": "log1p" if target.endswith("_log1p") else "identity",
+                             "input_spec_json": json.dumps(input_spec, sort_keys=True)})
         if any(key not in data or data[key].item() != value for key, value in expected.items()):
             raise ValueError("Checkpoint metadata disagrees with experiment selection/refit")
-    if hash_json(read_json(directory / "split.json")) != experiment["split_sha256"]:
+    if experiment.get("artifact_layout_version", 1) >= 2:
+        from difficulty.artifacts import verify
+        verified = verify(root, 'difficulty-attempt', experiment['attempt_id'])
+        if Path(verified['path']).resolve() != directory.resolve():
+            raise ValueError('Attempt directory differs from its registered identity')
+        split_path = (root / "difficulty/datasets" / experiment["dataset_id"] / "splits" /
+                      experiment["split_id"] / "split.json")
+        split_receipt_path = split_path.parent / "receipt.json"
+        if (sha256(split_receipt_path) != experiment["split_receipt_sha256"]
+                or sha256(split_path) != experiment["split_sha256"]):
+            raise ValueError("Frozen dataset-owned split changed")
+    elif hash_json(read_json(directory / "split.json")) != experiment["split_sha256"]:
         raise ValueError("Frozen experimental split changed")
     return model, {
         "experiment": str(directory), "selection_metric": "validation_pooled_r2",
@@ -90,10 +114,20 @@ def publish_predictor(cfg, predictor_id, *, experiment=None, checkpoint=None,
         if loader != RIDGE_LOADER:
             raise ValueError("Automatic Ridge experiment selection requires the Ridge provider")
         directory = (root / experiment).resolve()
-        checkpoint, provenance = _experiment_checkpoint(directory, target, fit_scope, cfg["model"]["fingerprint"])
+        checkpoint, provenance = _experiment_checkpoint(
+            directory, target, fit_scope, cfg["model"]["fingerprint"], root)
+        experiment_manifest = read_json(directory / ("attempt.json" if (directory / "attempt.json").is_file()
+                                                     else "experiment.json"))
         provenance["selection"] = "validation_best"
         evidence = [directory / name for name in
-                    ["experiment.json", "selected.json", "metrics.json", "trials.jsonl", "split.json"]]
+                    ["experiment.json", "attempt.json", "selected.json", "metrics.json", "trials.jsonl"]
+                    if (directory / name).is_file()]
+        if experiment_manifest.get("artifact_layout_version", 1) >= 2:
+            split_path = (root / "difficulty/datasets" / experiment_manifest["dataset_id"] / "splits" /
+                          experiment_manifest["split_id"])
+            evidence += [split_path / "split.json", split_path / "receipt.json"]
+        else:
+            evidence.append(directory / "split.json")
     checkpoint = (root / checkpoint).resolve()
     if not checkpoint.is_file():
         raise FileNotFoundError(checkpoint)
@@ -103,6 +137,19 @@ def publish_predictor(cfg, predictor_id, *, experiment=None, checkpoint=None,
 
         model = load_model(checkpoint)
         with np.load(checkpoint, allow_pickle=False) as data:
+            if 'attempt_id' in data:
+                from difficulty.artifacts import verify
+                attempt_id = str(data['attempt_id'].item())
+                proof = verify(root, 'difficulty-attempt', attempt_id)
+                attempt_dir = Path(proof['path'])
+                receipt = read_json(attempt_dir / 'receipt.json')
+                if not checkpoint.is_relative_to(attempt_dir):
+                    raise ValueError('Checkpoint is outside its bound training attempt')
+                relative = checkpoint.relative_to(attempt_dir).as_posix()
+                if receipt['files'].get(relative) != sha256(checkpoint):
+                    raise ValueError('Checkpoint is not registered by its training receipt')
+                if data['model_fingerprint'].item() != cfg['model']['fingerprint']:
+                    raise ValueError('Checkpoint hidden model fingerprint mismatch')
             if "target" in data and data["target"].item() != target:
                 raise ValueError("Checkpoint target differs from requested target")
             if "layer" in data:
@@ -113,6 +160,14 @@ def publish_predictor(cfg, predictor_id, *, experiment=None, checkpoint=None,
             for name in ["alpha", "fit_scope", "native_site"]:
                 if name in data:
                     provenance[name] = data[name].item()
+            if "input_spec_json" in data:
+                input_spec = json.loads(data["input_spec_json"].item())
+                if input_spec.get("public_sites") != sites or input_spec.get("width") != len(model["coef"]):
+                    raise ValueError("Checkpoint input specification differs from predictor contract")
+                provenance["model_kind"] = str(data["model_kind"].item())
+                provenance["architecture_id"] = str(data["architecture_id"].item())
+                provenance["dataset_id"] = str(data["dataset_id"].item()) if "dataset_id" in data else None
+                provenance["split_id"] = str(data["split_id"].item()) if "split_id" in data else None
         if hidden_size is not None and hidden_size != len(model["coef"]):
             raise ValueError("Requested hidden width differs from trained checkpoint")
         hidden_size = len(model["coef"])

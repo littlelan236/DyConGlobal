@@ -79,6 +79,8 @@ class Agent(Strict):
     step_limit: int = Field(gt=0)
     cost_limit: float = Field(ge=0)
     max_consecutive_format_errors: int = Field(gt=0)
+    loop_repeat_limit: int | None = Field(default=None, ge=2)
+    loop_max_period: int = Field(default=7, ge=1, le=7)
     system_template: str
     instance_template: str
     observation_template: str
@@ -160,8 +162,6 @@ class Hidden(Strict):
 
 class Benchmark(Strict):
     partition: Literal["train", "val", "test", "excluded"] | None
-    purposes: list[Literal["training", "baseline", "action_analysis"]]
-    profile: str | None
 
 
 class CaptureExport(Strict):
@@ -237,6 +237,15 @@ class Action(Strict):
     taxonomy: None
 
 
+class ParallelReasoningLoop(Strict):
+    enabled: bool = False
+    min_generated_tokens: int = Field(default=2048, ge=1, le=81920)
+    repeat_count: int = Field(default=8, ge=2, le=32)
+    max_period_tokens: int = Field(default=2048, ge=1, le=8192)
+    min_repeated_tokens: int = Field(default=1024, ge=1, le=65536)
+    check_interval_tokens: int = Field(default=64, ge=1, le=1024)
+
+
 class Parallel(Strict):
     """Optional branch selection; the predictor is supplied by a later adapter."""
 
@@ -253,6 +262,7 @@ class Parallel(Strict):
     save_sites: list[int] = []
     fallback_policy: Literal["first_valid", "stop"] = "first_valid"
     validation_repetitions: int = Field(default=0, ge=0, le=10)
+    reasoning_loop: ParallelReasoningLoop = Field(default_factory=ParallelReasoningLoop)
 
     @model_validator(mode="after")
     def validate_policy(self):
@@ -361,11 +371,17 @@ def resolve(path, overrides=()):
             raise ValueError(f"Unknown config field: {dotted}")
         target[keys[-1]] = yaml.safe_load(value)
     cfg = Config.model_validate(raw).model_dump()
+    # Adding optional loop protection must not change legacy config identities.
+    for field in ("loop_repeat_limit", "loop_max_period"):
+        if field not in raw["agent"]:
+            cfg["agent"].pop(field)
     # Preserve old snapshot/config identities when the new optional pilot is absent.
     if "ridge_probe" not in raw.get("difficulty", {}):
         cfg["difficulty"].pop("ridge_probe")
     if "parallel" not in raw:
         cfg.pop("parallel")
+    elif "reasoning_loop" not in raw["parallel"]:
+        cfg["parallel"].pop("reasoning_loop")
     root = path.parent
     if cfg.get("parallel", {}).get("enabled") and cfg["parallel"]["branch_count"] > 1:
         from runtime.serving.parallel import artifact_contract

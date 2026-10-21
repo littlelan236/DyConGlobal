@@ -1,3 +1,4 @@
+from application.execution.evidence import RunEvidence
 import shutil
 from pathlib import Path
 
@@ -74,7 +75,7 @@ def test_migration_deduplicates_without_spreading_same_patch_labels(cfg, legacy)
     result = apply(root, plan)
     assert result["unique_trajectories"] == 3 and result["total_source_files"] == 4
     assert result["status_counts"] == {"resolved": 1, "submitted": 1, "unsubmitted": 1}
-    data = Catalog(root).read()
+    data = RunEvidence(root, "legacy-eval-run").read()
     assert all(t["partition"] == "train" for t in data["tasks"].values())
     rows = {r["trajectory_sha256"]: r for r in data["rollouts"].values()}
     assert rows[sha256(paths[0])]["resolved"] is None
@@ -86,7 +87,7 @@ def test_migration_deduplicates_without_spreading_same_patch_labels(cfg, legacy)
     assert rows[sha256(paths[2])]["evaluation_status"] == "infra_error"
     assert all(r["purposes"] == ["training"] for r in rows.values())
     assert apply(root, plan) == result
-    assert Catalog(root).read()["catalog_revision"] == data["catalog_revision"]
+    assert RunEvidence(root, "legacy-eval-run").read()["revision"] == data["revision"]
 
 
 def test_migration_rejects_changed_trajectory_before_catalog_write(cfg, legacy):
@@ -96,7 +97,7 @@ def test_migration_rejects_changed_trajectory_before_catalog_write(cfg, legacy):
     paths[0].write_text("{}")
     with pytest.raises(ValueError, match="Source trajectory changed"):
         apply(root, plan)
-    assert Catalog(root).read()["rollouts"] == {}
+    assert RunEvidence(root, "source").read()["rollouts"] == {}
 
 
 def test_migration_rejects_modified_evaluated_patch(cfg, legacy):
@@ -108,7 +109,7 @@ def test_migration_rejects_modified_evaluated_patch(cfg, legacy):
     patch.write_text("different")
     with pytest.raises(ValueError, match="differs from frozen predictions"):
         apply(root, plan)
-    assert Catalog(root).read()["rollouts"] == {}
+    assert RunEvidence(root, "source").read()["rollouts"] == {}
 
 
 def test_migration_rejects_conflicting_completed_evidence(cfg, legacy):
@@ -119,7 +120,7 @@ def test_migration_rejects_conflicting_completed_evidence(cfg, legacy):
     write_json(f, summary)
     with pytest.raises(ValueError, match="Conflicting completed results"):
         prepare(cfg["project_root"], src, report, "conflict")
-    assert Catalog(cfg["project_root"]).read()["rollouts"] == {}
+    assert RunEvidence(cfg["project_root"], "source").read()["rollouts"] == {}
 
 
 def test_report_requires_explicit_run_scope(tmp_path):

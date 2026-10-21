@@ -25,8 +25,8 @@ def recover_online(cfg, run_id):
         for path in sorted((spool.root / "sessions").glob("*/finalization.json")):
             sid = path.parent.name
             finalization = read_json(path)
-            from catalog.store import verified_trajectory
-            trajectory = verified_trajectory(frozen["project_root"], finalization)
+            from application.execution.evidence import verified_trajectory
+            trajectory = verified_trajectory(frozen["project_root"], {**finalization, "producer_run_id": run_id})
             if sha256(trajectory) != finalization["trajectory_sha256"]:
                 raise ValueError("Recovery trajectory hash mismatch")
             coverage = read_json(path.parent / "coverage.json")

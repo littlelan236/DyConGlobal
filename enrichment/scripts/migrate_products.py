@@ -7,11 +7,11 @@ import json
 import shutil
 from pathlib import Path
 
-from catalog.store import Catalog
+from application.execution.evidence import RunEvidence
 from core.io import now, read_json, sha256, write_json
 
 
-def migrate(root, source, migration_id):
+def migrate(root, source, migration_id, source_run):
     root, source = Path(root).resolve(), Path(source).resolve()
     out_e = root / f"enrichment/outputs/{migration_id}"
     out_h = root / f"hidden/outputs/{migration_id}"
@@ -19,7 +19,7 @@ def migrate(root, source, migration_id):
     hm = root / "hidden/manifest.json"
     if em.exists() or hm.exists() or out_e.exists() or out_h.exists():
         raise FileExistsError("manifest/output already exists")
-    catalog = Catalog(root)
+    catalog = RunEvidence(root, source_run)
     catalog.verify()
     data = catalog.read()
     current = {r["trajectory_sha256"]: (rid, r) for rid, r in data["rollouts"].items()}
@@ -173,8 +173,9 @@ def main():
     p.add_argument("--root", type=Path, required=True)
     p.add_argument("--source", type=Path, required=True)
     p.add_argument("--migration-id", required=True)
+    p.add_argument("--source-run", required=True)
     a = p.parse_args()
-    migrate(a.root, a.source, a.migration_id)
+    migrate(a.root, a.source, a.migration_id, a.source_run)
 
 
 if __name__ == "__main__":

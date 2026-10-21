@@ -8,10 +8,11 @@ import traceback
 from pathlib import Path
 
 from catalog.store import Catalog
-from rollout.artifacts import import_rollout
+from application.execution.evidence import RunEvidence
 from core.config import load_snapshot, snapshot
 from core.io import identifier, now, read_json, sha256, update_status, write_json
 from core.locking import exclusive_run, file_lock
+from rollout.artifacts import import_rollout
 
 TERMINAL = {
     "Submitted",
@@ -37,9 +38,9 @@ INFRASTRUCTURE = {
 def run_task(cfg, run_id, task_key, task, factory, runtime=None):
     runtime = runtime or {}
     os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+    from hidden.backends.vllm.online import CaptureClient, capture_request_metadata
     from rollout.agent import DurableAgent
     from rollout.model import make_model
-    from hidden.backends.vllm.online import CaptureClient, capture_request_metadata
     from runtime.containers.factory import TaskContext
     from runtime.containers.rollout_adapter import RolloutEnvironment
 
@@ -121,6 +122,8 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None):
                     step_limit=cfg["agent"]["step_limit"],
                     cost_limit=cfg["agent"]["cost_limit"],
                     max_consecutive_format_errors=cfg["agent"]["max_consecutive_format_errors"],
+                    loop_repeat_limit=cfg["agent"].get("loop_repeat_limit"),
+                    loop_max_period=cfg["agent"].get("loop_max_period", 7),
                     output_path=path,
                 )
                 info = agent.run(task["instance"]["problem_statement"])
@@ -191,7 +194,7 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None):
                 },
             )
             if capture_client is not None and capture_session_id is not None:
-                canonical = root / Catalog(root).read()["rollouts"][rid]["trajectory_path"]
+                canonical = root / RunEvidence(root, run_id).read()["rollouts"][rid]["trajectory_path"]
                 try:
                     capture_client.timeout = (
                         cfg["capture"]["export"]["upload_max_elapsed_seconds"]
@@ -235,7 +238,7 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None):
 
 
 @exclusive_run
-def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), unrolled=False, check_only=False):
+def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_only=False):
     # Prevent mini-swe-agent from loading the user's unrelated global .env.
     os.environ["MSWEA_GLOBAL_CONFIG_DIR"] = str(Path(cfg["project_root"]) / "state/miniswe-config")
     os.environ["MSWEA_SILENT_STARTUP"] = "1"
@@ -254,7 +257,7 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), unroll
         selection = cfg["selection"]
     else:
         selection = Catalog(root).select_tasks(
-            partition=cfg["benchmark"]["partition"], task_ids=task_ids, unrolled=unrolled
+            partition=cfg["benchmark"]["partition"], task_ids=task_ids
         )
         if not selection["task_keys"]:
             raise ValueError("Baseline task scope is empty")
@@ -266,7 +269,7 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), unroll
     assert_frozen(cfg)
     if resume and not check_only:
         completed = {}
-        current = Catalog(root).read()
+        current = RunEvidence(root, run_id).read()
         for key, task in selection["tasks"].items():
             result_path = root / "runs" / run_id / "rollout/tasks" / task["instance_id"] / "result.json"
             if not result_path.exists():

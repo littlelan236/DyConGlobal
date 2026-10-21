@@ -21,12 +21,12 @@ CODE_FILES = [
 
 
 @exclusive_artifact("action", "analysis_id")
-def classify_trajectories(cfg, analysis_id, rollout_ids=(), rollout_list=None):
+def classify_trajectories(cfg, analysis_id, rollout_ids=(), rollout_list=None, run_id=None):
     root = Path(cfg["project_root"])
     out = artifact_dir(cfg, "action", analysis_id)
     if out.exists():
         raise FileExistsError(f"Use a new analysis ID: {out}")
-    selection = select_trajectories(cfg, rollout_ids, rollout_list)
+    selection = select_trajectories(cfg, run_id, rollout_ids, rollout_list)
     sources, rows, examples = [], [], {}
     for source in selection["sources"]:
         steps = read_actions(root, source)

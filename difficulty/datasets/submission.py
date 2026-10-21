@@ -12,9 +12,9 @@ from pathlib import Path
 
 import numpy as np
 
-from catalog.store import Catalog
-from core.io import artifact_dir, hash_json, owned_path, read_json, sha256, write_json
+from core.io import hash_json, owned_path, read_json, sha256, write_json
 from core.locking import file_lock
+from difficulty.receipts import verify_receipt
 
 
 def load_selection(cfg, settings):
@@ -25,11 +25,13 @@ def load_selection(cfg, settings):
     if sha256(receipt_path) != settings.dataset_receipt_sha256:
         raise ValueError("Frozen dataset receipt SHA mismatch")
     receipt = read_json(receipt_path)
+    resolved_only = receipt.get('eligibility') == 'resolved_only'
     if receipt.get("state") != "complete" or not {"rollouts.json", "samples.jsonl"} <= receipt["files"].keys():
         raise ValueError("Selection receipt must bind complete rollouts and samples")
     for name, expected in receipt["files"].items():
         if sha256(owned_path(source, name)) != expected:
             raise ValueError(f"Frozen selection file changed: {name}")
+    verify_receipt(cfg["project_root"], source, expected_sha256=settings.dataset_receipt_sha256)
     selection = read_json(source / "rollouts.json")
     samples = [json.loads(line) for line in (source / "samples.jsonl").read_text().splitlines() if line]
     rollouts = selection["rollouts"]
@@ -45,34 +47,18 @@ def load_selection(cfg, settings):
     ids = {r["rollout_id"]: r for r in rollouts}
     if len(ids) != len(rollouts) or len({s["sample_id"] for s in samples}) != len(samples):
         raise ValueError("Duplicate rollout/sample ID")
-    catalog_path = Path(cfg["project_root"]) / "catalog/manifest.json"
-    try:
-        catalog = Catalog(cfg["project_root"]).read()
-    except Exception:
-        # Permit only an ephemeral pytest temp root with the legacy-shaped fixture
-        # and no read-only root/prefix; production must satisfy the strict Catalog schema.
-        import tempfile
-        root = Path(cfg["project_root"]).resolve()
-        test_root = Path(tempfile.gettempdir()).resolve()
-        if not root.is_relative_to(test_root) or root == test_root:
-            raise
-        if any(root.glob("catalog/.write-*")):
-            raise
-        raw = read_json(catalog_path)
-        if not raw.get("rollouts") or not all("canonical_exit_status" in row for row in raw["rollouts"].values()):
-            raise
-        catalog = raw
     paths = {}
     for row in rollouts:
-        current = catalog["rollouts"][row["rollout_id"]]
-        if current["submission_status"] != "submitted" or current["provenance"].get("quarantined"):
-            raise ValueError("Selection includes a non-submitted or quarantined rollout")
-        for field in ("trajectory_sha256", "patch_sha256", "model_fingerprint", "task_key"):
-            if current[field] != row[field]:
-                raise ValueError(f"Catalog binding changed: {row['rollout_id']} {field}")
-        task = catalog["tasks"][row["task_key"]]
-        if any(task[k] != row[k] for k in ("repo", "instance_id", "base_commit")):
-            raise ValueError("Logical task binding changed")
+        if resolved_only or row.get('training_eligibility') == 'resolved_only':
+            if row.get('resolved') is not True or row.get('evaluation_status') != 'completed' or not row.get('selected_evaluation_id'):
+                raise ValueError('Resolved selection evaluation changed')
+            reports = [read_json(path) for path in row.get('source_files', {}) if Path(path).suffix == '.json']
+            outcomes = [r.get('outcomes', {}).get(row['rollout_id']) for r in reports if isinstance(r, dict)]
+            if not any(o and o.get('resolved') is True and o.get('status') == 'completed'
+                       and o.get('patch_sha256') == row['patch_sha256'] for o in outcomes):
+                raise ValueError('Resolved selection does not bind a successful exact patch')
+        if cfg.get('model', {}).get('fingerprint') and row['model_fingerprint'] != cfg['model']['fingerprint']:
+            raise ValueError('Training input hidden model differs from configured model fingerprint')
         if row["submission_status"] != "submitted" or row["canonical_exit_status"] != "Submitted":
             raise ValueError("Selection does not bind a submitted canonical trajectory")
         trajectory = owned_path(cfg["project_root"], row["trajectory_path"])
@@ -129,7 +115,7 @@ def load_selection(cfg, settings):
         row.pop("_message_indices")
     return rollouts, samples, {"selection_id": settings.dataset_id,
                                "receipt_sha256": settings.dataset_receipt_sha256,
-                               "catalog_revision_at_load": catalog["catalog_revision"],
+                               "selection_authority": "frozen dataset receipt",
                                "source_files_verified": len(paths),
                                "sample_order_sha256": hash_json([s["sample_id"] for s in samples])}
 
@@ -198,10 +184,14 @@ def prepare_cache(cfg, settings, samples):
     """Build checksummed disposable layer memmaps, never reuse partial cache files."""
     identity = hash_json({"source": settings.dataset_receipt_sha256,
                           "sample_order": [s["sample_id"] for s in samples], "schema": 1})
-    parent = Path(cfg["project_root"]) / "state/difficulty-cache"
+    parent = Path(cfg["project_root"]) / "difficulty/cache"
     parent.mkdir(parents=True, exist_ok=True)
     destination = parent / identity
     with file_lock(parent / (identity + ".lock"), nonblocking=True):
+        legacy = Path(cfg['project_root']) / 'state/difficulty-cache' / identity
+        # Old cache is a checksummed compatibility input; new writes are domain-owned.
+        if not destination.exists() and legacy.exists():
+            destination = legacy
         if destination.exists():
             manifest = read_json(destination / "cache.json")
             if manifest["identity"] != identity or set(manifest["files"]) != {

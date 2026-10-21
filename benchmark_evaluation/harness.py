@@ -3,12 +3,66 @@ from __future__ import annotations
 import concurrent.futures
 import inspect
 import time
+from collections import Counter
 from pathlib import Path
 
-from catalog.store import Catalog
-from core.io import hash_json, identifier, now, update_status, write_json
+from application.execution.evidence import RunEvidence
+from core.io import hash_json, now, update_status, write_json
 from core.locking import exclusive_run
 from runtime.containers.factory import ContainerFactory, TaskContext
+
+
+FAILURE_TYPES = ("invalid_patch", "network_error", "timeout", "other_error")
+
+
+def classify_harness_failure(*, exception=None, evidence=""):
+    """Classify failed evaluation without changing legacy status semantics.
+
+    SWE-bench wraps patch and test failures in ``EvaluationError`` and often
+    returns only ``completed=False``. The official log is therefore part of
+    the classification input; a missing log remains an explicitly unknown
+    ``other_error`` instead of being mislabeled as infrastructure failure.
+    """
+    text = evidence or ""
+    if exception is not None:
+        text = f"{text}\n{exception!r}\n{exception}"
+    lowered = text.lower()
+    if any(marker in lowered for marker in (
+        "patch apply failed", "only garbage was found in the patch input",
+        "failed to apply patch", "git apply", "patch failed",
+    )):
+        failure_type = "invalid_patch"
+    elif any(marker in lowered for marker in (
+        "timeout error:", "test timed out", "timed out after", "deadline exceeded",
+    )):
+        failure_type = "timeout"
+    elif any(marker in lowered for marker in (
+        "connectionerror", "connection reset", "readtimeout", "connecttimeout",
+        "connection aborted", "remote end closed connection", "socket.gaierror",
+        "httpsconnectionpool", "temporary failure in name resolution",
+        "name or service not known", "network is unreachable", "connection refused",
+        "docker.errors.apierror", "cannot connect to the docker daemon", "docker daemon",
+        "proxyerror", "502 bad gateway", "503 service unavailable",
+    )):
+        failure_type = "network_error"
+    else:
+        failure_type = "other_error"
+    detail = next((line.strip() for line in text.splitlines()
+                   if line.strip() and any(marker in line.lower() for marker in (
+                       "patch apply failed", "only garbage", "failed to apply patch",
+                       "timeout", "timed out", "connection", "network", "error",
+                   ))), "")
+    return {"failure_type": failure_type, "failure_detail": detail[:1000]}
+
+
+def _evaluation_evidence(output: Path, evaluation_task_id: str, rollout_id: str, instance_id: str):
+    base = output / "harness" / evaluation_task_id / rollout_id / instance_id
+    parts = []
+    for name in ("run_instance.log", "test_output.txt"):
+        path = base / name
+        if path.exists():
+            parts.append(path.read_text(encoding="utf-8", errors="replace"))
+    return "\n".join(parts)
 
 
 def install_harness_adapter(cfg: dict, factory: ContainerFactory, rows: list[dict], output: Path):
@@ -146,27 +200,31 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None):
                 "resolved": None,
             }
             if not patch:
-                return rid, {**result, "reason": "MissingPatch"}
+                return rid, {**result, "reason": "MissingPatch",
+                             **classify_harness_failure(evidence="MissingPatch")}
             try:
                 factory.deadline.check()
                 spec = official.make_test_spec(rows[iid], namespace="swebench")
                 prediction = {"instance_id": iid, "model_name_or_path": rid, "model_patch": patch}
                 timeout = rows[iid].get("evaluation_timeout_seconds", cfg["timeouts"]["evaluation_seconds"])
+                evaluation_task_id = "task-" + hash_json({"evaluation": eval_id, "rollout": rid})[:24]
                 graded = official.run_instance(
                     spec,
                     prediction,
                     False,
                     False,
                     factory.client,
-                    "task-" + hash_json({"evaluation": eval_id, "rollout": rid})[:24],
+                    evaluation_task_id,
                     timeout,
                 )
-                result.update(
-                    status="completed" if graded["completed"] else "infra_error",
-                    resolved=bool(graded["resolved"]) if graded["completed"] else None,
-                )
+                if graded["completed"]:
+                    result.update(status="completed", resolved=bool(graded["resolved"]))
+                else:
+                    result.update(**classify_harness_failure(
+                        evidence=_evaluation_evidence(output, evaluation_task_id, rid, iid)))
             except (Exception,) as exc:
-                # A worker failure is a recorded infrastructure outcome; remaining tasks continue.
+                # Keep the legacy infra_error status, but expose the actionable failure class.
+                result.update(classify_harness_failure(exception=exc))
                 result["error"] = repr(exc)
             return rid, result
 
@@ -184,12 +242,24 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None):
             "resolved": resolved,
             "resolve_rate": resolved / len(outcomes),
             "graded": sum(row["status"] == "completed" for row in outcomes.values()),
+            "failure_counts": dict(Counter(row["failure_type"] for row in outcomes.values()
+                                            if row.get("failure_type"))),
             "outcomes": outcomes,
             "finished_at": now(),
         }
         write_json(output / "summary.json", summary)
         if not gold:
-            Catalog(cfg["project_root"]).record_evaluation(
+            evidence = RunEvidence(cfg["project_root"], run.name)
+            with evidence.transaction() as data:
+                for rid, row in selected["rollouts"].items():
+                    if rid not in data["rollouts"]:
+                        # An evaluation run holds explicit, immutable source references.
+                        imported = dict(row, run_id=run.name, evaluation_status="not_run",
+                                        resolved=None, selected_evaluation_id=None)
+                        imported["provenance"] = {**row.get("provenance", {}), "source_run_id": row["run_id"]}
+                        data["rollouts"][rid] = imported
+                        data["tasks"][row["task_key"]] = selected["tasks"][row["task_key"]]
+            evidence.record_evaluation(
                 eval_id,
                 output.relative_to(Path(cfg["project_root"])) / "summary.json",
                 outcomes,
@@ -197,7 +267,7 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None):
                     "harness": "swebench==4.1.0",
                     "run_id": run.name,
                     "config_hash": cfg["config_hash"],
-                    "catalog_revision": selected["catalog_revision"],
+                    "source_run_id": selected.get("source_run_id", run.name),
                 },
             )
         update_status(

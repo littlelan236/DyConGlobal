@@ -7,7 +7,6 @@ import copy
 import json
 from pathlib import Path
 
-from catalog.store import Catalog
 from core.io import artifact_dir, hash_json, read_json, sha256, write_json
 from core.locking import exclusive_artifact
 from enrichment.reader import TrajectoryReader
@@ -201,10 +200,17 @@ def reconstruct(step, reader, tokenizer, cfg):
 
 
 @exclusive_artifact("enrichment", "dataset_id")
-def enrich(cfg, dataset_id, tokenizer):
-    catalog = Catalog(cfg["project_root"])
-    catalog.verify()
-    selected = rollout_selection(cfg)
+def enrich(cfg, dataset_id, tokenizer, *, selection=None):
+    selected = rollout_selection(cfg) if selection is None else selection
+    if not selected.get("source_run_id"):
+        raise ValueError("Enrichment selection requires an explicit source run")
+    for rid, row in selected["rollouts"].items():
+        if row["run_id"] != selected["source_run_id"]:
+            raise ValueError("Enrichment trajectory belongs to another source run")
+        for kind in ("trajectory", "patch"):
+            path = Path(cfg["project_root"]) / row[kind + "_path"]
+            if sha256(path) != row[kind + "_sha256"]:
+                raise ValueError(f"Changed {kind}: {rid}")
     if not selected["rollout_ids"]:
         raise ValueError("No explicit rollout scope has been registered")
     out = artifact_dir(cfg, "enrichment", dataset_id)
@@ -298,7 +304,8 @@ def enrich(cfg, dataset_id, tokenizer):
             "dataset_id": dataset_id,
             "input_identity": identity,
             "model_fingerprint": cfg["model"]["fingerprint"],
-            "catalog_revision": selected["catalog_revision"],
+            "source_run_id": selected["source_run_id"],
+        "evidence_revision": selected["evidence_revision"],
             "selection": selected,
             "config_hash": cfg["config_hash"],
             "files": files,

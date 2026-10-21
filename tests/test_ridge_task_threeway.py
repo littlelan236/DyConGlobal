@@ -68,7 +68,8 @@ def test_threeway_test_labels_never_affect_selection_or_refit(fixture_project, m
     # Existing tests cover real plot creation; here focus on held-out independence.
     monkeypatch.setattr("difficulty.training.ridge_probe.draw_plots", lambda *args: None)
     first = Path(run_probe(cfg, "threeway-a")["path"])
-    split = read_json(first / "split.json")
+    attempt = read_json(first / "attempt.json")
+    split = read_json(dataset / "splits" / attempt["split_id"] / "split.json")
     test_ids = set(split["sample_ids"]["test"])
     metrics = read_json(first / "metrics.json")
     candidate_selections = read_json(first / "selected.json")["targets"]

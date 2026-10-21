@@ -18,12 +18,10 @@ def publish_static(root, source, count):
     """Publish/import static NAS task assets only; rollout uses core.cli."""
     cfg = resolve(root / "config.yaml")
     catalog = Catalog(root)
-    existing = catalog.read()
-    seen = {existing["tasks"][r["task_key"]]["instance_id"] for r in existing["rollouts"].values()}
     rows = sorted(read_json(source), key=lambda row: row["instance_id"])
     if len({row["instance_id"] for row in rows}) != len(rows):
         raise ValueError("Duplicate source task IDs")
-    if len(rows) != count or seen.intersection(row["instance_id"] for row in rows):
+    if len(rows) != count:
         raise ValueError("Requested cohort must contain exactly the expected number of unrolled tasks")
     # Reuse the already verified static OCI bytes, with independent NAS names.
     # Hard links on the same NAS do not duplicate large blobs; descriptors are

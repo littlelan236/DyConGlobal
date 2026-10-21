@@ -13,7 +13,7 @@
 
 已有统一入口时不要创建临时脚本、复制 trajectory 读取逻辑或直接执行轨迹中的命令。action-classify 只解析原始 command 字符串，绝不会执行它们；它从 catalog 选择 rollout，验证 trajectory SHA，再写入新的 action/outputs/ACTION_ANALYSIS_ID。同一 ID 不覆盖已有产物。
 
-默认选择使用 config.yaml 的 benchmark.partition、benchmark.purposes 和 benchmark.profile。rollout-list 接受 JSON list，元素可以是字符串 ID，也可以是包含 rollout_id、trajectory_sha256、cohort 的对象。若清单提供 SHA，必须与 manifest 一致。
+轨迹选择先给出 `--source-run RUN_ID`，再用 `--rollout-id` 或 `--rollout-list` 选取该 run 内的成员；不指定轨迹时选择该 run 内全部可用轨迹。rollout-list 为 ID 或含 `rollout_id`、可选 `trajectory_sha256`、`cohort` 的 JSON 列表。不存在跨 run 的隐式查询或全局 baseline profile。
 
 ## 统计单位与唯一标签
 

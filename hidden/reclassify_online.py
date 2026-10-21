@@ -130,8 +130,8 @@ def reclassify_online(cfg, run_id, session_ids, *, wait_for_run=False):
         with file_lock(state / (sid + ".lock"), nonblocking=True):
             base = export / "sessions" / sid
             finalization = read_json(base / "finalization.json")
-            from catalog.store import verified_trajectory
-            trajectory = verified_trajectory(project, finalization)
+            from application.execution.evidence import verified_trajectory
+            trajectory = verified_trajectory(project, {**finalization, "producer_run_id": run_id})
             if sha256(trajectory) != finalization["trajectory_sha256"]:
                 raise ValueError("Finalized trajectory changed")
             if read_json(base / "coverage.json")["missing"]:

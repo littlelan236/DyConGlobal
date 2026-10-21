@@ -1,3 +1,4 @@
+from application.execution.evidence import RunEvidence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from core.config import load_snapshot, resolve, snapshot
 
 
 def test_empty_and_duplicate_config(cfg):
-    assert Catalog(cfg["project_root"]).verify()["rollouts"] == 0
+    assert Catalog(cfg["project_root"]).verify()["tasks"] == 0
     p = Path(cfg["project_root"]) / "config.yaml"
     p.write_text(p.read_text() + "\nschema_version: 1\n")
     with pytest.raises(ValueError, match="Duplicate"):
@@ -19,7 +20,7 @@ def test_empty_and_duplicate_config(cfg):
 def test_import_reuse_and_patch_integrity(cfg):
     rid = import_fixture(cfg)
     assert import_fixture(cfg) == rid
-    catalog = Catalog(cfg["project_root"])
+    catalog = RunEvidence(cfg["project_root"], "source")
     assert catalog.verify()["rollouts"] == 1
     row = catalog.read()["rollouts"][rid]
     (Path(cfg["project_root"]) / row["patch_path"]).write_text("changed")
@@ -38,7 +39,7 @@ def test_partition_conflict_is_atomic(cfg):
 
 def test_evaluation_outcome_binding(cfg):
     rid = import_fixture(cfg, resolved=False)
-    catalog = Catalog(cfg["project_root"])
+    catalog = RunEvidence(cfg["project_root"], "source")
     with pytest.raises(ValueError, match="disagrees"):
         with catalog.transaction() as data:
             data["rollouts"][rid]["resolved"] = True
@@ -66,7 +67,7 @@ def test_frozen_snapshot_integrity(cfg):
 
 
 def test_imported_harness_evidence_must_match_patch(cfg):
-    from catalog.importers.evaluation import import_evaluation
+    from benchmark_evaluation.import_evidence import import_evaluation
     from core.io import sha256, write_json
 
     rid = import_fixture(cfg)
@@ -76,13 +77,13 @@ def test_imported_harness_evidence_must_match_patch(cfg):
     patch = root / "evaluated.diff"
     patch.write_text("patch")
     spec = {
-        "evaluation_id": "legacy",
+        "evaluation_id": "legacy", "run_id": "source",
         "report": str(report),
         "report_sha256": sha256(report),
         "bindings": {rid: {"evaluated_patch": str(patch), "outcome_path": ["t-1"]}},
     }
     import_evaluation(root, spec)
-    assert Catalog(root).read()["rollouts"][rid]["resolved"] is True
+    assert RunEvidence(root, "source").read()["rollouts"][rid]["resolved"] is True
     spec["evaluation_id"] = "mismatch"
     patch.write_text("different")
     with pytest.raises(ValueError, match="different patch"):

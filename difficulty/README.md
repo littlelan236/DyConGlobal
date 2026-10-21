@@ -1,5 +1,30 @@
 # 剩余工作量估计与数据接口
 
+2026-10-21：difficulty 新产物独立于来源 run，统一使用 `dycon`。一个训练集可通过
+`difficulty-dataset compose NEW_ID --source-dataset A --source-dataset B` 引用多个批次，来源 receipt/hash 递归核验。
+`difficulty-dataset resolved ID --source-run RUN --index-id INDEX` 冻结成功轨迹训练集。
+
+```text
+difficulty/datasets/DATASET_ID/{dataset.json,rollouts.json,samples.jsonl,source-evidence.json,summary.json,receipt.json}
+difficulty/datasets/DATASET_ID/splits/SPLIT_ID/{split.json,receipt.json}
+difficulty/checkpoints/ATTEMPT_ID/{attempt.json,experiment.json,models/,metrics.json,trials.jsonl,receipt.json,...}
+difficulty/predictions/PREDICTION_ID/...
+difficulty/evaluations/EVALUATION_ID/...
+difficulty/cache/CACHE_HASH/...
+```
+
+online/offline index 和 token join 也位于 datasets/ID，但仍保留各自 schema，不能当作已有 rollouts/samples 的训练 selection。
+dataset receipt 不包含后增的 splits 子目录；每次新划分/训练用独立 ID。显式 split 先由
+`dycon difficulty-split DATASET_ID SPLIT_ID --strategy event_random_v1` 创建；旧调用未指定 split_id 时
+通过同一 service materialize 一个确定性的 auto-ID。各模型训练尝试引用已冻结分配。
+
+模型 NPZ 与同名 JSON 绑定模型结构、hidden model fingerprint、输入特征/site/维度、目标变换、scaler、fit scope 和 dataset/split receipt。
+`dycon artifact verify ID --scope difficulty-dataset/difficulty-attempt/difficulty-prediction/difficulty-evaluation`
+校验其来源与文件；split 使用 `--scope difficulty-split --dataset-id DATASET_ID`。
+旧 run 产物保持原样，旧 index 使用显式 `runs/RUN/difficulty/datasets/ID` 路径；旧 checkpoint 可用原 experiment 路径发布。
+`--run-id` 仍可读取冻结配置，但不决定 difficulty 输出目录。runtime 部署副本仍在 runtime/parallel-artifacts/。
+
+
 同 action、不同 reasoning 的评分不稳定性评测使用 `dycon difficulty-evaluate-parallel RUN_ID EVALUATION_ID`，
 实现与已有并行轨迹可视化同在 `difficulty/evaluation/` 并复用轨迹对齐。
 支持平均两两差、标准差/极差、log1p 倍数分歧率和相对 Q，以及去重/原采样两种口径和 task/repo CI。
@@ -37,7 +62,7 @@ fit 产物在 `difficulty/checkpoints/EXPERIMENT_ID/`：
 
 | 文件 | 内容 |
 |---|---|
-| `experiment.json`、`split.json` | 实际配置、输入证据、固定 task/样本划分 |
+| `attempt.json`、兼容 `experiment.json` | 实际配置、模型输入契约、dataset/split receipt；split.json 在 datasets/DATASET_ID/splits/SPLIT_ID/ |
 | `trials.jsonl`、`models/` | 所有组合的训练/验证指标及可无 pickle 加载的 NPZ 参数 |
 | `selected.json`、`validation-predictions.jsonl` | 两个目标的最优组合、验证逐样本预测 |
 | `metrics.json`、`report.md` | 验证指标、训练均值基线、repo/source/task 分组结果 |
@@ -46,7 +71,18 @@ fit 产物在 `difficulty/checkpoints/EXPERIMENT_ID/`：
 | `plots/*-trajectories.png` | 每目标一张短/中/长验证轨迹比较图 |
 | `receipt.json` | 完成模式与产物 SHA；必须区分数据检查与实际 fit |
 
-两个目标共输出 6 张图；所有图均采用拟合空间：reasoning 为 log1p token 数，steps 为线性 step 数。单独的原单位指标保存在 metrics 中。此前 `ridge-grid-real-debug-20261019` 是 2 层 × 3 alpha × 2 目标的 12 候选调试，只证明入口与报告流程，不是 832 候选正式搜索。独立新任务测试不属于当前选择验证集。
+每个目标输出 3 张图，均采用该目标的拟合空间；原单位指标单独保存在 metrics 中。`difficulty.ridge_probe.targets` 支持以下显式目标，默认仍为 tokens（log1p）和 steps（linear）：
+
+| 目标 ID | 标签与变换 |
+|---|---|
+| `submission_remaining_reasoning_tokens_log1p` | `log1p(remaining_reasoning_tokens_to_submission)`，默认 |
+| `submission_remaining_steps_linear` | `remaining_steps_to_submission`，默认 |
+| `submission_remaining_steps_log1p` | `log1p(remaining_steps_to_submission)` |
+| `submission_remaining_reasoning_tokens_linear` | `remaining_reasoning_tokens_to_submission` |
+
+通过根配置或允许的 `--set difficulty.ridge_probe...` 指定 targets 与 alpha 网格，再运行 `dycon difficulty-ridge ATTEMPT_ID --dataset-id DATASET_ID --split-id SPLIT_ID --mode dry-run/fit`。log1p 预测以 `expm1` 还原，linear 保持原值；不截断负预测。不同拟合空间的 R² 不直接用于判断变换优劣，应比较相同单位的 `test_raw_units`。本目标扩展用于 Ridge 训练/报告，不扩展现有 predictor 发布及在线目标映射。
+
+此前 `ridge-grid-real-debug-20261019` 是 2 层 × 3 alpha × 2 目标的 12 候选调试，只证明入口与报告流程，不是 832 候选正式搜索。独立新任务测试不属于当前选择验证集。
 
 ## 正式数据与评分命令
 
@@ -95,3 +131,7 @@ hidden `[samples, selected_layers, hidden_size]` 展平为 `[samples, selected_l
 **无通用 `dycon difficulty-train`，原训练模块没有 main/argparse。** 本次单层Ridge pilot使用上述正式 difficulty-ridge；FFN/残差训练及通用checkpoint工作流仍未扩展。不能以临时训练脚本绕行。`difficulty.estimator=null` 不自动选择模型；动态在线难度控制未实现。
 
 已有数值契约测试 `tests/test_difficulty_estimators.py`；小型合成测试不等于实际数据训练或跨任务泛化验证。
+
+## 来源运行与轨迹选择
+
+新建 online index / resolved dataset 必须先确定来源 run，再以 `--rollout-id` 或 `--rollout-list` 筛选该 run 内轨迹；不再查询 Catalog 的 rollout 列表。共享实现是 `difficulty.datasets.selection.select_run(root, source_run, rollout_ids, rollout_list)`。跨 run 数据通过独立冻结数据集后 compose。已有 receipt 绑定的数据集继续独立验证，不依赖实时 Catalog 或其他 run 的评测状态。命令示例见 `docs/ENTRYPOINTS.md`。

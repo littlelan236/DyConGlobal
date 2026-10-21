@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from catalog.store import Catalog
+from application.execution.evidence import RunEvidence
 from core.config import load_snapshot
 from core.io import hash_json, identifier, now, read_json, sha256, write_json
 from core.locking import directory_changes, file_lock
@@ -68,7 +68,7 @@ def wait_first(root, run_id, task_ids, timeout):
 
 def inspect_first(cfg, result, out):
     root = Path(cfg["project_root"])
-    catalog = Catalog(root).read()
+    catalog = RunEvidence(root, Path(out).parent.name).read()
     rollout_id = result["rollout_id"]
     record = catalog["rollouts"][rollout_id]
     task = catalog["tasks"][record["task_key"]]

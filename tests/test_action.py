@@ -1,3 +1,4 @@
+from application.execution.evidence import RunEvidence
 """Action categories, trajectory-only workflow and immutable evidence contracts."""
 
 import json
@@ -49,7 +50,7 @@ def test_shell_quoting_and_advisory_helper_source():
 def _source(cfg):
     rid = import_fixture(cfg)
     root = Path(cfg["project_root"])
-    row = Catalog(root).read()["rollouts"][rid]
+    row = RunEvidence(root, "source").read()["rollouts"][rid]
     path = root / row["trajectory_path"]
     data = read_json(path)
     messages = [m for m in data["messages"] if m["role"] == "assistant"]
@@ -58,7 +59,7 @@ def _source(cfg):
         # Must not hydrate unavailable token ledgers for action classification.
         m["extra"] = {"response": {"ledger_ref": "not-present", "ledger_root": "not-present"}}
     write_json(path, data)
-    with Catalog(root).transaction() as manifest:
+    with RunEvidence(root, "source").transaction() as manifest:
         manifest["rollouts"][rid]["trajectory_sha256"] = sha256(path)
     return rid, path
 
@@ -69,7 +70,7 @@ def test_direct_cli_no_enrichment_immutable_and_tamper_detection(cfg, capsys):
     rid, path = _source(cfg)
     root = Path(cfg["project_root"])
     manifest_before = sha256(root / "catalog/manifest.json")
-    main(["--config", cfg["config_source"], "action-classify", "report", "--rollout-id", rid])
+    main(["--config", cfg["config_source"], "action-classify", "report", "--source-run", "source", "--rollout-id", rid])
     assert not (root / "enrichment").exists()
     assert sha256(root / "catalog/manifest.json") == manifest_before
     out = root / "action/outputs/report"
@@ -78,7 +79,7 @@ def test_direct_cli_no_enrichment_immutable_and_tamper_detection(cfg, capsys):
     assert [r["phase_bin"] for r in rows] == [0, 4]
     assert check_analysis(cfg, "report")["verified"]
     with pytest.raises(FileExistsError):
-        classify_trajectories(cfg, "report", [rid])
+        classify_trajectories({**cfg, "source_run_id": "source"}, "report", [rid])
     (out / "labels.jsonl").write_text("{}\n")
     with pytest.raises(ValueError, match="artifact changed"):
         check_analysis(cfg, "report")
@@ -90,11 +91,11 @@ def test_selection_sha_malformed_unsupported_and_no_partial_publish(cfg):
     listing = root / "scope.json"
     write_json(listing, [{"rollout_id": rid, "trajectory_sha256": "wrong"}])
     with pytest.raises(ValueError, match="SHA mismatch"):
-        classify_trajectories(cfg, "bad-binding", rollout_list=listing)
+        classify_trajectories({**cfg, "source_run_id": "source"}, "bad-binding", rollout_list=listing)
     assert not (root / "action/outputs/bad-binding").exists()
     path.write_text("{}")
     with pytest.raises(ValueError, match="checksum mismatch"):
-        classify_trajectories(cfg, "bad-bytes", [rid])
+        classify_trajectories({**cfg, "source_run_id": "source"}, "bad-bytes", [rid])
     assert not (root / "action/outputs/bad-bytes").exists()
 
 

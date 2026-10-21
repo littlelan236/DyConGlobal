@@ -111,6 +111,19 @@ class ScoringBroker:
                                        "expires": time.monotonic() + self.cfg.get("decision_ttl_seconds", 28860)}
             return {"reserved": True}
 
+    def mark_terminated(self, metadata, request_id, evidence):
+        decision, branch = metadata["decision_id"], metadata["branch_id"]
+        with self.condition:
+            group = self.groups.get(decision)
+            if self.closed or group is None or branch not in group["branches"]:
+                return
+            group["results"][branch] = {
+                "branch_id": branch, "native_request_id": request_id,
+                "api_attempt_id": metadata["api_attempt_id"], "status": "failed",
+                "reason": "reasoning_loop", "reasoning_loop": dict(evidence),
+            }
+            self.condition.notify_all()
+
     def submit(self, metadata, request_id, position, token_id, arrays):
         decision, branch = metadata.get("decision_id"), metadata.get("branch_id")
         with self.condition:
@@ -122,6 +135,7 @@ class ScoringBroker:
                         "sample_id": hash_json({"session": metadata["session_id"], "request": request_id,
                                                 "anchor": "think_close", "position": position})[:32]}
             group["results"][branch] = {**identity, "status": "pending"}
+            pending = group["results"][branch]
             if metadata.get("diagnostic_score_disabled"):
                 group["results"][branch] = {**identity, "status": "unscored"}
                 self.condition.notify_all()
@@ -160,7 +174,7 @@ class ScoringBroker:
             result["queue_ms"] = (start - queued_at) * 1000
             with self.condition:
                 group = self.groups.get(decision)
-                if group is reserved_group:
+                if group is reserved_group and group["results"].get(branch) is pending:
                     group["results"][branch] = result
                 self.outstanding -= 1
                 self.condition.notify_all()

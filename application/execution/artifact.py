@@ -1,6 +1,6 @@
-﻿"""Verify run-local receipts, canonical bytes and external capture references."""
+"""Verify run-local receipts, canonical bytes and external capture references."""
 from pathlib import Path
-from catalog.store import Catalog
+from application.execution.evidence import RunEvidence
 from core.io import hash_json, owned_path, read_json, sha256, write_json
 from .run_plan import load_plan
 
@@ -30,11 +30,16 @@ def capture_publication(root, run_id):
 
 def refresh(root,run_id):
     loaded=load_plan(root,run_id);run=loaded['run'];rows=[]
+    evidence = RunEvidence(root, run_id)
+    if evidence.path.exists():
+        rows.append({'kind':'run-evidence', 'artifact_id':'evidence',
+                     'local_locator':str(evidence.path.relative_to(Path(root))),
+                     'content_sha256':sha256(evidence.path)})
     for path in sorted(run.rglob('*receipt.json')):
         if path.is_file():
             rows.append({'kind':'receipt','artifact_id':str(path.relative_to(run)),
                          'local_locator':str(path.relative_to(Path(root))), 'content_sha256':sha256(path)})
-    data=Catalog(root).read()
+    data=RunEvidence(root,run_id).read()
     for rid,row in data['rollouts'].items():
         if row['run_id']==run_id:
             for kind in ('trajectory','patch'):
@@ -53,6 +58,7 @@ def show(root,run_id):
 
 def verify(root,run_id):
     loaded=load_plan(root,run_id);run=loaded['run'];checked=0;receipts=0;external=0
+    RunEvidence(root,run_id).verify()
     for row in read_json(run/'artifacts.json').get('artifacts',[]):
         if sha256(owned_path(root,row['local_locator']))!=row['content_sha256']:
             raise ValueError('Artifact checksum mismatch: '+row['artifact_id'])

@@ -24,6 +24,7 @@ from starlette.requests import Request
 STREAM = "tact_states"
 LOG = logging.getLogger("dycon.capture")
 REQUEST_CONTEXT = ContextVar("dycon_capture_request", default=None)
+LOOP_CONTEXT = ContextVar("dycon_reasoning_loop_request", default=None)
 
 
 class DyConCapturePlugin:
@@ -319,6 +320,12 @@ class DyConCapturePlugin:
         @wraps(original_add)
         async def add(request, *args, **kwargs):
             metadata = REQUEST_CONTEXT.get()
+            loop_state = LOOP_CONTEXT.get()
+            if loop_state is not None:
+                loop_state["native_request_id"] = request.request_id
+                ids = request.prompt_token_ids or []
+                loop_state["reasoning_active"] = bool(ids and (
+                    ids[-1] in self.open_ids or (len(ids) >= 2 and ids[-2] in self.open_ids)))
             if metadata is not None:
                 self.request_metadata[request.request_id] = dict(metadata)
                 self.request_prompt_lengths[request.request_id] = len(request.prompt_token_ids or [])
@@ -343,28 +350,76 @@ class DyConCapturePlugin:
             params = args[1] if len(args) > 1 else kwargs["sampling_params"]
             if metadata is not None and metadata.get("decision_id") and params.n != 1:
                 raise ValueError("Parallel transport requires native n=1 for exact capture identity")
-            delta = getattr(params.output_kind, "name", "") == "DELTA"
-            async for output in original_generate(*args, **kwargs):
-                final = output
-                if delta:
-                    generated.extend(output.outputs[0].token_ids)
+            options = self.parallel_options.get("reasoning_loop", {})
+            guarded = bool(options.get("enabled") and metadata and metadata.get("decision_id")
+                           and not metadata.get("replay"))
+            state, detector = {}, None
+            if guarded:
+                from vllm.sampling_params import RequestOutputKind
+
+                from runtime.serving.reasoning_loop import ReasoningLoopDetector
+
+                detector = ReasoningLoopDetector(options, self.close_ids)
+                params = params.clone()
+                if getattr(params.output_kind, "name", "") == "FINAL_ONLY":
+                    params.output_kind = RequestOutputKind.CUMULATIVE
+                params.stream_interval = options["check_interval_tokens"]
+                if len(args) > 1:
+                    args = (*args[:1], params, *args[2:])
                 else:
-                    generated = list(output.outputs[0].token_ids)
-                yield output
-            if metadata is not None and final is not None:
-                await asyncio.to_thread(
-                    self._safe_post,
-                    "/dycon/capture/request/output",
-                    {
-                        "metadata": metadata,
-                        "request_id": final.request_id,
-                        "prompt_token_ids": list(final.prompt_token_ids or []),
-                        "output_token_ids": generated,
-                        "finish_reason": final.outputs[0].finish_reason,
-                        "num_cached_tokens": getattr(final, "num_cached_tokens", 0) or 0,
-                    },
-                    metadata,
-                )
+                    kwargs = {**kwargs, "sampling_params": params}
+            context = LOOP_CONTEXT.set(state if guarded else None)
+            stream = original_generate(*args, **kwargs)
+            try:
+                delta = getattr(params.output_kind, "name", "") == "DELTA"
+                async for output in stream:
+                    final = output
+                    ids = output.outputs[0].token_ids
+                    new_ids = list(ids if delta else ids[len(generated):])
+                    generated.extend(new_ids)
+                    # Finished/closed requests win races with a new abort.
+                    if (detector is not None and not state.get("reasoning_loop")
+                            and state.get("reasoning_active") and not output.finished):
+                        if any(token in self.close_ids for token in new_ids):
+                            detector.closed = True
+                        hit = detector.feed(new_ids)
+                        if hit is not None:
+                            native_id = state["native_request_id"]
+                            state["reasoning_loop"] = {
+                                **hit, **{k: metadata[k] for k in (
+                                    "session_id", "decision_id", "branch_id", "api_attempt_id")},
+                                "native_request_id": native_id,
+                                "observed_at_output_tokens": len(generated),
+                                "abort_requested": True,
+                            }
+                            await self.engine.abort(native_id, internal=True)
+                    yield output
+                if metadata is not None and final is not None:
+                    loop = state.get("reasoning_loop")
+                    if loop is not None:
+                        loop.update(final_output_tokens=len(generated),
+                                    abort_completed=final.outputs[0].finish_reason == "abort")
+                        if loop["abort_completed"] and self.scoring is not None:
+                            self.scoring.mark_terminated(metadata, state["native_request_id"], loop)
+                    await asyncio.to_thread(
+                        self._safe_post,
+                        "/dycon/capture/request/output",
+                        {
+                            "metadata": metadata,
+                            "request_id": final.request_id,
+                            "prompt_token_ids": list(final.prompt_token_ids or []),
+                            "output_token_ids": generated,
+                            "finish_reason": final.outputs[0].finish_reason,
+                            "num_cached_tokens": getattr(final, "num_cached_tokens", 0) or 0,
+                            **({"reasoning_loop": loop} if loop is not None else {}),
+                        },
+                        metadata,
+                    )
+            finally:
+                try:
+                    await stream.aclose()
+                finally:
+                    LOOP_CONTEXT.reset(context)
 
         self.engine.input_processor.process_inputs = process
         self.engine._add_request = add

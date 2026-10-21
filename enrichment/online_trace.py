@@ -3,7 +3,7 @@
 from collections import defaultdict
 from pathlib import Path
 
-from core.io import hash_json, read_json, sha256, write_json
+from core.io import hash_json, owned_path, read_json, sha256, write_json
 from hidden.artifacts import event_records, read_arrays, read_request
 
 
@@ -61,16 +61,31 @@ def reasoning_targets(request, open_ids, close_ids):
     return targets, availability
 
 
-def finalize_token_events(export_root, output, *, open_ids, close_ids):
+def finalize_token_events(export_root, output, *, open_ids, close_ids,
+                          request_evidence=None, event_rows=None, trajectory_paths=None):
+    """Finalize an export or an explicitly bounded migrated session.
+
+    Optional inputs bind canonical ledger hashes, exact event rows and current
+    trajectory locators; original NAS finalization bytes are never rewritten.
+    """
     root, out = Path(export_root), Path(output)
     out.mkdir(parents=True, exist_ok=False)
     requests, trajectories = {}, defaultdict(list)
     rejected_requests = set()
     source_files = {}
     publications = {}
-    for path in sorted([*(root / "sessions").glob("*/requests/*.json"), *(root / "requests").glob("*.json")]):
+    finalizations = {}
+    verified_trajectories = set()
+    paths = ([(owned_path(root, row['ledger_ref']), row['ledger_sha256']) for row in request_evidence]
+             if request_evidence is not None else
+             [(path, None) for path in sorted([*(root / "sessions").glob("*/requests/*.json"),
+                                               *(root / "requests").glob("*.json")])])
+    for path, expected_sha in paths:
+        digest = sha256(path)
+        if expected_sha is not None and digest != expected_sha:
+            raise ValueError('Canonical request ledger checksum mismatch')
         request = read_request(
-            root, {"ledger_ref": str(path.relative_to(root)), "ledger_sha256": sha256(path)}
+            root, {"ledger_ref": str(path.relative_to(root)), "ledger_sha256": digest}
         )
         if request["session_id"] == "engine-warmup" or request["session_id"].startswith("startup-"):
             continue
@@ -81,13 +96,20 @@ def finalize_token_events(export_root, output, *, open_ids, close_ids):
             rejected_requests.add(request["request_id"])
             continue
         if finalization_path.exists():
-            finalization = read_json(finalization_path)
-            source_files[str(finalization_path.relative_to(root))] = sha256(finalization_path)
+            if finalization_path not in finalizations:
+                finalizations[finalization_path] = read_json(finalization_path)
+                source_files[str(finalization_path.relative_to(root))] = sha256(finalization_path)
+            finalization = finalizations[finalization_path]
             if request["request_id"] not in finalization["accepted_native_request_ids"]:
                 rejected_requests.add(request["request_id"])
                 continue
-            if sha256(finalization["trajectory_path"]) != finalization["trajectory_sha256"]:
-                raise ValueError("Finalized source trajectory changed")
+            trajectory_path = (trajectory_paths[finalization['rollout_id']]
+                               if trajectory_paths is not None else finalization['trajectory_path'])
+            identity = (str(trajectory_path), finalization['trajectory_sha256'])
+            if identity not in verified_trajectories:
+                if sha256(trajectory_path) != finalization["trajectory_sha256"]:
+                    raise ValueError("Finalized source trajectory changed")
+                verified_trajectories.add(identity)
             request.update(
                 {key: finalization[key] for key in ["rollout_id", "trajectory_sha256", "model_fingerprint"]}
             )
@@ -101,7 +123,7 @@ def finalize_token_events(export_root, output, *, open_ids, close_ids):
         )
         requests[request["request_id"]] = request
         trajectories[request["rollout_id"]].append(request)
-        source_files[str(path.relative_to(root))] = sha256(path)
+        source_files[str(path.relative_to(root))] = digest
     for rollout_id, steps in trajectories.items():
         steps.sort(key=lambda step: step["step_id"])
         if len({step["step_id"] for step in steps}) != len(steps):
@@ -123,7 +145,7 @@ def finalize_token_events(export_root, output, *, open_ids, close_ids):
                 block["remaining_censored"] = censored
                 suffix += block["end"] - block["start"]
     accepted, excluded = [], []
-    for path, event in event_records(root):
+    for path, event in (event_records(root) if event_rows is None else event_rows):
         if event["request_id"] in rejected_requests:
             excluded.append({"sample_id": event["sample_id"], "reason": "not_in_finalized_trajectory"})
             continue

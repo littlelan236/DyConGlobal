@@ -14,7 +14,7 @@
 
 ## 配置与数据
 
-- 唯一可编辑配置为 `config.yaml`；唯一任务分区、用途、轨迹和评测关系来源为 `catalog/manifest.json`。
+- 唯一可编辑配置为 `config.yaml`；`catalog/manifest.json` 仅维护 benchmark 任务定义与分区；轨迹、补丁和评测属于指定 run 的 `evidence.json`。
 - `runs/<run>/resolved-config.json`、selection、hash 和 artifact receipt 是不可变证据，禁止为适配新参数而修改旧快照。
 - unresolved、未评测和基础设施故障的成功剩余量标签保留 null；重建 token 证据不能冒充 exact IDs；action 分析复用现有 hidden。
 - 使用任务对应的 `.venvs/runner`、`.venvs/analysis`、`.venvs/easysteer`、`.venvs/latent-vllm`，不混用推理和提取 runtime。

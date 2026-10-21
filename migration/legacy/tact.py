@@ -16,7 +16,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from catalog.store import Catalog
-from catalog.importers.evaluation import import_evaluation
+from benchmark_evaluation.import_evidence import import_evaluation
+from application.execution.evidence import RunEvidence
 from rollout.artifacts import import_rollout
 from core.io import hash_json, identifier, now, read_json, sha256, write_json
 from core.locking import file_lock
@@ -287,8 +288,8 @@ def apply(root, plan_path):
             ids[spec["expected_sha256"]] = rid
             if i % 100 == 0:
                 print(f"Imported {i + 1}/{len(plan['rollouts'])}", flush=True)
-        with catalog.transaction() as data:
-            for spec in plan["rollouts"]:
+        for spec in plan["rollouts"]:
+            with RunEvidence(root, spec["run_id"]).transaction() as data:
                 row = data["rollouts"][ids[spec["expected_sha256"]]]
                 row["provenance"].update(
                     {
@@ -317,19 +318,17 @@ def apply(root, plan_path):
                 if not bindings:
                     continue
                 eid = f"{plan['migration_id']}-e{i:03}-{'graded' if phase else 'infra'}"
-                current = catalog.read()
-                if eid in current["evaluations"]:
-                    continue
-                import_evaluation(
-                    root,
-                    {
-                        "evaluation_id": eid,
-                        "report": str(root / e["report"]),
-                        "report_sha256": e["report_sha256"],
-                        "bindings": bindings,
-                    },
-                )
-        current = catalog.read()
+                by_run = {}
+                for spec in plan['rollouts']:
+                    rid = ids[spec['expected_sha256']]
+                    if rid in bindings:
+                        by_run.setdefault(spec['run_id'], {})[rid] = bindings[rid]
+                for source_run, run_bindings in by_run.items():
+                    if eid in RunEvidence(root, source_run).read()['evaluations']:
+                        continue
+                    import_evaluation(root, {'evaluation_id': eid, 'run_id': source_run,
+                        'report': str(root / e['report']), 'report_sha256': e['report_sha256'],
+                        'bindings': run_bindings})
         fields = [
             "rollout_id",
             "task_id",
@@ -349,6 +348,7 @@ def apply(root, plan_path):
         rows, occurrences = [], []
         for spec in plan["rollouts"]:
             rid = ids[spec["expected_sha256"]]
+            current = RunEvidence(root, spec["run_id"]).read()
             row = current["rollouts"][rid]
             assert current["tasks"][row["task_key"]]["partition"] == "train" and row["purposes"] == [
                 "training"

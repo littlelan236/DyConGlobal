@@ -29,6 +29,15 @@ def test_missing_receipt_cannot_be_excused_as_no_close():
     assert classify_close(None, [])["status"] == "partial"
 
 
+def test_loop_abort_is_explicit_without_hiding_real_missing_close():
+    receipt = {"prompt_token_ids": [248068], "output_token_ids": [1] * 2048,
+               "anchors": ["think_close"], "finish_reason": "abort", "reasoning_loop": {"abort_completed": True}}
+    state = classify_close(receipt, [])
+    assert state["reason"] == "reasoning_loop_aborted" and state["not_required"]
+    receipt["output_token_ids"] += [248069, 3]
+    assert classify_close(receipt, [])["status"] == "partial"
+
+
 def test_live_finalize_no_close_rejected_branch_is_complete(tmp_path):
     c = OnlineCaptureController(tmp_path, {"export": {"root": "online", "queue_size": 8},
         "run_id": "run", "open_token_ids": [10], "close_token_ids": [11], "finalize_seconds": 2})
@@ -109,7 +118,7 @@ def test_real_lost_hidden_stays_partial_on_reclassification(tmp_path):
 @pytest.mark.parametrize("other_failure", [False, True])
 def test_cli_repair_updates_manifests_results_and_reconciles_stale_progress(tmp_path, monkeypatch, other_failure):
     export, sid = legacy_export(tmp_path, [20, 30])
-    monkeypatch.setattr("catalog.store.Catalog.read", lambda self: {"rollouts": {"rid": {
+    monkeypatch.setattr("application.execution.evidence.RunEvidence.read", lambda self: {"rollouts": {"rid": {
         "trajectory_path": "trajectory.json", "trajectory_sha256": sha256(tmp_path / "trajectory.json")}}})
     cfg = {"project_root": str(tmp_path), "paths": {"nas_root": str(tmp_path / "nas")},
            "images": {"reserve_bytes": 0},

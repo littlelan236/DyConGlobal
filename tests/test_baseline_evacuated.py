@@ -1,3 +1,4 @@
+from application.execution.evidence import RunEvidence
 """The production packages must work with an empty baseline directory."""
 import ast
 import importlib
@@ -9,7 +10,7 @@ import pytest
 @pytest.mark.parametrize("module", [
     "rollout.runner", "rollout.agent", "rollout.model", "rollout.parallel", "rollout.artifacts",
     "benchmark_evaluation.harness", "benchmark_evaluation.metadata", "benchmark_evaluation.selection",
-    "catalog.benchmark", "catalog.importers.evaluation", "application.execution.harness",
+    "catalog.benchmark", "benchmark_evaluation.import_evidence", "application.execution.harness",
     "runtime.serving.startup", "runtime.serving.parallel_validation",
 ])
 def test_relocated_module_imports_without_baseline(module):
@@ -32,11 +33,12 @@ def test_production_source_has_no_baseline_imports():
 
 def test_capture_uses_canonical_identity_after_path_relocation(cfg):
     from conftest import import_fixture
-    from catalog.store import Catalog, verified_trajectory
+    from catalog.store import Catalog
+    from application.execution.evidence import verified_trajectory
 
     rid = import_fixture(cfg)
-    row = Catalog(cfg["project_root"]).read()["rollouts"][rid]
-    proof = {"rollout_id": rid, "trajectory_sha256": row["trajectory_sha256"],
+    row = RunEvidence(cfg["project_root"], "source").read()["rollouts"][rid]
+    proof = {"producer_run_id": "source", "rollout_id": rid, "trajectory_sha256": row["trajectory_sha256"],
              "trajectory_path": "/retired/baseline/trajectory.json"}
     actual = verified_trajectory(cfg["project_root"], proof)
     assert actual == Path(cfg["project_root"]) / row["trajectory_path"]
@@ -46,7 +48,7 @@ def test_capture_uses_canonical_identity_after_path_relocation(cfg):
 
 
 def test_startup_probe_is_hash_bound_without_catalog_registration(tmp_path):
-    from catalog.store import verified_trajectory
+    from application.execution.evidence import verified_trajectory
     from core.io import sha256, write_json
     path = tmp_path / "runs/diagnostic/startup/trajectory.json"
     write_json(path, {"messages": []})

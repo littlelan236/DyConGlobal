@@ -46,6 +46,7 @@ def main(argv=None):
     q = harness_sub.add_parser("prepare")
     q.add_argument("run_id")
     q.add_argument("--rollout-id", action="append", default=[])
+    q.add_argument("--source-run")
     q = harness_sub.add_parser("run")
     q.add_argument("run_id")
     q.add_argument("eval_id")
@@ -65,9 +66,13 @@ def main(argv=None):
     artifact = sub.add_parser("artifact", help="Inspect or verify run artifacts")
     artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
     q = artifact_sub.add_parser("show")
-    q.add_argument("run_id")
+    q.add_argument("run_id", nargs="?")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation"], default="run")
+    q.add_argument("--dataset-id")
     q = artifact_sub.add_parser("verify")
-    q.add_argument("run_id")
+    q.add_argument("run_id", nargs="?")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation"], default="run")
+    q.add_argument("--dataset-id")
     for cmd in ["config-check", "catalog-check", "runtime-check", "recover"]:
         sub.add_parser(cmd)
     sub.add_parser("capture-recover").add_argument("run_id")
@@ -78,6 +83,29 @@ def main(argv=None):
     p = sub.add_parser("online-index")
     p.add_argument("run_id")
     p.add_argument("index_id")
+    p.add_argument("--rollout-id", action="append", default=[])
+    p.add_argument("--rollout-list", type=Path)
+    dataset = sub.add_parser("difficulty-dataset", help="Create an immutable difficulty dataset")
+    dataset_sub = dataset.add_subparsers(dest="dataset_command", required=True)
+    q = dataset_sub.add_parser("compose")
+    q.add_argument("dataset_id")
+    q.add_argument("--source-dataset", required=True, action="append")
+    q = dataset_sub.add_parser("resolved")
+    q.add_argument("dataset_id")
+    q.add_argument("--source-run", required=True)
+    q.add_argument("--index-id", required=True)
+    q.add_argument("--rollout-id", action="append", default=[])
+    q.add_argument("--rollout-list", type=Path)
+    p = sub.add_parser("difficulty-split", help="Freeze a reusable dataset split")
+    p.add_argument("dataset_id")
+    p.add_argument("split_id")
+    p.add_argument("--strategy", choices=["event_random_v1", "task_random_v1", "repo_source_quota_v1", "inherit_task_split_v1"], default="task_random_v1")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--validation-fraction", type=float, default=0.2)
+    p.add_argument("--test-fraction", type=float, default=0.2)
+    p.add_argument("--validation-tasks", type=int, default=48)
+    p.add_argument("--parent-attempt-id")
+    p.add_argument("--parent-receipt-sha256")
     for cmd in ["tasks-import", "rollouts-import", "evaluations-import"]:
         sub.add_parser(cmd).add_argument("list")
     sub.add_parser("model-register").add_argument("checkpoint")
@@ -92,7 +120,6 @@ def main(argv=None):
     p.add_argument("run_id")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--task-id", action="append", default=[])
-    p.add_argument("--unrolled", action="store_true")
     p.add_argument(
         "--check-only",
         action="store_true",
@@ -100,6 +127,7 @@ def main(argv=None):
     )
     p = sub.add_parser("prepare-evaluation")
     p.add_argument("run_id")
+    p.add_argument("--source-run", required=True)
     p.add_argument("--rollout-id", action="append", default=[],
                    help="Freeze exactly these canonical rollout IDs")
     p = sub.add_parser("evaluate")
@@ -114,21 +142,24 @@ def main(argv=None):
     p.add_argument("capture_id")
     p = sub.add_parser("images-check")
     p.add_argument("--deep", action="store_true")
-    p = sub.add_parser("baseline-select")
-    p.add_argument("profile")
-    p.add_argument("task_key")
-    p.add_argument("rollout_id")
     p = sub.add_parser("token-join")
     p.add_argument("dataset_id")
     p.add_argument("capture_id")
     p.add_argument("index_id")
+    p.add_argument("--source-run")
+    p.add_argument("--rollout-id", action="append", default=[])
+    p.add_argument("--rollout-list", type=Path)
     sub.add_parser("hidden-token-join-audit").add_argument("index_id")
     p = sub.add_parser("dataset-index")
     p.add_argument("dataset_id")
     p.add_argument("capture_id")
     p.add_argument("index_id")
+    p.add_argument("--source-run")
+    p.add_argument("--rollout-id", action="append", default=[])
+    p.add_argument("--rollout-list", type=Path)
     p = sub.add_parser("action-classify", help="Classify canonical rollout trajectories without enrichment")
     p.add_argument("analysis_id")
+    p.add_argument("--source-run", required=True)
     scope = p.add_mutually_exclusive_group()
     scope.add_argument("--rollout-id", action="append", default=[])
     scope.add_argument("--rollout-list", type=Path)
@@ -170,6 +201,8 @@ def main(argv=None):
     p = sub.add_parser("difficulty-ridge")
     p.add_argument("experiment_id")
     p.add_argument("--mode", choices=["dry-run", "check-data", "fit"], default="fit")
+    p.add_argument("--split-id")
+    p.add_argument("--dataset-id", help="Select a shared dataset; freeze its receipt and actual counts")
     p = sub.add_parser("predictor-publish", help="Publish an existing estimator for online branch selection")
     p.add_argument("predictor_id")
     source = p.add_mutually_exclusive_group(required=True)
@@ -200,7 +233,7 @@ def main(argv=None):
             parser.error("generation, agent limits and timeouts belong to root config.yaml: " + ", ".join(forbidden))
     if a.command == "rollout" and a.set:
         parser.error("rollout rejects --set; edit the unique config.yaml or resume its immutable snapshot")
-    if a.command == "rollout" and a.resume and (a.task_id or a.unrolled):
+    if a.command == "rollout" and a.resume and a.task_id:
         parser.error("resume uses the immutable task selection")
     explicit_run = a.analysis_run_id or getattr(a, "run_id", None)
     run_commands = {"rollout", "harness", "capture", "artifact", "report", "capture-recover", "online-index"}
@@ -209,7 +242,9 @@ def main(argv=None):
         if candidate.exists():
             explicit_run = a.dataset_id
     use_snapshot = ((a.command == "run" and a.run_command != "create" and a.run_command != "list")
-                    or a.command in run_commands or a.analysis_run_id is not None
+                    or (a.command in run_commands and not (
+                        a.command == "artifact" and getattr(a, "scope", "run") != "run"))
+                    or a.analysis_run_id is not None
                     or (a.command in {"enrich", "token-trace", "trajectory-token-audit", "hidden", "dataset-index", "token-join"} and explicit_run is not None))
     if use_snapshot:
         if a.set:
@@ -238,8 +273,15 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     if a.command == "artifact":
-        from application.execution.artifact import show, verify
-        result = show(cfg["project_root"], a.run_id) if a.artifact_command == "show" else verify(cfg["project_root"], a.run_id)
+        if getattr(a, "scope", "run") != "run":
+            from difficulty.artifacts import show, verify
+            operation = show if a.artifact_command == "show" else verify
+            result = operation(cfg["project_root"], a.scope, a.run_id, dataset_id=a.dataset_id)
+        else:
+            if not a.run_id:
+                parser.error("Run artifact operations require RUN_ID")
+            from application.execution.artifact import show, verify
+            result = show(cfg["project_root"], a.run_id) if a.artifact_command == "show" else verify(cfg["project_root"], a.run_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     if a.command == "harness":
@@ -247,7 +289,7 @@ def main(argv=None):
         from application.execution.status import run_status
 
         if a.harness_command == "prepare":
-            result = prepare(cfg["project_root"], a.run_id, a.rollout_id)
+            result = prepare(cfg["project_root"], a.run_id, a.rollout_id, a.source_run)
         elif a.harness_command == "run":
             result = run(cfg["project_root"], a.run_id, a.eval_id, a.gold)
         else:
@@ -315,7 +357,20 @@ def main(argv=None):
     elif a.command == "online-index":
         from difficulty.datasets.online import build_published_index
 
-        result = str(build_published_index(cfg, a.run_id, a.index_id))
+        result = str(build_published_index(cfg, a.run_id, a.index_id, a.rollout_id, a.rollout_list))
+    elif a.command == "difficulty-dataset":
+        if a.dataset_command == "compose":
+            from difficulty.datasets.compose import compose_datasets
+            result = compose_datasets(cfg["project_root"], a.dataset_id, a.source_dataset)
+        else:
+            from difficulty.datasets.resolved import build_resolved_selection
+            result = build_resolved_selection(cfg["project_root"], a.source_run, a.index_id, a.dataset_id, a.rollout_id, a.rollout_list)
+    elif a.command == "difficulty-split":
+        from difficulty.training.splits import create_split
+        result = create_split(cfg["project_root"], a.dataset_id, a.split_id,
+            strategy=a.strategy, seed=a.seed, validation_fraction=a.validation_fraction,
+            test_fraction=a.test_fraction, validation_tasks=a.validation_tasks,
+            parent_experiment_id=a.parent_attempt_id, parent_receipt_sha256=a.parent_receipt_sha256)
     elif a.command == "tasks-import":
         result = catalog.register_tasks(read_json(a.list))
     elif a.command == "rollouts-import":
@@ -323,7 +378,7 @@ def main(argv=None):
 
         result = import_list(cfg["project_root"], a.list)
     elif a.command == "evaluations-import":
-        from catalog.importers.evaluation import import_evaluation
+        from benchmark_evaluation.import_evidence import import_evaluation
 
         result = [import_evaluation(cfg["project_root"], spec) for spec in read_json(a.list)]
     elif a.command == "model-register":
@@ -348,14 +403,14 @@ def main(argv=None):
         from rollout.runner import run_manifest
 
         result = run_manifest(
-            cfg, a.run_id, a.resume, task_ids=a.task_id, unrolled=a.unrolled, check_only=a.check_only
+            cfg, a.run_id, a.resume, task_ids=a.task_id, check_only=a.check_only
         )
     elif a.command == "prepare-evaluation":
         from benchmark_evaluation.selection import prepare_run
 
         result = str(
             prepare_run(
-                cfg, a.run_id, partition=cfg["benchmark"]["partition"], purposes=cfg["benchmark"]["purposes"],
+                {**cfg, "source_run_id": a.source_run}, a.run_id, partition=cfg["benchmark"]["partition"],
                 rollout_ids=a.rollout_id,
             )
         )
@@ -417,13 +472,10 @@ def main(argv=None):
         result = {
             k: len(NasImageStore(cfg, t["instance"]["nas_image"]).verify(a.deep)) for k, t in tasks.items()
         }
-    elif a.command == "baseline-select":
-        catalog.select_baseline(a.profile, a.task_key, a.rollout_id)
-        result = {"selected": a.rollout_id}
     elif a.command == "token-join":
         from difficulty.datasets.token_join import build_token_hidden_index
 
-        result = str(build_token_hidden_index(cfg, a.dataset_id, a.capture_id, a.index_id))
+        result = str(build_token_hidden_index({**cfg, "source_run_id": a.source_run or cfg.get("run_id")}, a.dataset_id, a.capture_id, a.index_id, a.rollout_id, a.rollout_list))
     elif a.command == "hidden-token-join-audit":
         from difficulty.datasets.token_join import audit_token_hidden_index
 
@@ -431,11 +483,11 @@ def main(argv=None):
     elif a.command == "dataset-index":
         from difficulty.datasets.index import build_index
 
-        result = str(build_index(cfg, a.dataset_id, a.capture_id, a.index_id))
+        result = str(build_index({**cfg, "source_run_id": a.source_run or cfg.get("run_id")}, a.dataset_id, a.capture_id, a.index_id, a.rollout_id, a.rollout_list))
     elif a.command == "action-classify":
         from action.analyzers.trajectories import classify_trajectories
 
-        result = classify_trajectories(cfg, a.analysis_id, a.rollout_id, a.rollout_list)
+        result = classify_trajectories(cfg, a.analysis_id, a.rollout_id, a.rollout_list, run_id=a.source_run)
     elif a.command == "action-check":
         from action.analyzers.trajectories import check_analysis
 
@@ -459,7 +511,7 @@ def main(argv=None):
             os.environ[name] = threads
         from difficulty.training.ridge_probe import run_probe
 
-        result = run_probe(cfg, a.experiment_id, mode=a.mode)
+        result = run_probe(cfg, a.experiment_id, mode=a.mode, split_id=a.split_id, dataset_id=a.dataset_id)
     elif a.command == "difficulty-plot-parallel":
         from difficulty.evaluation.parallel import list_parallel_trajectories, visualize_parallel
 

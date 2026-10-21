@@ -1,0 +1,151 @@
+"""Immutable dataset-owned split artifacts shared by model training attempts."""
+
+from collections import Counter
+import json
+import math
+from pathlib import Path
+
+from core.io import hash_json, identifier, now, owned_path, read_json, sha256, write_json
+from core.locking import file_lock
+from difficulty.training.split import make_event_split, make_split, make_task_threeway_split
+
+
+def _build_split(rollouts, samples, strategy, seed, validation_fraction, test_fraction,
+                 validation_tasks, parent=None):
+    if strategy == "event_random_v1":
+        return make_event_split(samples, validation_fraction, test_fraction, seed)
+    if strategy == "task_random_v1":
+        return make_task_threeway_split(rollouts, samples, validation_fraction, test_fraction, seed)
+    if strategy == "repo_source_quota_v1":
+        return make_split(rollouts, samples, validation_tasks, seed)
+    if strategy == "inherit_task_split_v1":
+        from difficulty.training.split import inherit_task_split
+        if parent is None:
+            raise ValueError("Inherited task split requires a verified parent split")
+        return inherit_task_split(rollouts, samples, parent, validation_tasks, seed)
+    raise ValueError(f"Unsupported new split strategy: {strategy}")
+
+
+def create_split(root, dataset_id, split_id, *, strategy="task_random_v1", seed=42,
+                 validation_fraction=0.2, test_fraction=0.2, validation_tasks=48,
+                 parent_experiment_id=None, parent_receipt_sha256=None):
+    root = Path(root).resolve()
+    dataset_id, split_id = identifier(dataset_id), identifier(split_id)
+    if seed < 0 or not math.isfinite(validation_fraction) or not math.isfinite(test_fraction):
+        raise ValueError("Invalid split seed or fractions")
+    dataset = root / "difficulty/datasets" / dataset_id
+    dataset_receipt_path = dataset / "receipt.json"
+    dataset_receipt_sha = sha256(dataset_receipt_path)
+    dataset_receipt = read_json(dataset_receipt_path)
+    if dataset_receipt.get("state") != "complete":
+        raise ValueError("Split source dataset is not complete")
+    if not {'rollouts.json', 'samples.jsonl'} <= dataset_receipt.get('files', {}).keys():
+        raise ValueError('Dataset receipt must bind training rows')
+    for name, digest in dataset_receipt.get("files", {}).items():
+        if sha256(owned_path(dataset, name)) != digest:
+            raise ValueError(f"Dataset checksum mismatch: {name}")
+    rollouts = read_json(dataset / "rollouts.json")["rollouts"]
+    samples = [json.loads(line) for line in (dataset / "samples.jsonl").read_text(encoding="utf-8").splitlines() if line]
+    if not samples or len({row["sample_id"] for row in samples}) != len(samples):
+        raise ValueError("Dataset samples must be nonempty and have unique IDs")
+    output = dataset / "splits" / split_id
+    lock_root = root / "state/difficulty-split-locks" / dataset_id
+    with file_lock(lock_root / f"{split_id}.lock", nonblocking=True):
+        if output.exists():
+            raise FileExistsError(output)
+        parent = None
+        if strategy == "inherit_task_split_v1":
+            if not parent_experiment_id or not parent_receipt_sha256:
+                raise ValueError("Inherited split requires parent ID and receipt SHA")
+            parent_experiment_id = identifier(parent_experiment_id)
+            parent_dir = root / "difficulty/checkpoints" / parent_experiment_id
+            if not parent_dir.is_dir() or sha256(parent_dir / "receipt.json") != parent_receipt_sha256:
+                raise ValueError("Parent attempt receipt SHA mismatch")
+            proof = read_json(parent_dir / "receipt.json")
+            if proof.get("state") != "complete":
+                raise ValueError("Parent attempt is not complete")
+            if (parent_dir / "split.json").is_file():
+                parent = read_json(parent_dir / "split.json")
+                parent_split_digest = sha256(parent_dir / "split.json")
+            else:
+                parent_attempt = read_json(parent_dir / "attempt.json")
+                parent_dataset = root / "difficulty/datasets" / parent_attempt["dataset_id"]
+                parent_split_dir = parent_dataset / "splits" / parent_attempt["split_id"]
+                if sha256(parent_split_dir / "receipt.json") != parent_attempt["split_receipt_sha256"]:
+                    raise ValueError("Parent split receipt changed")
+                parent = read_json(parent_split_dir / "split.json")
+                parent_split_digest = sha256(parent_split_dir / "split.json")
+            if proof.get("files", {}).get("split.json") and proof["files"]["split.json"] != parent_split_digest:
+                raise ValueError("Parent split is not bound to parent receipt")
+        split = _build_split(rollouts, samples, strategy, seed, validation_fraction,
+                             test_fraction, validation_tasks, parent=parent)
+        split["dataset_id"] = dataset_id
+        split["dataset_receipt_sha256"] = dataset_receipt_sha
+        split.pop("role_by_sample", None)
+        split["distributions"] = {}
+        for role, ids in split["sample_ids"].items():
+            selected_ids = set(ids)
+            selected = [row for row in samples if row["sample_id"] in selected_ids]
+            split["distributions"][role] = {
+                "source_samples": dict(Counter(row.get("source_kind", "unknown") for row in selected)),
+                "task_count": len({row["task_group"] for row in selected}),
+                "rollout_count": len({row["rollout_id"] for row in selected}),
+            }
+        output.mkdir(parents=True)
+        write_json(output / "split.json", split)
+        write_json(output / "receipt.json", {
+            "schema_version": 1, "state": "complete", "dataset_id": dataset_id,
+            "dataset_receipt_sha256": dataset_receipt_sha, "split_id": split_id,
+            "split_sha256": sha256(output / "split.json"), "created_at": now(),
+            "code": {"difficulty/training/split.py": sha256(Path(__file__).with_name("split.py")),
+                     "difficulty/training/splits.py": sha256(Path(__file__))},
+            "files": {"split.json": sha256(output / "split.json")},
+        })
+    return {"dataset_id": dataset_id, "split_id": split_id, "path": str(output),
+            "strategy": strategy, "task_counts": split["task_counts"],
+            "sample_counts": split["sample_counts"], "receipt_sha256": sha256(output / "receipt.json")}
+
+
+def load_split(root, dataset_id, split_id, dataset_receipt_sha256, samples):
+    root = Path(root).resolve()
+    dataset_id, split_id = identifier(dataset_id), identifier(split_id)
+    dataset = root / "difficulty/datasets" / dataset_id
+    dataset_receipt = sha256(dataset / "receipt.json")
+    if dataset_receipt != dataset_receipt_sha256:
+        raise ValueError("Dataset receipt differs from training configuration")
+    path = dataset / "splits" / split_id
+    receipt_path = path / "receipt.json"
+    receipt = read_json(receipt_path)
+    split_path = path / "split.json"
+    if (receipt.get("state") != "complete" or receipt.get("dataset_id") != dataset_id
+            or receipt.get("dataset_receipt_sha256") != dataset_receipt
+            or sha256(split_path) != receipt.get("split_sha256")):
+        raise ValueError("Split receipt does not bind the frozen dataset")
+    for name, digest in receipt.get("files", {}).items():
+        if sha256(owned_path(path, name)) != digest:
+            raise ValueError(f"Split checksum mismatch: {name}")
+    split = read_json(split_path)
+    sample_ids = {row["sample_id"] for row in samples}
+    assigned = [sample_id for ids in split["sample_ids"].values() for sample_id in ids]
+    if len(assigned) != len(set(assigned)) or set(assigned) != sample_ids:
+        raise ValueError("Split must assign every dataset sample exactly once")
+    if split.get("dataset_id") != dataset_id or split.get("dataset_receipt_sha256") != dataset_receipt:
+        raise ValueError("Split identity does not match its dataset")
+    if receipt.get("split_id") != split_id:
+        raise ValueError("Split receipt ID mismatch")
+    if split.get("sample_order_sha256") != hash_json([row["sample_id"] for row in samples]):
+        raise ValueError("Split sample order changed")
+    if set(split["sample_ids"]) not in ({"train", "validation"}, {"train", "validation", "test"}):
+        raise ValueError("Invalid split partition names")
+    if not all(split["sample_ids"].values()):
+        raise ValueError("Split has an empty partition")
+    if split["sample_counts"] != {role: len(ids) for role, ids in split["sample_ids"].items()}:
+        raise ValueError("Split sample counts mismatch")
+    if split["strategy"] != "event_random_v1":
+        roles = {sid: role for role, ids in split["sample_ids"].items() for sid in ids}
+        by_task = {}
+        for sample in samples:
+            role = roles[sample["sample_id"]]
+            if by_task.setdefault(sample["task_group"], role) != role:
+                raise ValueError("Task split leaks samples across partitions")
+    return split, receipt

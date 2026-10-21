@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from catalog.store import Catalog
+from application.execution.evidence import RunEvidence
 from core.config import resolve
 from core.io import read_json
 from core.model_identity import verify_model
@@ -18,6 +18,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--root", type=Path, required=True)
     p.add_argument("--ids", type=Path, required=True)
+    p.add_argument("--source-run", required=True)
     p.add_argument("--model", required=True)
     p.add_argument("--fingerprint", required=True)
     p.add_argument("--gpu", required=True)
@@ -38,19 +39,10 @@ def main():
         "hidden.vllm.tensor_parallel_size=1",
         f"enrichment.anchors={a.anchors}",
         "benchmark.partition=train",
-        "benchmark.purposes=[training]",
     ]
     cfg = resolve(root / "config.yaml", overrides)
-    catalog = Catalog(root)
-    original = catalog.select
-
-    def select(self, *, partition=None, purposes=(), profile=None):
-        x = original(partition=partition, purposes=purposes, profile=profile)
-        x["rollout_ids"] = [r for r in x["rollout_ids"] if r in ids]
-        x["rollouts"] = {r: x["rollouts"][r] for r in x["rollout_ids"]}
-        return x
-
-    Catalog.select = select
+    selection = RunEvidence(root, a.source_run).select(sorted(ids))
+    cfg['source_run_id'] = a.source_run
     verify_model(cfg)
     from hidden.backends.vllm.engine import configure_environment, gpu_reservation
     configure_environment(cfg)
@@ -61,7 +53,7 @@ def main():
 
     tok = AutoTokenizer.from_pretrained(cfg["model"]["path"], local_files_only=True,
                                         trust_remote_code=cfg["model"]["trust_remote_code"])
-    enrich(cfg, a.dataset, tok)
+    enrich(cfg, a.dataset, tok, selection=selection)
     with gpu_reservation(root, [int(a.gpu)]):
         adapter = load_adapter(cfg)
         try:

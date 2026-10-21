@@ -27,16 +27,16 @@ cd /home/wangtianyi/DyConGlobal
 
 根 `config.yaml` 保存共用参数，generation、agent step/token limit 和 timeout 在根配置维护。每个 run 创建时冻结有效配置、tasks、selection 和 hash；执行、resume 及绑定 run 的分析使用原快照，不重新选择任务。`--set` 只能在相应入口明确允许的创建/规划阶段使用。
 
-`catalog/manifest.json` 保存 task、rollout、patch 和 evaluation 的事实索引；task、attempt、canonical rollout、patch SHA 和评测证据共同对齐。Submitted 不等于 resolved；未评测、unresolved 和 infra_error 不补造成功剩余量标签。token 重建证据不冒充 native exact IDs。
+`catalog/manifest.json` 仅保存 benchmark/task 清单（schema 2）；rollout、patch 和 evaluation 的事实保存在 `runs/RUN_ID/evidence.json`。task、attempt、canonical rollout、patch SHA 和评测证据共同对齐。Submitted 不等于 resolved；未评测、unresolved 和 infra_error 不补造成功剩余量标签。token 重建证据不冒充 native exact IDs。
 
-本地产物收敛在 `runs/RUN_ID/`，NAS 大张量通过 locator/receipt 引用；capture spool 在 ACK 前保留。`artifact verify`、Catalog verify、环境 gold 和模型性能评测各有范围，不能互相替代。
+rollout/harness/hidden/enrichment 的运行产物在 `runs/RUN_ID/`；difficulty 的 datasets、splits、checkpoints、predictions 和 evaluations 独立保存在 `difficulty/`，可组合多个来源 run。NAS 大张量通过 locator/receipt 引用；capture spool 在 ACK 前保留。`artifact verify`、Catalog verify、环境 gold 和模型性能评测各有范围，不能互相替代。
 
 ## 代码职责
 
 | 目录 | 职责 |
 |---|---|
 | `core/`、`application/` | strict 配置/锁/I/O、CLI、RunPlan、supervisor、状态与阶段服务 |
-| `catalog/` | 任务/轨迹/评分事实索引、benchmark 与外部评分登记 |
+| `catalog/` | benchmark/task 定义、版本与任务分区；运行证据由 `application/execution/evidence.py` 管理 |
 | `rollout/`、`benchmark_evaluation/` | agent/model/parallel、canonical 产物、官方 harness |
 | `enrichment/`、`hidden/` | prefix/token 标签、在线 capture 证据、独立 eager replay、NAS reader/recovery |
 | `difficulty/`、`action/` | 数据索引、估计器与推理评估、分支绘图/一致性、canonical action 分类 |
@@ -47,6 +47,6 @@ runner、analysis、easysteer、latent-vllm 是四个独立环境，按任务使
 
 ## 历史与复现
 
-`baseline/` 已清空，历史产物在 `isolated/history-baseline-20261021/`；仍需读取时由当前 Catalog 的明确 locator 访问，旧快照不可伪装成新版可恢复运行状态。原件和转换审计位于工程外 `/home/wangtianyi/dycon-isolation-20261021/baseline-cleanup/`。
+`baseline/` 已清空，历史产物在 `isolated/history-baseline-20261021/`；仅作历史归档；本次只将 `migration-closeonly331-20261021` 的登记信息转入其 run 级证据，旧快照不可伪装成新版可恢复运行状态。原件和转换审计位于工程外 `/home/wangtianyi/dycon-isolation-20261021/baseline-cleanup/`。
 
 本次精简前的全部 docs 原文、技术说明与实验/验收报告保存于 `/home/wangtianyi/dycon-isolation-20261021/docs-consolidation/`；日常只维护上面三份指南。历史指标仅说明当时的模型、精度、输入和运行范围，当前能力以源码和不可变 run 证据为准。

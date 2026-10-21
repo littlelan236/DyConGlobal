@@ -12,6 +12,10 @@ def classify_close(receipt, matched, open_ids=(248068,), close_ids=(248069,)):
     has_close = any(output[i:i + len(close_ids)] == close_ids
                     for i in range(len(output) - len(close_ids) + 1))
     if not has_close:
+        loop = receipt.get("reasoning_loop") or {}
+        if receipt.get("finish_reason") == "abort" and loop.get("abort_completed") is True:
+            return {"status": "complete", "reason": "reasoning_loop_aborted",
+                    "availability": [], "not_required": True}
         return {"status": "complete", "reason": "truncated_before_close"
                 if receipt.get("finish_reason") == "length" else "no_close_generated",
                 "availability": [], "not_required": True}

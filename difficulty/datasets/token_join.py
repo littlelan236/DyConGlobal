@@ -1,4 +1,4 @@
-﻿"""Strict join between token traces and hidden capture index rows."""
+"""Strict join between token traces and hidden capture index rows."""
 from __future__ import annotations
 
 import json
@@ -6,6 +6,7 @@ import json
 import numpy as np
 
 from core.io import artifact_dir, hash_json, read_json, sha256, write_json
+from difficulty.datasets.paths import dataset_directory
 
 _KIND = {"think_open": 1, "reasoning_newline": 2, "think_close": 3}
 
@@ -35,7 +36,16 @@ def _candidate_indices(meta, arrays, hidden):
     return np.flatnonzero(mask).tolist()
 
 
-def build_token_hidden_index(cfg, dataset_id, capture_id, index_id):
+def build_token_hidden_index(cfg, dataset_id, capture_id, index_id, rollout_ids=(), rollout_list=None):
+    source_run = cfg.get("source_run_id") or cfg.get("run_id")
+    if not source_run:
+        raise ValueError("Dataset trajectory selection requires an explicit source run")
+    from difficulty.datasets.selection import select_run
+    scope = select_run(cfg["project_root"], source_run, rollout_ids, rollout_list)
+    selected_ids = set(scope["rollout_ids"])
+    from application.execution.evidence import RunEvidence
+    all_run_ids = set(RunEvidence(cfg["project_root"], source_run).read()["rollouts"])
+
     source = artifact_dir(cfg, "enrichment", dataset_id)
     capture = artifact_dir(cfg, "hidden", capture_id)
     enrichment_receipt = read_json(source / "receipt.json")
@@ -48,6 +58,10 @@ def build_token_hidden_index(cfg, dataset_id, capture_id, index_id):
     rows, trace_cache = [], {}
     for hidden in hidden_rows:
         rid = hidden["rollout_id"]
+        if rid not in all_run_ids:
+            raise ValueError("Hidden trajectory belongs to another source run")
+        if rid not in selected_ids:
+            continue
         if rid not in trace_cache:
             trace_cache[rid] = _load_trace(cfg, dataset_id, rid)
         _, trace_meta, arrays = trace_cache[rid]
@@ -95,6 +109,7 @@ def build_token_hidden_index(cfg, dataset_id, capture_id, index_id):
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
     receipt = {
         "schema_version": 2,
+        "state": "complete",
         "index_id": index_id,
         "dataset_id": dataset_id,
         "capture_id": capture_id,
@@ -111,7 +126,7 @@ def build_token_hidden_index(cfg, dataset_id, capture_id, index_id):
 
 def audit_token_hidden_index(cfg, index_id):
     """Audit a materialized join without changing its rows."""
-    out = artifact_dir(cfg, "difficulty", index_id, "datasets")
+    out = dataset_directory(cfg, index_id)
     rows_path = out / "rows.jsonl"
     receipt_path = out / "receipt.json"
     if not rows_path.exists() or not receipt_path.exists():

@@ -1,3 +1,4 @@
+from application.execution.evidence import RunEvidence
 import numpy as np
 import pytest
 from conftest import ToyTokenizer, import_fixture
@@ -28,12 +29,12 @@ class Adapter:
 
 def test_capture_index_and_action_share_tensors(cfg):
     import_fixture(cfg, resolved=True)
-    enrich(cfg, "dataset", ToyTokenizer())
+    enrich({**cfg, "source_run_id": "source"}, "dataset", ToyTokenizer())
     cfg["hidden"]["layers"] = [0]
-    out = extract_hidden(cfg, "dataset", "capture", Adapter())
+    out = extract_hidden({**cfg, "source_run_id": "source"}, "dataset", "capture", Adapter())
     assert len(read_json(out / "index.json")) == 4
-    assert extract_hidden(cfg, "dataset", "capture", Adapter()) == out
-    index = build_index(cfg, "dataset", "capture", "joined")
+    assert extract_hidden({**cfg, "source_run_id": "source"}, "dataset", "capture", Adapter()) == out
+    index = build_index({**cfg, "source_run_id": "source"}, "dataset", "capture", "joined")
     assert len(read_json(index / "index.json")["samples"]) == 4
     action = create_action_index(cfg, "joined", "actions")
     assert read_json(action / "index.json")["taxonomy_version"] is None
@@ -45,10 +46,10 @@ def test_prediction_evaluation_uses_frozen_labels(cfg, tmp_path):
     from difficulty.evaluation.run import evaluate_predictions
 
     rid = import_fixture(cfg, resolved=True)
-    dataset = enrich(cfg, "dataset", ToyTokenizer())
+    dataset = enrich({**cfg, "source_run_id": "source"}, "dataset", ToyTokenizer())
     cfg["hidden"]["layers"] = [0]
-    extract_hidden(cfg, "dataset", "capture", Adapter())
-    build_index(cfg, "dataset", "capture", "joined")
+    extract_hidden({**cfg, "source_run_id": "source"}, "dataset", "capture", Adapter())
+    build_index({**cfg, "source_run_id": "source"}, "dataset", "capture", "joined")
     rows = read_json(dataset / f"{rid}.samples.json")
     path = tmp_path / "predictions.json"
     write_json(

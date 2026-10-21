@@ -10,10 +10,10 @@ from pathlib import Path
 import time
 from multiprocessing.connection import wait as wait_connections
 
-from catalog.store import Catalog
+from application.execution.evidence import RunEvidence
 from rollout.runner import run_task
 from core.config import resolve
-from core.io import now, read_json, sha256, write_json
+from core.io import now, read_json, write_json
 from core.model_identity import verify_model
 from runtime.containers.factory import ContainerFactory
 from runtime.serving.manager import ServingManager
@@ -47,9 +47,9 @@ def _worker_process(cfg, run_id, connection):
         connection.close()
 
 
-def _trajectory_stats(root: Path, result: dict) -> dict:
+def _trajectory_stats(root: Path, result: dict, run_id: str) -> dict:
     rid = result.get("rollout_id")
-    row = Catalog(root).read()["rollouts"].get(rid, {}) if rid else {}
+    row = RunEvidence(root, run_id).read()["rollouts"].get(rid, {}) if rid else {}
     path = root / row["trajectory_path"] if row else None
     steps = 0
     tokens = 0
@@ -190,7 +190,7 @@ def run_group(cfg, tasks, run_id, *, capture_enabled: bool, port: int, output: P
             serving.capture_controller.queue.queue.join()
         status = (requests_status(serving) if capture_enabled else None)
     factory.cleanup_owned(run_id)
-    rows = [_trajectory_stats(Path(group_cfg["project_root"]), result)
+    rows = [_trajectory_stats(Path(group_cfg["project_root"]), result, run_id)
             for result in results.values() if result.get("rollout_id")]
     completed_rows = [row for row in rows if row["exit_status"] in {"Submitted", "LimitsExceeded",
                                                                      "ContextWindowExceededError", "RepeatedFormatError", "TimeExceeded"}]
@@ -236,6 +236,7 @@ def requests_status(serving):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--source-run", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--task-count", type=int, default=16)
     parser.add_argument("--capture-only", action="store_true")
@@ -246,8 +247,8 @@ def main():
     cfg = resolve(args.config, ["model.path=" + MODEL,
                                 "model.fingerprint=" + FINGERPRINT,
                                 "model.served_name=Qwen3.5-9B"])
-    catalog = Catalog(cfg["project_root"])
-    selected = catalog.select(partition="train", purposes=["training"])
+    catalog = RunEvidence(cfg["project_root"], args.source_run)
+    selected = catalog.select()
     task_keys = sorted(selected["tasks"])
     if len(task_keys) < args.task_count:
         raise ValueError(f"Only {len(task_keys)} training tasks are available")

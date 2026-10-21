@@ -22,7 +22,7 @@
 配置和数据的事实来源：
 
 - 根 `config.yaml`：唯一可编辑的共用配置。
-- `catalog/manifest.json`：当前 `catalog.store.Catalog` 使用的任务、分区、轨迹与评分索引。旧 `catalog/manifest.json` 不应作为新版运行时的写入目标。
+- `catalog/manifest.json`：benchmark/task 定义与分区；轨迹和评分改由所属 run 的 `evidence.json` 保存。
 - `runs/RUN_ID/`：不可变 plan、配置快照、任务选择与本次执行产物。
 - `instance.environment_overrides`：随任务保存的已有环境适配。
 - `repairs.environment_overrides`：在共享工厂中应用的修复补充。

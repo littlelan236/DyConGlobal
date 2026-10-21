@@ -5,7 +5,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from catalog.store import Catalog, Task
+from catalog.store import Task
+from application.execution.evidence import RunEvidence
 from core.io import hash_json, identifier, owned_path, read_json, sha256
 from core.locking import file_lock
 
@@ -29,15 +30,15 @@ def import_rollout(root, spec):
     termination = info.get("exit_status", "Unknown")
     submission = info.get("submission") or ""
     with file_lock(root / f"state/import-{rid}.lock"):
-        catalog = Catalog(root)
-        old = catalog.read()
-        if rid in old["rollouts"]:
-            existing = old["rollouts"][rid]
-            if old["tasks"][task_key] != task or existing["model_fingerprint"] != spec["model_fingerprint"]:
+        run_catalog = RunEvidence(root, run_id)
+        run_data = run_catalog.read()
+        if rid in run_data["rollouts"]:
+            existing = run_data["rollouts"][rid]
+            if run_data["tasks"].get(task_key) != task or existing["model_fingerprint"] != spec["model_fingerprint"]:
                 raise ValueError("Conflicting task metadata or model for reused trajectory")
-            with catalog.transaction() as data:
-                data["rollouts"][rid]["purposes"] = sorted(set(existing["purposes"] + spec["purposes"]))
-            catalog.verify()
+            with run_catalog.transaction() as data:
+                data["rollouts"][rid]["purposes"] = sorted(set(existing["purposes"] + spec.get("purposes", [])))
+            run_catalog.verify()
             return rid
         artifact_root = root / "runs" / run_id / "rollout"
         trajectory = owned_path(artifact_root, f"trajectories/{rid}/raw.traj.json")
@@ -56,7 +57,7 @@ def import_rollout(root, spec):
             "task_key": task_key,
             "run_id": run_id,
             "attempt_id": attempt_id,
-            "purposes": spec["purposes"],
+            "purposes": spec.get("purposes", []),
             "trajectory_path": str(trajectory.relative_to(root)),
             "trajectory_sha256": digest,
             "patch_path": str(patch.relative_to(root)),
@@ -75,11 +76,7 @@ def import_rollout(root, spec):
                 "reused_from": info.get("tact", {}).get("reused_from"),
             },
         }
-        with catalog.transaction() as data:
-            if task_key in data["tasks"] and data["tasks"][task_key] != task:
-                raise ValueError("Task already registered with conflicting metadata or partition")
-            data["tasks"][task_key] = task
-            data["rollouts"][rid] = row
+        run_catalog.register_rollout(rid, row, task)
     return rid
 
 

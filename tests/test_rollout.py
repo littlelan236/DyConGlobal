@@ -1,3 +1,4 @@
+from application.execution.evidence import RunEvidence
 from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
@@ -65,8 +66,8 @@ def test_rollout_registers_canonical_artifacts_and_resumes(cfg, monkeypatch):
     )
     result = run_manifest(cfg, "run", factory=factory)
     assert len(result) == 4
-    assert catalog.verify()["rollouts"] == 4
-    for row in catalog.read()["rollouts"].values():
+    assert RunEvidence(cfg["project_root"], "run").verify()["rollouts"] == 4
+    for row in RunEvidence(cfg["project_root"], "run").read()["rollouts"].values():
         assert row["trajectory_path"].startswith("runs/run/rollout/trajectories/")
         assert row["submission_status"] == "submitted"
         assert row["resolved"] is None

@@ -5,9 +5,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-TARGETS = (
+DEFAULT_TARGETS = (
     "submission_remaining_reasoning_tokens_log1p",
     "submission_remaining_steps_linear",
+)
+TARGETS = DEFAULT_TARGETS + (
+    "submission_remaining_steps_log1p",
+    "submission_remaining_reasoning_tokens_linear",
 )
 
 
@@ -16,7 +20,8 @@ class RidgeProbe(BaseModel):
 
     dataset_id: str = "submission-shortest375-20261019"
     dataset_receipt_sha256: str = "f43387de4b54ca714c12b4495696f663039f222930e600a35c0474a3b8318a7c"
-    targets: list[str] = Field(default_factory=lambda: list(TARGETS))
+    split_id: str | None = None
+    targets: list[str] = Field(default_factory=lambda: list(DEFAULT_TARGETS))
     layers: list[int] = Field(default_factory=lambda: list(range(32)))
     alphas: list[float] = Field(default_factory=lambda: [10.0**i for i in range(-4, 9)])
     standardize: bool = True
@@ -39,6 +44,8 @@ class RidgeProbe(BaseModel):
         from core.io import identifier
 
         identifier(self.dataset_id)
+        if self.split_id is not None:
+            identifier(self.split_id)
         if self.split_strategy == "inherit_task_split_v1":
             if not self.parent_experiment_id or not self.parent_receipt_sha256:
                 raise ValueError("Inherited task split requires parent experiment and receipt SHA")
@@ -69,7 +76,7 @@ class RidgeProbe(BaseModel):
             raise ValueError("Unknown or duplicate submission target")
         if not self.standardize:
             raise ValueError("This pilot requires training-only feature standardization")
-        if self.validation_tasks >= self.expected_tasks:
+        if self.split_strategy in {'repo_source_quota_v1', 'inherit_task_split_v1'} and self.validation_tasks >= self.expected_tasks:
             raise ValueError("Validation must leave training tasks")
         if self.split_strategy in {"event_random_v1", "task_random_v1"} and self.validation_fraction + self.test_fraction >= 1:
             raise ValueError("Three-way split fractions must leave training data")

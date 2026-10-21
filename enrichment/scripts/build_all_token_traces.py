@@ -5,7 +5,7 @@ from collections import Counter
 from pathlib import Path
 import traceback
 
-from catalog.store import Catalog
+from application.execution.evidence import RunEvidence
 from core.config import resolve
 from core.io import artifact_dir, read_json, sha256, write_json
 from core.locking import file_lock
@@ -17,16 +17,17 @@ def main():
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--model-inventory", type=Path, required=True)
     p.add_argument("--dataset-id", required=True)
+    p.add_argument("--source-run", required=True)
     args = p.parse_args()
     cfg = resolve(args.config)
     root = Path(cfg["project_root"])
-    selection = Catalog(root).select(partition="train", purposes=["training"])
+    selection = RunEvidence(root, args.source_run).select()
     models = read_json(args.model_inventory)["models"]
     by_fingerprint = {value["fingerprint"]: {**value, "name": name} for name, value in models.items()}
     out = artifact_dir(cfg, "enrichment", args.dataset_id)
     out.mkdir(parents=True, exist_ok=True)
     report = {"rollouts": len(selection["rollout_ids"]), "completed": 0, "failed": {},
-              "catalog_sha256": selection["catalog_sha256"], "models": {}, "passed": False}
+              "catalog_sha256": selection["evidence_sha256"], "models": {}, "passed": False}
     with file_lock(root / "state" / (args.dataset_id + ".lock"), nonblocking=True):
         from transformers import AutoTokenizer
 

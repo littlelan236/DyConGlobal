@@ -14,7 +14,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from catalog.store import Catalog
+from application.execution.evidence import RunEvidence
 from core.io import hash_json, identifier, now, owned_path, read_json, sha256, write_json
 from core.locking import file_lock
 
@@ -40,12 +40,12 @@ def classify(termination, attempt_statuses, run_stages, *, orphaned=False):
     return None
 
 
-def audit(root, source, cleanup_id):
+def audit(root, source, cleanup_id, source_run):
     root, source = Path(root).resolve(), Path(source).resolve()
     out = owned_path(root, f"catalog/maintenance/{identifier(cleanup_id)}")
     if out.exists():
         raise FileExistsError(out)
-    catalog = Catalog(root)
+    catalog = RunEvidence(root, source_run)
     catalog.verify()
     data = catalog.read()
     processes = subprocess.check_output(["ps", "-eo", "pid,args"], text=True).splitlines()
@@ -110,7 +110,7 @@ def audit(root, source, cleanup_id):
     write_json(out / "manifest-before.json", data)
     plan = {
         "schema_version": 1,
-        "cleanup_id": cleanup_id,
+        "cleanup_id": cleanup_id, "source_run_id": source_run,
         "created_at": now(),
         "catalog_hash": hash_json(data),
         "source_root": str(source),
@@ -123,8 +123,8 @@ def audit(root, source, cleanup_id):
     return out / "plan.json"
 
 
-def export_catalog(root, out):
-    data = Catalog(root).read()
+def export_catalog(root, out, source_run):
+    data = RunEvidence(root, source_run).read()
     fields = [
         "rollout_id",
         "task_id",
@@ -176,9 +176,10 @@ def apply(root, plan_file):
     if not plan_file.is_relative_to(root / "catalog/maintenance"):
         raise ValueError("Cleanup plan must be project-owned provenance")
     plan = read_json(plan_file)
+    source_run = plan["source_run_id"]
     out = plan_file.parent
     with file_lock(root / "state/interrupted-cleanup.lock"):
-        catalog = Catalog(root)
+        catalog = RunEvidence(root, source_run)
         if (out / "receipt.json").exists():
             receipt = read_json(out / "receipt.json")
             if receipt["plan_sha256"] != sha256(plan_file):
@@ -207,8 +208,6 @@ def apply(root, plan_file):
                 payloads.append(path)
         if any(remove_ids.intersection(e["outcomes"]) for e in data["evaluations"].values()):
             raise ValueError("Removed rows are referenced by evaluation evidence")
-        if any(remove_ids.intersection(s.values()) for s in data["baseline_selections"].values()):
-            raise ValueError("Removed rows are selected as baseline")
         # First retire catalog rows atomically. A crash can leave unreferenced files,
         # but cannot leave training records pointing at deleted payloads.
         with catalog.transaction() as updated:
@@ -220,7 +219,7 @@ def apply(root, plan_file):
             path.unlink()
             if not any(path.parent.iterdir()):
                 path.parent.rmdir()
-        rows, aliases = export_catalog(root, out)
+        rows, aliases = export_catalog(root, out, source_run)
         result = {
             "cleanup_id": plan["cleanup_id"],
             "completed_at": now(),
@@ -247,11 +246,12 @@ def main():
     p = sub.add_parser("audit")
     p.add_argument("--source", type=Path, required=True)
     p.add_argument("--cleanup-id", required=True)
+    p.add_argument("--source-run", required=True)
     p = sub.add_parser("apply")
     p.add_argument("--plan", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "audit":
-        print(audit(args.root, args.source, args.cleanup_id))
+        print(audit(args.root, args.source, args.cleanup_id, args.source_run))
     else:
         print(json.dumps(apply(args.root, args.plan), indent=2))
 

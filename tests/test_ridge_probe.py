@@ -166,7 +166,10 @@ def test_full_artifact_roundtrip_and_no_validation_fit(fixture_project):
     assert len((output / "trials.jsonl").read_text().splitlines()) == 8
     assert len(list((output / "plots").glob("*.png"))) == 6
     _, samples, _ = load_selection(cfg, settings)
-    split = read_json(output / "split.json")
+    attempt = read_json(output / "attempt.json")
+    split_path = Path(cfg["project_root"]) / "difficulty/datasets" / attempt["dataset_id"] / "splits" / attempt["split_id"] / "split.json"
+    split = read_json(split_path)
+    assert not (output / "split.json").exists()
     train_ids = set(split["sample_ids"]["train"])
     from difficulty.datasets.submission import iter_features
 
@@ -189,12 +192,22 @@ def test_tampered_selection_and_non_submission_fail(fixture_project):
     with pytest.raises(ValueError, match="selection file changed"):
         load_selection(cfg, settings)
     (dataset / "samples.jsonl").write_bytes(samples)
+    # Live global metadata is irrelevant to a receipt-bound training input.
     path = Path(cfg["project_root"]) / "catalog/manifest.json"
     catalog = read_json(path)
     catalog["rollouts"]["r0"]["submission_status"] = "unsubmitted"
     write_json(path, catalog)
-    with pytest.raises(ValueError, match="non-submitted"):
-        load_selection(cfg, settings)
+    load_selection(cfg, settings)
+    # Invalid submitted status in the actual frozen input still fails.
+    frozen = read_json(dataset / "rollouts.json")
+    frozen["rollouts"][0]["submission_status"] = "unsubmitted"
+    write_json(dataset / "rollouts.json", frozen)
+    receipt = read_json(dataset / "receipt.json")
+    receipt["files"]["rollouts.json"] = sha256(dataset / "rollouts.json")
+    write_json(dataset / "receipt.json", receipt)
+    changed = settings.model_copy(update={"dataset_receipt_sha256": sha256(dataset / "receipt.json")})
+    with pytest.raises(ValueError, match="submitted canonical"):
+        load_selection(cfg, changed)
 
 
 def test_dry_run_is_not_fit_and_does_not_build_cache(fixture_project):
@@ -271,7 +284,8 @@ def test_expanded_selection_load_and_inherited_dryrun(fixture_project):
     cfg["difficulty"]["ridge_probe"] = options
     cfg["config_hash"] = hash_json({k: v for k, v in cfg.items() if k != "config_hash"})
     result = run_probe(cfg, "expanded-dry", mode="dry-run")
-    split = read_json(Path(result["path"]) / "split.json")
+    attempt = read_json(Path(result["path"]) / "attempt.json")
+    split = read_json(root / "difficulty/datasets" / attempt["dataset_id"] / "splits" / attempt["split_id"] / "split.json")
     assert split["task_counts"] == parent["task_counts"]
     assert len(split["rollouts"]) == 10
     assert sum(split["sample_counts"].values()) == 30

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from catalog.store import Catalog
+from application.execution.evidence import RunEvidence
 from core.io import hash_json, read_json, sha256, write_json
 from difficulty.evaluation.parallel import collect_parallel_scores, visualize_parallel
 
@@ -29,7 +29,8 @@ def published(tmp_path, monkeypatch):
                "termination_reason": "Submitted", "provenance": {}}
     catalog = {"catalog_revision": 1, "rollouts": {"r-one": rollout},
                "tasks": {"task": {"instance_id": "repo__task-1", "repo": "repo/task", "partition": "train"}}}
-    monkeypatch.setattr(Catalog, "read", lambda self: catalog)
+    catalog["revision"] = 1
+    monkeypatch.setattr(RunEvidence, "read", lambda self: catalog)
     root = tmp_path / "nas/hidden/online/run"
     session = root / "sessions/session-one"
     final = {"rollout_id": "r-one", "trajectory_sha256": sha256(trajectory),
@@ -122,7 +123,7 @@ def test_retries_require_explicit_attempt(published):
     catalog["rollouts"]["r-two"] = {**catalog["rollouts"]["r-one"], "attempt_id": "attempt-001"}
     with pytest.raises(ValueError, match="specify --attempt-id"):
         visualize_parallel(cfg, "run", "ambiguous", task_id="repo__task-1")
-    assert not (Path(cfg["project_root"]) / "difficulty/evaluation/outputs/ambiguous").exists()
+    assert not (Path(cfg["project_root"]) / "difficulty/evaluations/ambiguous").exists()
     assert visualize_parallel(cfg, "run", "explicit", task_id="repo__task-1", attempt_id="attempt-000")
 
 

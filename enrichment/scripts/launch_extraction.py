@@ -9,7 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from catalog.store import Catalog
+from application.execution.evidence import RunEvidence
 from core.config import resolve
 from core.io import read_json, sha256, write_json
 from core.locking import file_lock
@@ -66,15 +66,16 @@ def _launch_locked(root):
             proc = Path('/proc') / str(record['pid']) / 'cmdline'
             if proc.exists() and b'run_extraction_queue.py' in proc.read_bytes():
                 raise RuntimeError('Old extraction worker still alive: ' + str(record['pid']))
-        catalog = Catalog(root)
-        print('CATALOG', catalog.verify(), flush=True)
-        current = catalog.read()
+
         models = read_json(root / 'state/extraction-models.json')
         jobs = read_json(directory / 'queue.json')
         if any(j['status'] == 'running' for j in jobs):
             raise RuntimeError('Recover stale running jobs explicitly before launch')
         for job in jobs:
-            row = current['rollouts'][job['rollout_id']]
+            source_run = job.get('source_run_id')
+            if not source_run:
+                raise ValueError('Historical queue job requires explicit source_run_id')
+            row = RunEvidence(root, source_run).read()['rollouts'][job['rollout_id']]
             if row['trajectory_sha256'] != job['trajectory_sha256'] or row['model_fingerprint'] != models[job['model']]['fingerprint']:
                 raise ValueError('Queue/catalog checkpoint or trajectory binding mismatch')
         print('COMPLETED_ARTIFACTS_VERIFIED', verify_completed(root, jobs), flush=True)
@@ -86,7 +87,7 @@ def _launch_locked(root):
             for anchors in [['think_open'], ['think_open', 'think_close']]:
                 overrides = [
                     'model.path=' + model['path'], 'model.fingerprint=' + model['fingerprint'],
-                    'model.served_name=' + name, 'benchmark.partition=train', 'benchmark.purposes=[training]',
+                    'model.served_name=' + name, 'benchmark.partition=train',
                     'enrichment.anchors=' + str(anchors), 'hidden.device=cpu', 'hidden.chunk_size=1024',
                     'hidden.layers=' + str(layers), 'hidden.adapter=vllm_eager', 'hidden.vllm.gpus=' + str(gpus),
                     'hidden.vllm.tensor_parallel_size=' + str(len(gpus)), 'capture.enabled=false',

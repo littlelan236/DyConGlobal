@@ -4,6 +4,7 @@ import pytest
 from conftest import import_fixture, task
 
 from catalog.store import Catalog
+from application.execution.evidence import RunEvidence
 from rollout.artifacts import import_rollout
 from diagnostics.cleanup_rollouts import apply, classify
 from core.io import hash_json, read_json, write_json
@@ -44,14 +45,16 @@ def test_cleanup_removes_payloads_and_preserves_terminal_rollout(cfg):
             "model_fingerprint": "fixture-model",
         },
     )
-    catalog = Catalog(root)
+    catalog = RunEvidence(root, "old")
     before = catalog.read()
+    keep_before = RunEvidence(root, "source").read()["rollouts"][keep]
     removed_row = before["rollouts"][remove]
     out = root / "catalog/maintenance/cleanup"
     plan = out / "plan.json"
     write_json(
         plan,
         {
+            "source_run_id": "old",
             "cleanup_id": "cleanup",
             "catalog_hash": hash_json(before),
             "remove": [{"rollout_id": remove}],
@@ -59,8 +62,8 @@ def test_cleanup_removes_payloads_and_preserves_terminal_rollout(cfg):
         },
     )
     result = apply(root, plan)
-    assert result["removed"] == 1 and result["remaining"] == 1
-    assert catalog.read()["rollouts"][keep] == before["rollouts"][keep]
+    assert result["removed"] == 1 and result["remaining"] == 0
+    assert RunEvidence(root, "source").read()["rollouts"][keep] == keep_before
     assert not (root / removed_row["trajectory_path"]).exists()
     assert not (root / removed_row["patch_path"]).exists()
     assert raw.exists()
@@ -71,11 +74,12 @@ def test_cleanup_removes_payloads_and_preserves_terminal_rollout(cfg):
 def test_forged_cleanup_cannot_delete_submitted_rollout(cfg):
     root = Path(cfg["project_root"])
     keep = import_fixture(cfg)
-    before = Catalog(root).read()
+    before = RunEvidence(root, "source").read()
     plan = root / "catalog/maintenance/unsafe/plan.json"
     write_json(
         plan,
         {
+            "source_run_id": "source",
             "cleanup_id": "unsafe",
             "catalog_hash": hash_json(before),
             "remove": [{"rollout_id": keep}],
@@ -84,5 +88,5 @@ def test_forged_cleanup_cannot_delete_submitted_rollout(cfg):
     )
     with pytest.raises(ValueError, match="Only unfinalized"):
         apply(root, plan)
-    assert Catalog(root).read() == before
+    assert RunEvidence(root, "source").read() == before
     assert (root / before["rollouts"][keep]["trajectory_path"]).exists()

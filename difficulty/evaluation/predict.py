@@ -4,15 +4,16 @@ from pathlib import Path
 import numpy as np
 from core.io import artifact_dir, owned_path, read_json, sha256, write_json
 from runtime.serving.parallel import artifact_contract
+from difficulty.datasets.paths import dataset_directory, source_directory
 
 
 def predict_hidden(cfg, index_id, predictor, prediction_id):
-    index_path=artifact_dir(cfg,"difficulty",index_id,"datasets")/"index.json"
+    index_path=dataset_directory(cfg,index_id)/"index.json"
     index=read_json(index_path)
     if index.get("schema_version")!=1:
         raise ValueError("Prediction currently requires offline schema 1 index")
-    source=artifact_dir(cfg,"enrichment",index["dataset_id"])
-    capture=artifact_dir(cfg,"hidden",index["capture_id"])
+    source=source_directory(cfg,index,index_path.parent,"enrichment")
+    capture=source_directory(cfg,index,index_path.parent,"hidden")
     receipt=read_json(capture/"receipt.json")
     if sha256(capture/"receipt.json")!=index["capture_receipt_sha256"]:
         raise ValueError("Capture receipt changed")
@@ -55,7 +56,8 @@ def predict_hidden(cfg, index_id, predictor, prediction_id):
                                         for r,v in zip(rows,native,strict=True)])
     write_json(output/"native-scores.json",[{"sample_id":r["sample_id"],"score":float(v)}
                                          for r,v in zip(rows,scores,strict=True)])
-    write_json(output/"receipt.json",{"schema_version":1,"predictor_sha256":sha256(path),
+    write_json(output/"receipt.json",{"schema_version":1,"state":"complete","predictor_sha256":sha256(path),
+               "source_files":{str(index_path):sha256(index_path),str(path):sha256(path)},
                "index_sha256":sha256(index_path),"target":target,"endpoint":"submission",
                "sites":contract["sites"],"count":len(rows),"negative_predictions_preserved":True,
                "files":{n:sha256(output/n) for n in ["predictions.json","native-scores.json"]}})

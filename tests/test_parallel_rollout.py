@@ -11,12 +11,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from rollout.parallel import ParallelReasoningCoordinator, active
 from core.config import Parallel, resolve
 from core.io import read_json, sha256, write_json
 from enrichment.online_trace import finalize_token_events
 from hidden.artifacts import read_arrays, read_branch_index
 from hidden.backends.vllm.online import capture_request_metadata
+from rollout.parallel import ParallelReasoningCoordinator, active
 from runtime.serving.capture import OnlineCaptureController
 from runtime.serving.parallel import ScoringBroker, artifact_contract
 
@@ -75,6 +75,36 @@ class BrokerClient:
         if action == "results":
             return self.broker.results(payload["decision_id"], payload["timeout"])
         return self.broker.release(payload["decision_id"])
+
+
+def test_loop_terminal_result_survives_late_predictor_and_release(tmp_path, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+
+    def predict(batch):
+        entered.set()
+        release.wait(2)
+        return np.zeros(len(batch))
+
+    broker = ScoringBroker(provider(tmp_path, monkeypatch, predict), "model", 2)
+    md = {"session_id": "s", "decision_id": "d", "branch_id": 0, "api_attempt_id": "a"}
+    try:
+        broker.reserve("d", [0])
+        broker.submit(md, "r", 1, 11, {"layer_0": np.ones(2)})
+        assert entered.wait(1)
+        broker.mark_terminated(md, "r", {"abort_completed": True})
+        release.set()
+        broker.jobs.join()
+        row = broker.results("d", 0)["results"][0]
+        assert row["reason"] == "reasoning_loop"
+        assert row["status"] == "failed"
+        broker.submit(md, "r", 2, 11, {"layer_0": np.ones(2)})
+        assert broker.results("d", 0)["results"][0] == row
+        broker.release("d")
+        broker.mark_terminated(md, "r", {"abort_completed": True})
+        assert "d" not in broker.groups
+    finally:
+        release.set()
+        broker.close()
 
 
 @pytest.mark.parametrize("offline", [False, True])
@@ -448,6 +478,10 @@ def test_parallel_plugin_http_scores_only_and_lifecycle(tmp_path, monkeypatch):
     monkeypatch.setenv("DYCON_CAPTURE_EXPORT_OPTIONS", "{}")
     plugin = DyConCapturePlugin()
     plugin.scoring = broker
+    async def collective_rpc(*args, **kwargs):
+        return []
+
+    plugin.engine = SimpleNamespace(collective_rpc=collective_rpc)
     app = fastapi.FastAPI()
     plugin.attach_router(app)
     try:

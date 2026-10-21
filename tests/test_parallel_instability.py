@@ -240,7 +240,7 @@ def test_unavailable_and_corruption_are_not_conflated(scored):
     decision.write_bytes(original + b" ")
     with pytest.raises(ValueError, match="checksum"):
         evaluate_parallel_instability(cfg, "run", "bad", skip_unavailable=True)
-    assert not (Path(cfg["project_root"]) / "difficulty/evaluation/outputs/bad").exists()
+    assert not (Path(cfg["project_root"]) / "difficulty/evaluations/bad").exists()
     decision.write_bytes(original)
     (session / "finalization.json").unlink()
     with pytest.raises(ValueError, match="No published"):

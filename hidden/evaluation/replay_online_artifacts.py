@@ -21,7 +21,7 @@ def finalized_request(source, row, project_root=None, catalog=None, verified=Non
     if row["request_id"] not in finalization["accepted_native_request_ids"]:
         return None
     if project_root is not None:
-        from catalog.store import verified_trajectory
+        from application.execution.evidence import verified_trajectory
         if verified is None or finalization_path not in verified:
             verified_trajectory(project_root, finalization, catalog)
             if verified is not None:
@@ -35,11 +35,7 @@ def prepare_reference(source, output, event_index=None, project_root=None):
     source, output = Path(source), Path(output)
     receipts = {}
     verified = set()
-    if project_root is not None:
-        from catalog.store import Catalog
-        catalog = Catalog(project_root).read()
-    else:
-        catalog = None
+    catalog = None
     events = read_json(event_index) if event_index else [row for _, row in event_records(source)]
     paths = (
         sorted({source / row["ledger_ref"] for row in events})

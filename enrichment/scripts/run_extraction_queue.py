@@ -113,7 +113,12 @@ def _worker(root, snapshot, gpus):
                             trust_remote_code=cfg["model"]["trust_remote_code"],
                         )
                         cached_model = model
-                    enrich(cfg, dataset, tokenizer)
+                    from application.execution.evidence import RunEvidence
+                    source_run = job.get("source_run_id") or job.get("run_id")
+                    if not source_run:
+                        raise ValueError("Extraction job requires an explicit source run")
+                    selected = RunEvidence(root, source_run).select([rid])
+                    enrich(cfg, dataset, tokenizer, selection=selected)
                     update(root, "enrichment", rid, {**base, "status": "completed",
                                                        "receipt": "enrichment/outputs/" + dataset + "/receipt.json"})
                     if adapter is None:

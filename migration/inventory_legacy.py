@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 from core.io import now, sha256, write_json
+from application.execution.evidence import RunEvidence
 
 SHA = re.compile(r"[0-9a-f]{64}")
 
@@ -23,9 +24,9 @@ def digests(value):
             yield from digests(item)
 
 
-def inventory(root: Path):
+def inventory(root: Path, source_run):
     root = root.resolve()
-    manifest = json.loads((root / "catalog/manifest.json").read_text(encoding="utf-8"))
+    manifest = RunEvidence(root, source_run).read()
     reference_sources = []
     reference_hashes = set()
     for base in (root / "difficulty", root / "enrichment", root / "hidden", root / "artifacts"):
@@ -81,7 +82,7 @@ def inventory(root: Path):
     return {
         "schema_version": 1,
         "generated_at": now(),
-        "catalog_revision": manifest["catalog_revision"],
+        "source_run_id": source_run, "evidence_revision": manifest["revision"],
         "rollout_count": len(rows),
         "reference_scan": reference_sources,
         "rollouts": rows,
@@ -92,8 +93,9 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--root", default=".")
     p.add_argument("--output", required=True)
+    p.add_argument("--source-run", required=True)
     a = p.parse_args()
-    result = inventory(Path(a.root))
+    result = inventory(Path(a.root), a.source_run)
     write_json(a.output, result)
     print(json.dumps({"output": str(Path(a.output).resolve()), "rollouts": result["rollout_count"],
                       "reference_files": len(result["reference_scan"])}, indent=2))

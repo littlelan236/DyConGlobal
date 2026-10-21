@@ -6,13 +6,11 @@ Execution code never re-reads the mutable root YAML for an existing run.
 
 from __future__ import annotations
 
-import copy
-import shutil
 import yaml
 from pathlib import Path
 
 from catalog.store import Catalog
-from core.config import load_snapshot, resolve, snapshot
+from core.config import load_snapshot, snapshot
 from core.io import hash_json, identifier, now, read_json, write_json
 
 
