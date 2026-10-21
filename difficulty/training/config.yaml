@@ -1,0 +1,43 @@
+# MLP and Ridge+MLP training configuration; loaded by their official dycon commands.
+# Dataset/split identities may be overridden only by the command's explicit inputs.
+mlp_probe:
+  dataset_id: resolved-closeonly106-20261021
+  dataset_receipt_sha256: b5d0cd44282fbd829d2215965807c61259da21cd633304ba2b65305bd7811081
+  split_id: null
+  split_receipt_sha256: null
+  split_strategy: event_random_v1
+  split_seed: 42
+  validation_fraction: 0.2
+  test_fraction: 0.2
+  expected_tasks: 106
+  expected_rollouts: 106
+  expected_samples: 6104
+  public_site: 3
+  targets: [submission_remaining_steps_log1p, submission_remaining_reasoning_tokens_log1p]
+  hidden_dim: 256
+  dropout: 0.0
+  epochs: 100
+  batch_size: 256
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  patience: 20
+  min_delta: 0.0
+  seed: 42
+  device: auto
+  torch_threads: 4
+  scheduler:
+    enabled: true
+    kind: reduce_on_plateau
+    factor: 0.5
+    patience: 5
+    threshold: 0.0001
+    min_lr: 0.000001
+
+# Inherit all mlp_probe settings above, then apply these overrides.
+# Each target binds an already trained Ridge publication; training never refits Ridge.
+ridge_mlp_probe:
+  dataset_id: resolved-closeonly331-20261021
+  dataset_receipt_sha256: ca5e299638b38e60d0ffb0b54adc0cb9c8d86531d3f2cce5641a65817bfed6d7
+  ridge_publications:
+    submission_remaining_steps_log1p: runtime/parallel-artifacts/ridge-closeonly331-step-log1p-train-20261021/manifest.json
+    submission_remaining_reasoning_tokens_log1p: runtime/parallel-artifacts/ridge-closeonly331-reasoning-log1p-train-20261021/manifest.json

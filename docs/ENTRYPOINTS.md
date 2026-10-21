@@ -194,6 +194,8 @@ runs/RUN_ID/
 | 共享 hidden 视图 | analysis | `action-index INDEX_ID ACTION_INDEX_ID` | 引用共享 index，不重复提取 hidden |
 
 | Ridge 尝试 | analysis | `difficulty-ridge ATTEMPT_ID [--dataset-id ID] [--split-id ID] --mode dry-run/check-data/fit` | 新目录拒绝覆盖；默认 fit，见下文 |
+| MLP 尝试 | analysis | `difficulty-mlp ATTEMPT_ID --dataset-id ID [--split-id SPLIT_ID] --mode dry-run/check-data/fit` | 参数来自 `difficulty/training/config.yaml`；默认 event split、scheduler 和三分区 epoch 指标 |
+| Ridge+MLP 尝试 | analysis | `difficulty-ridge-mlp ATTEMPT_ID --dataset-id ID [--split-id SPLIT_ID] --mode dry-run/check-data/fit` | 在每个目标的已发布 train-only Ridge 上训练零初始化 FFN 残差；发布 manifest、checkpoint、split 和 SHA 快照到 attempt |
 | 成功轨迹训练集 | analysis | `difficulty-dataset resolved DATASET_ID --source-run RUN_ID --index-id INDEX_REF` | 冻结精确评测和 canonical 样本关系 |
 | 跨批次组合训练集 | analysis | `difficulty-dataset compose DATASET_ID --source-dataset A --source-dataset B` | 绑定父 receipt；拒绝重复样本/rollout、冲突 commit/hidden 模型 |
 | 训练数据划分 | analysis | `difficulty-split DATASET_ID SPLIT_ID --strategy event_random_v1/task_random_v1` | seed/fractions 等参数见 --help；独立 immutable receipt |
@@ -574,7 +576,7 @@ show 使用相同 scope。run 的 `artifact verify RUN_ID` 继续按原语义工
 旧 index 按显式目录读取，例如 `difficulty-evaluate runs/OLD_RUN/difficulty/datasets/INDEX_ID ...`；
 不通过当前 run 隐式搜索旧目录。resolved loader 同样接受该显式 `--index-id` 目录。
 旧 checkpoint 使用原 experiment 路径显式发布，旧 snapshot/receipt/模型不自动迁移或重签。
-通用 MLP 正式训练命令仍待实现，未来应复用 dataset/split/checkpoint 结构与 verifier。
+MLP 正式训练使用 `difficulty-mlp`，Ridge+MLP 使用 `difficulty-ridge-mlp`，两者复用 dataset/split/checkpoint 结构与 verifier；Ridge+MLP 的 Ridge 来源通过 `difficulty/training/config.yaml` 的 `ridge_mlp_probe.ridge_publications` 绑定发布 manifest，入口不会重新拟合 Ridge。当前结果是离线 attempt 产物，不自动发布为在线 predictor。
 
 ## Catalog 与运行证据边界（2026-10-21）
 

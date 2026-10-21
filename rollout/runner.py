@@ -16,6 +16,7 @@ from rollout.artifacts import import_rollout
 
 TERMINAL = {
     "Submitted",
+    "reasoning_loop",
     "LimitsExceeded",
     "ContextWindowExceededError",
     "RepeatedFormatError",

@@ -129,6 +129,7 @@ enrichment 生成 open/close prefix、remaining labels 和 coverage；token trac
 .venvs/analysis/bin/dycon difficulty-split DATASET_ID SPLIT_ID --strategy event_random_v1 --seed 42
 .venvs/analysis/bin/dycon difficulty-ridge PLAN_ID --dataset-id DATASET_ID --split-id SPLIT_ID --mode dry-run
 .venvs/analysis/bin/dycon difficulty-ridge ATTEMPT_ID --dataset-id DATASET_ID --split-id SPLIT_ID --mode fit
+.venvs/analysis/bin/dycon difficulty-mlp MLP_ATTEMPT_ID --dataset-id DATASET_ID --mode fit
 .venvs/analysis/bin/dycon artifact verify ATTEMPT_ID --scope difficulty-attempt
 .venvs/runner/bin/dycon predictor-publish PREDICTOR_ID --experiment difficulty/checkpoints/ATTEMPT_ID --target reasoning_length
 .venvs/runner/bin/dycon difficulty-predict INDEX_ID runtime/parallel-artifacts/PREDICTOR_ID/manifest.json PREDICTION_ID
@@ -140,7 +141,7 @@ dataset、split、attempt 均有独立 ID 和不可覆盖的 receipt；输出始
 dataset split 在 `difficulty/datasets/DATASET_ID/splits/SPLIT_ID/`；模型/报告在 `difficulty/checkpoints/ATTEMPT_ID/`。
 checkpoint 的 NPZ 与 JSON 标明架构、输入 site/维度、target/变换、数据/划分 receipt 和 fit scope。
 独立预测与评估分别写入 `difficulty/predictions/ID/`、`difficulty/evaluations/ID/`。
-schema 1 scorer/predictor 的现有能力边界保持；通用 MLP/Ridge+FFN 当前仍是 Python API。
+schema 1 scorer/predictor 的现有能力边界保持；MLP 通过 `difficulty-mlp` 生成离线 attempt。MLP 参数和 scheduler 在 `difficulty/training/config.yaml`，Ridge+FFN 仍是 Python API。
 旧 run 目录保持原样，可显式提供旧 index/experiment 目录读取，不能用相同 ID 隐式回退。
 
 ## 11. 并行分支可视化和评分稳定性

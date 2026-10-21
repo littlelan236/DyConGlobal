@@ -80,6 +80,7 @@ desktop.ini
 /difficulty/predictions/**
 /difficulty/evaluations/**
 /difficulty/evaluation/outputs/**
+/difficulty/logs/**
 
 # Generated action analysis products
 /action/datasets/*/

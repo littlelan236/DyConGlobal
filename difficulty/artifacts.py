@@ -10,6 +10,12 @@ def _check_models(directory, attempt, receipt):
     if attempt["mode"] != "fit":
         return
     import numpy as np
+    if attempt.get('model_contract', {}).get('model_kind') in {'ffn_mlp', 'ridge_plus_ffn'}:
+        from difficulty.models.mlp_checkpoint import verify_attempt_models
+        verify_attempt_models(directory, attempt, receipt)
+        return
+    if attempt.get('model_contract', {}).get('model_kind') != 'ridge':
+        raise ValueError('Unknown difficulty checkpoint model kind')
     from difficulty.models.ridge_grid import load_model
 
     for name in receipt["files"]:

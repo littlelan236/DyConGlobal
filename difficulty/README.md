@@ -24,6 +24,29 @@ dataset receipt 不包含后增的 splits 子目录；每次新划分/训练用�
 旧 run 产物保持原样，旧 index 使用显式 `runs/RUN/difficulty/datasets/ID` 路径；旧 checkpoint 可用原 experiment 路径发布。
 `--run-id` 仍可读取冻结配置，但不决定 difficulty 输出目录。runtime 部署副本仍在 runtime/parallel-artifacts/。
 
+MLP 复用同一 dataset/split/attempt 生命周期：
+
+```bash
+.venvs/analysis/bin/dycon difficulty-mlp ATTEMPT_ID \
+  --dataset-id DATASET_ID --split-id SPLIT_ID --mode dry-run/check-data/fit
+.venvs/analysis/bin/dycon artifact verify ATTEMPT_ID --scope difficulty-attempt
+```
+
+Ridge+MLP 使用同一套 attempt/receipt/epoch-history 接口：
+
+```bash
+.venvs/analysis/bin/dycon difficulty-ridge-mlp ATTEMPT_ID \
+  --dataset-id DATASET_ID --split-id SPLIT_ID --mode dry-run/check-data/fit
+```
+
+`difficulty/training/config.yaml` 的 `ridge_mlp_probe.ridge_publications` 为两个 log1p 目标分别绑定已发布 Ridge manifest。入口验证 manifest、发布包文件 SHA、public site、hidden width、模型 fingerprint、target 及训练 split；Ridge 必须是已训练的 `fit_scope=train` 或 `train_validation` 数值 checkpoint，且其训练样本不得出现在当前 validation/test。Ridge 参数保持冻结，Ridge+MLP 只训练零初始化的 FFN residual，最终预测为 `Ridge(x) + residual(x)`。每个 target 的 `models/<target>/ridge-publication/` 保存发布元信息和 payload 快照，因此 attempt 可独立复核。
+
+MLP 与 Ridge+MLP 使用配置的 public site（当前为 site 3），训练两个独立的 submission log1p 目标。`fit` 按 validation MSE 选择 checkpoint，再评估 train/validation/test；`history/<target>.jsonl` 保存逐 epoch train/eval loss、MSE/R²/MAE/RMSE 和 learning rate，`progress.json` 保存运行状态。MLP 是离线 attempt 产物，现有 predictor/evaluate schema 不自动消费它。
+
+MLP 默认使用 `event_random_v1`：同一 task 的样本可以进入不同 split；如需 task holdout，必须显式创建并传入 `--split-id`。回归任务没有分类 accuracy，history 同时保存 train/validation/test 的 MSE、R²、MAE、RMSE；`difficulty.training.mlp_visualize.plot_attempt` 生成 loss/R² 曲线。
+
+MLP 专用参数不放在根 `config.yaml`，统一维护于 `difficulty/training/config.yaml`。该文件包含模型、数据划分和 scheduler 配置；每个 attempt 的 `attempt.json` 保存完整训练配置及 SHA，每个 target 的 `models/<target>/config.json` 保存参数快照。scheduler 默认使用 `ReduceLROnPlateau`，监控 validation loss；每个 epoch 的 `learning_rate` 写入 history，并绘制在学习率曲线中。
+
 
 同 action、不同 reasoning 的评分不稳定性评测使用 `dycon difficulty-evaluate-parallel RUN_ID EVALUATION_ID`，
 实现与已有并行轨迹可视化同在 `difficulty/evaluation/` 并复用轨迹对齐。
@@ -126,9 +149,9 @@ hidden `[samples, selected_layers, hidden_size]` 展平为 `[samples, selected_l
 
 - schema 3 按 task partition 选择 train/val；未 resolved 或 censored 的标签在索引阶段置 null。2026-10-19 观察的 task 全为 train，不能将无 val 的现状称作完成验证。
 - schema 1 按排序 rollout ID 约取 80%/20%；同 rollout 不跨组，但同 task 多条 rollout 可能跨组。该分支仅区分 train/val/其余全部，没有独立 test split。
-- FFN 当前使用 CPU tensors/模块，没有 device/GPU 参数；Ridge 为 NumPy 实现。
+- 正式 MLP/Ridge+MLP attempt 支持 `device: auto|cpu|cuda[:N]`，在 analysis 环境使用 PyTorch GPU；Ridge 基础模型仍为 NumPy 数值 checkpoint，训练期间保持冻结。
 
-**无通用 `dycon difficulty-train`，原训练模块没有 main/argparse。** 本次单层Ridge pilot使用上述正式 difficulty-ridge；FFN/残差训练及通用checkpoint工作流仍未扩展。不能以临时训练脚本绕行。`difficulty.estimator=null` 不自动选择模型；动态在线难度控制未实现。
+**没有旁路 `dycon difficulty-train`。** MLP 使用正式 `difficulty-mlp`，Ridge+MLP 使用正式 `difficulty-ridge-mlp`，通过统一 attempt/receipt/verifier 生成离线 checkpoint 和评测。不能以临时训练脚本绕行。`difficulty.estimator=null` 不自动选择模型；动态在线难度控制未实现。
 
 已有数值契约测试 `tests/test_difficulty_estimators.py`；小型合成测试不等于实际数据训练或跨任务泛化验证。
 

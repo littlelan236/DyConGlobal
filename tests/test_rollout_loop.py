@@ -1,4 +1,3 @@
-from application.execution.evidence import RunEvidence
 """Exercise loop limits through the native agent flow without GPUs or Docker."""
 
 # Optional runner imports follow importorskip, as in the existing rollout tests.
@@ -266,7 +265,8 @@ def test_legacy_yaml_identity_and_snapshot_remain_unchanged(cfg):
 
 
 @pytest.mark.parametrize("capture,fail_capture", [(False, False), (True, False), (True, True)])
-def test_runner_persists_loop_and_resumes_without_retry(cfg, monkeypatch, capture, fail_capture):
+@pytest.mark.parametrize("terminal_status", ["LimitsExceeded", "reasoning_loop"])
+def test_runner_persists_loop_and_resumes_without_retry(cfg, monkeypatch, capture, fail_capture, terminal_status):
     from conftest import task
 
     from catalog.store import Catalog
@@ -283,6 +283,16 @@ def test_runner_persists_loop_and_resumes_without_retry(cfg, monkeypatch, captur
     catalog.register_tasks([task("loop-task")])
     task_key, row = next(iter(catalog.read()["tasks"].items()))
     scripted = ScriptedModel([message()] * 8)
+    if terminal_status == "reasoning_loop":
+        from minisweagent.exceptions import LimitsExceeded
+
+        def all_branches_loop(*args, **kwargs):
+            scripted.calls += 1
+            raise LimitsExceeded({"role": "exit", "content": "All branches looped",
+                                  "extra": {"exit_status": "reasoning_loop", "submission": "",
+                                            "limit_reason": "all_parallel_branches_reasoning_loop"}})
+
+        scripted.query = all_branches_loop
     env = Environment()
     calls = []
 
@@ -298,7 +308,7 @@ def test_runner_persists_loop_and_resumes_without_retry(cfg, monkeypatch, captur
 
         def prepare(self, session_id, path):
             calls.append("prepare")
-            assert read_json(path)["info"]["exit_status"] == "LimitsExceeded"
+            assert read_json(path)["info"]["exit_status"] == terminal_status
 
         def finalize(self, *args, **kwargs):
             calls.append("finalize")
@@ -317,25 +327,29 @@ def test_runner_persists_loop_and_resumes_without_retry(cfg, monkeypatch, captur
                "tokenizer_fingerprint": "fixture", "capture_select": {}}, "capture_control_url": "fixture"}
     factory = SimpleNamespace(deadline=Deadline())
     result = run_task(cfg, "loop-run", task_key, row, factory, runtime)
-    assert result["agent_exit_status"] == "LimitsExceeded"
-    assert result["exit_status"] == ("CaptureError" if fail_capture else "LimitsExceeded")
+    assert result["agent_exit_status"] == terminal_status
+    assert result["exit_status"] == ("CaptureError" if fail_capture else terminal_status)
     assert env.closed
-    assert len(env.commands) == 7
+    assert len(env.commands) == (7 if terminal_status == "LimitsExceeded" else 0)
     assert calls == (["start", "stop", "prepare", "finalize"] if capture else [])
     from application.execution.evidence import RunEvidence
     saved_row = RunEvidence(cfg["project_root"], "loop-run").read()["rollouts"][result["rollout_id"]]
-    assert saved_row["termination_reason"] == "LimitsExceeded"
+    assert saved_row["termination_reason"] == terminal_status
     assert saved_row["submission_status"] == "unsubmitted"
     assert saved_row["resolved"] is None
     trajectory = read_json(Path(cfg["project_root"]) / saved_row["trajectory_path"])
-    assert trajectory["info"]["loop_detection"]["period"] == 1
+    if terminal_status == "LimitsExceeded":
+        assert trajectory["info"]["loop_detection"]["period"] == 1
+    else:
+        assert trajectory["info"]["exit_status"] == "reasoning_loop"
+        assert trajectory["messages"][-1]["extra"]["limit_reason"] == "all_parallel_branches_reasoning_loop"
     work = Path(cfg["project_root"]) / "runs/loop-run/rollout/tasks/loop-task"
     assert len(list((work / "attempts").iterdir())) == 1
     assert read_json(work / "result.json") == result
     assert RunEvidence(cfg["project_root"], "loop-run").verify()["rollouts"] == 1
     if not fail_capture:
         assert run_task(cfg, "loop-run", task_key, row, factory, runtime) == result
-        assert scripted.calls == 8
+        assert scripted.calls == (8 if terminal_status == "LimitsExceeded" else 1)
 
 
 def test_legacy_agent_settings_disable_loop_detection(tmp_path):

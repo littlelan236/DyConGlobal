@@ -107,9 +107,17 @@ def test_loop_terminal_result_survives_late_predictor_and_release(tmp_path, monk
         broker.close()
 
 
+@pytest.mark.parametrize("mode", ["parallel", "parallel_baseline"])
 @pytest.mark.parametrize("offline", [False, True])
-def test_winner_one_all_hidden_nas_and_canonical_zero_choice(tmp_path, monkeypatch, offline):
-    options = provider(tmp_path, monkeypatch)
+def test_winner_one_all_hidden_nas_and_canonical_zero_choice(tmp_path, monkeypatch, offline, mode):
+    predictions = []
+
+    def predict(batch):
+        predictions.append(batch.copy())
+        return batch[:, 0, 0]
+
+    options = provider(tmp_path, monkeypatch, predict)
+    options["mode"] = mode
     broker = ScoringBroker(options, "model", 2)
     capture = controller(tmp_path, spool=True)
     original_submit = capture.spool.pool.submit
@@ -150,21 +158,28 @@ def test_winner_one_all_hidden_nas_and_canonical_zero_choice(tmp_path, monkeypat
     coordinator = ParallelReasoningCoordinator(cfg, capture, BrokerClient(broker))
     try:
         winner = coordinator.run([], metadata, generate, parse, lambda _: {"cost": 1.0})
-        assert winner["content"] == "branch-1"
-        assert winner["extra"]["actions"] == [{"branch": 1}]
+        from rollout.parallel import baseline_selection_seed, random_branch_id
+
+        selected = (random_branch_id(baseline_selection_seed(42, "task", 0,
+                    winner["extra"]["dycon_parallel"]["parent_prefix_sha256"]), [0, 1])
+                    if mode == "parallel_baseline" else 1)
+        assert len(predictions) == 2
+        assert sorted(float(batch[0, 0, 0]) for batch in predictions) == [2, 6]
+        assert winner["content"] == f"branch-{selected}"
+        assert winner["extra"]["actions"] == [{"branch": selected}]
         assert winner["extra"]["cost"] == 2
-        assert winner["extra"]["dycon_parallel"]["selected_branch_id"] == 1
+        assert winner["extra"]["dycon_parallel"]["selected_branch_id"] == selected
         assert len(capture.sessions["session"].requests) == 2
         winner["extra"]["request"] = {"dycon_capture": dict(metadata)}
         trajectory = tmp_path / "trajectory.json"
         write_json(trajectory, {"messages": [winner]})
         capture.prepare_trajectory("session", trajectory)
         canonical = read_json(trajectory)
-        assert canonical["messages"][0]["extra"]["response"]["dycon_native_request_id"] == "native-1"
+        assert canonical["messages"][0]["extra"]["response"]["dycon_native_request_id"] == f"native-{selected}"
         finalized = capture.finalize("session", rollout_id="canonical", trajectory_path=str(trajectory),
                                      trajectory_sha256=sha256(trajectory), model_fingerprint="model")
         assert finalized["capture_status"] == ("pending_upload" if offline else "complete")
-        assert finalized["accepted_native_request_ids"] == ["native-1"]
+        assert finalized["accepted_native_request_ids"] == [f"native-{selected}"]
         assert not capture.parallel_decisions  # Completed sessions do not accumulate branch histories.
         if offline:
             decision_file = next((capture.export_root / "sessions/session/parallel/decisions").glob("*.json"))
@@ -177,7 +192,7 @@ def test_winner_one_all_hidden_nas_and_canonical_zero_choice(tmp_path, monkeypat
         branch_root = nas / "sessions/session/parallel"
         index = read_json(branch_root / "branch-index.json")
         assert read_branch_index(nas, "session")["samples"] == index
-        assert [r["selected"] for r in index] == [False, True]
+        assert [r["selected"] for r in index] == [b == selected for b in range(2)]
         assert read_json(branch_root / "branch-coverage.json")["missing"] == []
         for row in index:
             assert row["labels"]["remaining_steps"] is None
@@ -189,8 +204,8 @@ def test_winner_one_all_hidden_nas_and_canonical_zero_choice(tmp_path, monkeypat
         finalized_events = tmp_path / "enriched"
         finalize_token_events(nas, finalized_events, open_ids=[10], close_ids=[11])
         events = read_json(finalized_events / "index.json")
-        assert len(events) == 1 and events[0]["request_id"] == "native-1"
-        assert "native-0" not in json.dumps(events)
+        assert len(events) == 1 and events[0]["request_id"] == f"native-{selected}"
+        assert f"native-{1 - selected}" not in json.dumps(events)
         assert broker.groups == {}
     finally:
         capture.close()
@@ -511,7 +526,8 @@ def test_b1_config_uses_old_path_without_artifact(cfg):
     assert not active(resolved, 0)
 
 
-def test_real_parallel_config_hashes_and_preserves_full_arguments(cfg, tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["parallel", "parallel_baseline"])
+def test_real_parallel_config_hashes_and_preserves_full_arguments(cfg, tmp_path, monkeypatch, mode):
     import yaml
 
     from core.config import assert_frozen
@@ -525,8 +541,11 @@ def test_real_parallel_config_hashes_and_preserves_full_arguments(cfg, tmp_path,
     raw["serving"]["management"] = "managed"
     raw["parallel"] = {"enabled": True, "branch_count": 2, "estimator_ref": opts["estimator_ref"],
                        "save_sites": [0], "max_inflight_branches": 2}
+    if mode == "parallel_baseline":
+        raw["parallel"].update(mode=mode, reasoning_loop={"enabled": True})
     path.write_text(yaml.safe_dump(raw))
     resolved = resolve(path)
+    assert ("mode" in resolved["parallel"]) == (mode == "parallel_baseline")
     assert_frozen(resolved)
     assert resolved["parallel"]["estimator_sha256"] == opts["estimator_sha256"]
     before = copy.deepcopy(resolved)
@@ -651,3 +670,203 @@ def test_late_score_cannot_modify_reused_decision_identity(tmp_path, monkeypatch
     finally:
         release.set()
         broker.close()
+
+
+def baseline_case(values, *, seed=42, order=None, failed=(), loops=(), tamper_loop=False,
+                  results_error=False, finish="tool_calls", records=None, parsed=None):
+    """Exercise the coordinator; real provider/spool paths are tested above."""
+    records = records if records is not None else []
+    parsed = parsed if parsed is not None else []
+    scores, completed = [], []
+    ready = [threading.Event() for _ in values]
+    calls = []
+
+    class Client:
+        def call(self, action, payload):
+            calls.append(action)
+            if action == "results":
+                if results_error:
+                    import requests
+
+                    raise requests.RequestException("results unavailable")
+                return {"results": scores, "estimator_sha256": "sha",
+                        "target": "remaining", "endpoint": "submission"}
+            return {}
+
+    def generate(messages, md, branch_seed):
+        branch = md["branch_id"]
+        assert "diagnostic_score_disabled" not in md
+        assert branch_seed == seed + branch
+        if order is not None and order.index(branch):
+            assert ready[order[order.index(branch) - 1]].wait(5)
+        row = {"branch_id": branch, "native_request_id": f"native-{branch}",
+               "status": "failed" if branch in failed else "scored",
+               "score": None if branch in failed else values[branch]}
+        if branch in loops:
+            loop = {**{k: md[k] for k in ("session_id", "decision_id", "branch_id", "api_attempt_id")},
+                    "native_request_id": row["native_request_id"], "abort_completed": True}
+            row.update(status="failed", reason="reasoning_loop", reasoning_loop=loop,
+                       api_attempt_id="wrong" if tamper_loop else md["api_attempt_id"])
+        scores.append(row)
+        completed.append(branch)
+        ready[branch].set()
+        response = Completion(branch)
+        response.choices[0].finish_reason = "stop" if branch in loops else finish
+        return response
+
+    def parse(response):
+        parsed.append(response.branch)
+        return {"role": "assistant", "extra": {"actions": [{"branch": response.branch}]}}
+
+    def record(value, timeout):
+        records.append(value)
+        return value
+
+    cfg = {"parallel": {"mode": "parallel_baseline", "branch_count": len(values),
+                        "score_timeout_ms": 50, "fallback_policy": "first_valid", "estimator_sha256": "sha"},
+           "generation": {"seed": seed}, "capture": {"control_seconds": 1}}
+    value = ParallelReasoningCoordinator(cfg, SimpleNamespace(record_decision=record), Client())
+    message = value.run([{"role": "user", "content": "same-prefix"}],
+                        {"session_id": "session", "task_id": "task", "step_id": 3,
+                         "query_id": os.urandom(8).hex()}, generate, parse, lambda response: {"cost": 1})
+    assert calls == ["reserve", "results", "release"]
+    assert len(completed) == len(values)
+    assert records[0]["total_cost"] == len(values)
+    return message["extra"]["dycon_parallel"], completed
+
+
+@pytest.mark.parametrize("seed", [0, 1, 42, 1234])
+def test_baseline_scores_and_completion_order_do_not_change_selection(seed):
+    first, completed = baseline_case([1., 2., 3., 4.], seed=seed, order=[0, 1, 2, 3])
+    assert completed == [0, 1, 2, 3]
+    for scores in ([4., 3., 2., 1.], [-100., 7., 800., 0.], [9., 9., 9., 9.]):
+        changed, completed = baseline_case(scores, seed=seed, order=[3, 2, 1, 0])
+        assert completed == [3, 2, 1, 0]
+        assert changed["selected_branch_id"] == first["selected_branch_id"]
+        assert changed["selection_seed"] == first["selection_seed"]
+        assert changed["selection_candidate_ids"] == [0, 1, 2, 3]
+        assert [r["score"] for r in changed["candidates"]] == scores
+        assert changed["tie_rule"] is None
+
+
+def test_baseline_seeds_can_choose_every_branch_and_nonminimum():
+    choices = [baseline_case([0., 1., 2., 3.], seed=seed)[0]["selected_branch_id"] for seed in range(64)]
+    assert set(choices) == {0, 1, 2, 3}
+    assert any(branch != 0 for branch in choices)
+
+
+@pytest.mark.parametrize("finish", ["tool_calls", "length"])
+def test_baseline_missing_scores_do_not_filter_valid_responses(finish):
+    choices = set()
+    for seed in range(16):
+        result, _ = baseline_case([0., 1.], seed=seed, failed=(0, 1), finish=finish)
+        assert result["selection_candidate_ids"] == [0, 1]
+        assert result["fallback_reason"] is None
+        assert all(c["status"] == "eligible" and c["scoring_status"] == "failed"
+                   and c["score"] is None for c in result["candidates"])
+        choices.add(result["selected_branch_id"])
+    assert choices == {0, 1}
+
+
+def test_baseline_excludes_loop_even_with_lowest_score_and_first_valid_fallback():
+    parsed = []
+    result, _ = baseline_case([-1000., 10.], loops=(0,), parsed=parsed)
+    assert parsed == [1]
+    assert result["selection_candidate_ids"] == [1]
+    assert result["selected_branch_id"] == 1
+    assert result["candidates"][0]["reason"] == "reasoning_loop"
+
+
+def test_baseline_unverified_loop_identity_never_reaches_parser():
+    parsed = []
+    result, _ = baseline_case([-1000., 10.], loops=(0,), tamper_loop=True, parsed=parsed)
+    assert parsed == [1]
+    assert result["selection_candidate_ids"] == [1]
+    assert result["candidates"][0]["reason"] == "ParallelSelectionError"
+
+
+def test_baseline_results_transport_failure_cannot_choose_partial_response():
+    from rollout.parallel import ParallelSelectionError
+
+    records, parsed = [], []
+    with pytest.raises(ParallelSelectionError, match="Cannot verify baseline"):
+        baseline_case([0., 1.], results_error=True, records=records, parsed=parsed)
+    assert parsed == []
+    assert records[0]["selected_branch_id"] is None
+    assert records[0]["selection_candidate_ids"] == []
+    assert records[0]["score_error"]
+
+
+@pytest.mark.parametrize("field,value,match", [
+    ("branch_count", 1, "branch_count"),
+    ("reasoning_loop", {"enabled": False}, "reasoning_loop.enabled"),
+    ("mode", "random_invalid", "mode"),
+])
+def test_baseline_config_rejects_incomplete_mode(field, value, match):
+    options = {"enabled": True, "mode": "parallel_baseline", "branch_count": 2,
+               "reasoning_loop": {"enabled": True}}
+    options[field] = value
+    with pytest.raises(ValueError, match=match):
+        Parallel(**options)
+
+
+def test_baseline_still_requires_predictor(cfg, tmp_path, monkeypatch):
+    import yaml
+
+    opts = provider(tmp_path, monkeypatch)
+    path = Path(cfg["config_source"])
+    raw = yaml.safe_load(path.read_text())
+    raw["model"].update(path=str(tmp_path), fingerprint="model")
+    raw["capture"].update(enabled=True, anchors=["think_close"], layers=[0, 1])
+    raw["serving"]["management"] = "managed"
+    raw["parallel"] = {"enabled": True, "mode": "parallel_baseline", "branch_count": 2,
+                       "reasoning_loop": {"enabled": True}, "estimator_ref": None, "save_sites": [0]}
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="estimator_ref"):
+        resolve(path)
+    raw["parallel"]["estimator_ref"] = "missing.json"
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(FileNotFoundError):
+        resolve(path)
+    raw["parallel"]["estimator_ref"] = opts["estimator_ref"]
+    path.write_text(yaml.safe_dump(raw))
+    assert resolve(path)["parallel"]["estimator_sha256"] == opts["estimator_sha256"]
+
+
+def test_legacy_parallel_mode_is_not_inserted_into_config_or_snapshot(cfg):
+    import yaml
+
+    from core.config import load_snapshot, snapshot
+
+    path = Path(cfg["config_source"])
+    raw = yaml.safe_load(path.read_text())
+    raw["parallel"] = {"enabled": False}
+    path.write_text(yaml.safe_dump(raw))
+    resolved = resolve(path)
+    assert "mode" not in resolved["parallel"]
+    assert "reasoning_loop" not in resolved["parallel"]
+    assert resolve(path)["config_hash"] == resolved["config_hash"]
+    run = snapshot(resolved, "legacy-mode", {"task_keys": []})
+    frozen = (run / "resolved-config.json").read_bytes()
+    assert "mode" not in load_snapshot(cfg["project_root"], "legacy-mode")["parallel"]
+    assert (run / "resolved-config.json").read_bytes() == frozen
+
+
+def test_baseline_startup_audit_replays_nonminimum_and_rejects_tampering():
+    from runtime.serving.parallel_validation import validate_selection
+
+    for seed in range(64):
+        summary, _ = baseline_case([0., 1., 2., 3.], seed=seed)
+        if summary["selected_branch_id"] != 0:
+            break
+    else:
+        pytest.fail("No nonminimum winner in the fixed seed corpus")
+    audit = validate_selection(summary, seed)
+    assert audit["selected_minimum_score"] is False
+    assert audit["selected_score_rank"] > 1
+    for field, value in [("selected_branch_id", 0), ("selection_seed", "0" * 64),
+                         ("selection_candidate_ids", [0])]:
+        changed = copy.deepcopy(summary)
+        changed[field] = value
+        with pytest.raises(ValueError):
+            validate_selection(changed, seed)

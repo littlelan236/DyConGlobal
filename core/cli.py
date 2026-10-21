@@ -203,6 +203,16 @@ def main(argv=None):
     p.add_argument("--mode", choices=["dry-run", "check-data", "fit"], default="fit")
     p.add_argument("--split-id")
     p.add_argument("--dataset-id", help="Select a shared dataset; freeze its receipt and actual counts")
+    p = sub.add_parser("difficulty-mlp", help="Train/evaluate a frozen single-site MLP attempt")
+    p.add_argument("attempt_id")
+    p.add_argument("--mode", choices=["dry-run", "check-data", "fit"], default="fit")
+    p.add_argument("--split-id")
+    p.add_argument("--dataset-id")
+    p = sub.add_parser("difficulty-ridge-mlp", help="Train/evaluate MLP residuals over frozen published Ridge checkpoints")
+    p.add_argument("attempt_id")
+    p.add_argument("--mode", choices=["dry-run", "check-data", "fit"], default="fit")
+    p.add_argument("--split-id")
+    p.add_argument("--dataset-id")
     p = sub.add_parser("predictor-publish", help="Publish an existing estimator for online branch selection")
     p.add_argument("predictor_id")
     source = p.add_mutually_exclusive_group(required=True)
@@ -512,6 +522,10 @@ def main(argv=None):
         from difficulty.training.ridge_probe import run_probe
 
         result = run_probe(cfg, a.experiment_id, mode=a.mode, split_id=a.split_id, dataset_id=a.dataset_id)
+    elif a.command in {"difficulty-mlp", "difficulty-ridge-mlp"}:
+        from difficulty.training.mlp_probe import run_probe
+        result = run_probe(cfg, a.attempt_id, mode=a.mode, split_id=a.split_id, dataset_id=a.dataset_id,
+                           kind='ridge_plus_ffn' if a.command == 'difficulty-ridge-mlp' else 'ffn_mlp')
     elif a.command == "difficulty-plot-parallel":
         from difficulty.evaluation.parallel import list_parallel_trajectories, visualize_parallel
 

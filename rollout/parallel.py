@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import math
 import os
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -17,6 +18,21 @@ from core.io import hash_json
 
 class ParallelSelectionError(RuntimeError):
     pass
+
+
+RANDOM_SELECTION_MODE = "uniform_random_non_loop_v1"
+
+
+def baseline_selection_seed(seed, task_id, step_id, parent_prefix_sha256):
+    """Bind selection to frozen context, never scores or transport UUIDs."""
+    return hash_json({"algorithm": RANDOM_SELECTION_MODE, "seed": seed,
+                      "task_id": task_id, "step_id": step_id,
+                      "parent_prefix_sha256": parent_prefix_sha256})
+
+
+def random_branch_id(seed, branch_ids):
+    """Replay a uniform draw in canonical branch order with a local RNG."""
+    return random.Random(int(seed, 16)).choice(sorted(branch_ids))
 
 
 @dataclass
@@ -70,6 +86,8 @@ class ParallelReasoningCoordinator:
         if not capture or self.controller is None:
             raise ParallelSelectionError("Parallel rollout requires a live capture controller")
         opts = self.options
+        baseline = opts.get("mode", "parallel") == "parallel_baseline"
+        random_selection = baseline and self.diagnostic_mode is None
         decision = "dec-" + uuid4().hex
         prefix = hash_json(messages)
         candidates = []
@@ -135,6 +153,10 @@ class ParallelReasoningCoordinator:
                         "extra": {"exit_status": "LimitsExceeded", "submission": "",
                                   "limit_reason": "parallel_branch_reasoning_loop", "reasoning_loop": loop},
                     })
+                elif random_selection and (score_error or score.get("reason") == "reasoning_loop"):
+                    # A normalized 'stop' can be a native abort. Never parse a
+                    # partial tool response when its loop status is unverified.
+                    candidate.error = ParallelSelectionError("Unverified reasoning-loop state")
                 elif candidate.response is not None and candidate.error is None:
                     # LiteLLM normalizes native 'abort' to 'stop'. Bind native
                     # loop evidence before parsing any partial tool output.
@@ -167,10 +189,27 @@ class ParallelReasoningCoordinator:
                 else:
                     row["reason"] = "reasoning_loop" if row.get("reasoning_loop") else (
                         type(candidate.error).__name__ if candidate.error else "missing_response")
+                if random_selection:
+                    row.update(scoring_status=score.get("status", "missing"),
+                               scoring_reason=score.get("reason"),
+                               selection_eligible=candidate.message is not None)
+                    if candidate.message is not None:
+                        row.update(status="eligible", reason=None)
                 records.append(row)
             fallback = None
             selection_error = None
-            if eligible:
+            selection_seed = None
+            selection_ids = sorted(c.branch_id for c in formatted)
+            if random_selection and score_error:
+                winner = None
+                selection_error = ParallelSelectionError(
+                    "Cannot verify baseline reasoning-loop state: " + score_error)
+            elif random_selection and formatted:
+                selection_seed = baseline_selection_seed(
+                    self.cfg["generation"]["seed"], capture["task_id"], capture["step_id"], prefix)
+                selected = random_branch_id(selection_seed, selection_ids)
+                winner = next(c for c in formatted if c.branch_id == selected)
+            elif eligible:
                 winner = min(eligible, key=lambda c: (scores[c.branch_id]["score"], c.branch_id))
             elif self.diagnostic_mode == "first_valid_unscored" and formatted:
                 winner = min(formatted, key=lambda c: c.branch_id)
@@ -197,7 +236,8 @@ class ParallelReasoningCoordinator:
                     if all(row["reason"] == "reasoning_loop" for row in records):
                         selection_error = LimitsExceeded({
                             "role": "exit", "content": "All parallel branches ended in reasoning loops",
-                            "extra": {"exit_status": "LimitsExceeded", "submission": "",
+                            "extra": {"exit_status": "reasoning_loop" if baseline else "LimitsExceeded",
+                                      "submission": "",
                                       "limit_reason": "all_parallel_branches_reasoning_loop"},
                         })
                 elif not errors:
@@ -213,14 +253,21 @@ class ParallelReasoningCoordinator:
                         "decision_id": decision, "step_id": capture["step_id"],
                         "query_id": capture["query_id"], "parent_prefix_sha256": prefix,
                         "branch_count": len(candidates), "transport": "concurrent_n1",
-                        "selection_mode": self.diagnostic_mode or "minimum_score",
-                        "selected_branch_id": winner.branch_id if winner else None, "tie_rule": "lowest_branch_id",
+                        "selection_mode": self.diagnostic_mode or (
+                            RANDOM_SELECTION_MODE if random_selection else "minimum_score"),
+                        "selected_branch_id": winner.branch_id if winner else None,
+                        "tie_rule": None if random_selection else "lowest_branch_id",
                         "estimator_sha256": result["estimator_sha256"], "target": result["target"],
                         "endpoint": result["endpoint"], "fallback_reason": fallback, "score_error": score_error,
                         "candidates": records, "decode_ms": decode_ms,
                         "admission_ms": admission_ms,
                         "response_to_selection_ms": (time.monotonic() - wait_start) * 1000,
                         "total_cost": sum(c.cost for c in candidates)}
+            if baseline:
+                evidence["rollout_mode"] = "parallel_baseline"
+            if random_selection:
+                evidence.update(task_id=capture["task_id"], selection_seed=selection_seed,
+                                selection_candidate_ids=selection_ids)
             evidence["total_usage"] = {
                 key: sum(((row["response"] or {}).get("usage") or {}).get(key, 0) or 0 for row in records)
                 for key in ("prompt_tokens", "completion_tokens", "total_tokens")
@@ -229,6 +276,10 @@ class ParallelReasoningCoordinator:
             # A receipt failure stops before tools are executed, retaining raw responses.
             evidence = self.controller.record_decision(evidence, self.cfg["capture"]["control_seconds"])
             if selection_error is not None:
+                if baseline:
+                    for message in getattr(selection_error, "messages", []):
+                        message.setdefault("extra", {}).update(
+                            decision_id=decision, cost=evidence["total_cost"])
                 raise selection_error
             capture.update(winner.metadata)
             summary = {k: v for k, v in evidence.items() if k != "candidates"}

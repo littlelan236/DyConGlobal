@@ -12,7 +12,8 @@ from rollout.runner import TERMINAL
     ("context", "ContextWindowExceededError"), ("format", "format"), ("timeout", "ParallelSelectionError")])
 @pytest.mark.parametrize("diagnostic", [False, True])
 @pytest.mark.parametrize("client_finish", ["abort", "stop"])
-def test_loop_branch_is_excluded_from_all_fallbacks(native_errors, other, expected, diagnostic, client_finish):
+@pytest.mark.parametrize("mode", ["parallel", "parallel_baseline"])
+def test_loop_branch_is_excluded_from_all_fallbacks(native_errors, other, expected, diagnostic, client_finish, mode):
     from minisweagent.exceptions import FormatError, LimitsExceeded
 
     evidence, terminations, parses = [], [], []
@@ -33,6 +34,7 @@ def test_loop_branch_is_excluded_from_all_fallbacks(native_errors, other, expect
 
     cfg = {"parallel": {"branch_count": 2, "score_timeout_ms": 1, "fallback_policy": "first_valid"},
            "generation": {"seed": 42}, "capture": {"control_seconds": 1}}
+    cfg["parallel"]["mode"] = mode
 
     def record(value, timeout):
         evidence.append(value)
@@ -58,7 +60,8 @@ def test_loop_branch_is_excluded_from_all_fallbacks(native_errors, other, expect
         parses.append(response.branch)
         return {"role": "assistant", "extra": {"actions": [{"command": "good"}]}}
 
-    args = ([], {"session_id": "s", "step_id": 0, "query_id": "q"}, generate, parse, lambda response: {"cost": 0})
+    args = ([], {"session_id": "s", "task_id": "task", "step_id": 0, "query_id": "q"},
+            generate, parse, lambda response: {"cost": 0})
     if expected == "winner":
         assert coordinator.run(*args)["extra"]["actions"] == [{"command": "good"}]
         assert evidence[0]["selected_branch_id"] == 1
@@ -69,6 +72,9 @@ def test_loop_branch_is_excluded_from_all_fallbacks(native_errors, other, expect
         with pytest.raises(LimitsExceeded) as raised:
             coordinator.run(*args)
         assert raised.value.messages[0]["extra"]["limit_reason"] == expected
+        assert raised.value.messages[0]["extra"]["exit_status"] == (
+            "reasoning_loop" if mode == "parallel_baseline" else "LimitsExceeded")
+        assert evidence[0]["selected_branch_id"] is None
     else:
         with pytest.raises(Exception) as raised:
             coordinator.run(*args)

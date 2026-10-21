@@ -15,13 +15,9 @@ from core.locking import exclusive_artifact
 from difficulty.datasets.submission import load_selection, prepare_cache
 from difficulty.models.estimators import inverse_target, transform_target
 from difficulty.models.ridge_grid import RidgeGrid, load_model, predict_model, save_model
-from difficulty.probe_config import RidgeProbe
+from difficulty.probe_config import LABELS, RidgeProbe
+from difficulty.training.artifacts import finish_attempt
 from difficulty.training.splits import create_split, load_split
-
-LABELS = {"submission_remaining_reasoning_tokens_log1p": "remaining_reasoning_tokens_to_submission",
-          "submission_remaining_steps_linear": "remaining_steps_to_submission",
-          "submission_remaining_steps_log1p": "remaining_steps_to_submission",
-          "submission_remaining_reasoning_tokens_linear": "remaining_reasoning_tokens_to_submission"}
 
 
 def report(y, prediction):
@@ -97,7 +93,7 @@ def code_evidence(root):
              "difficulty/training/splits.py", "difficulty/datasets/compose.py",
              "difficulty/receipts.py", "difficulty/datasets/paths.py",
              "difficulty/models/estimators.py", "difficulty/models/ridge_grid.py",
-             "difficulty/training/ridge_probe.py"]
+             "difficulty/training/ridge_probe.py", "difficulty/training/artifacts.py"]
     return {name: sha256(root / name) for name in names}
 
 
@@ -415,19 +411,4 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None)
 
 
 def finish(output, experiment, root, before_code):
-    if code_evidence(root) != before_code:
-        raise ValueError("Implementation changed during experiment")
-    dataset = root / 'difficulty/datasets' / experiment['dataset_id']
-    if sha256(dataset / 'receipt.json') != experiment['dataset_receipt_sha256']:
-        raise ValueError('Dataset changed during experiment')
-    split = dataset / 'splits' / experiment['split_id']
-    if (sha256(split / 'receipt.json') != experiment['split_receipt_sha256']
-            or sha256(split / 'split.json') != experiment['split_sha256']):
-        raise ValueError('Split changed during experiment')
-    write_json(output / "receipt.json", {"schema_version": 1, "state": "complete", "mode": experiment["mode"],
-               "completed_at": now(), "dataset_receipt_sha256": experiment["input"]["receipt_sha256"],
-               "dataset_id": experiment["dataset_id"], "split_id": experiment["split_id"],
-               "split_receipt_sha256": experiment["split_receipt_sha256"],
-               "split_sha256": experiment["split_sha256"], "code": before_code,
-               "files": {str(p.relative_to(output)): sha256(p) for p in sorted(output.rglob("*"))
-                         if p.is_file() and p.name != "receipt.json"}})
+    finish_attempt(output, experiment, root, before_code)

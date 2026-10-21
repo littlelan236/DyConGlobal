@@ -16,7 +16,38 @@ from core.io import read_json, sha256, write_json
 from hidden.artifacts import event_records, read_arrays, read_branch_index
 from hidden.backends.vllm.online import capture_request_metadata
 from rollout.model import make_model
+from rollout.parallel import RANDOM_SELECTION_MODE, baseline_selection_seed, random_branch_id
 from runtime.serving.parallel import artifact_contract
+
+
+def validate_selection(summary, generation_seed):
+    """Audit a frozen winner after decoding and online scoring have finished."""
+    candidates = summary["candidates"]
+    mode = summary["selection_mode"]
+    selected = summary["selected_branch_id"]
+    if mode == "minimum_score":
+        expected = min(candidates, key=lambda c: (c["score"], c["branch_id"]))["branch_id"]
+    elif mode == RANDOM_SELECTION_MODE:
+        ids = sorted(c["branch_id"] for c in candidates if c.get("selection_eligible"))
+        if ids != summary["selection_candidate_ids"] or not ids:
+            raise ValueError("Random selection candidate identities differ from frozen eligibility")
+        seed = baseline_selection_seed(generation_seed, summary["task_id"],
+                                       summary["step_id"], summary["parent_prefix_sha256"])
+        if seed != summary["selection_seed"]:
+            raise ValueError("Random selection seed differs from frozen context")
+        expected = random_branch_id(seed, ids)
+    else:
+        raise ValueError("Unknown scored selection mode: " + str(mode))
+    if expected != selected:
+        raise ValueError("Selected branch differs from frozen selection policy")
+    # Scores are inspected only after validating the actual frozen selection.
+    scored = [c for c in candidates if isinstance(c.get("score"), (int, float))
+              and np.isfinite(c["score"])]
+    selected_score = next(c.get("score") for c in candidates if c["branch_id"] == selected)
+    available = isinstance(selected_score, (int, float)) and np.isfinite(selected_score)
+    return {"selection_mode": mode, "selected_branch_id": selected,
+            "selected_score_rank": 1 + sum(c["score"] < selected_score for c in scored) if available else None,
+            "selected_minimum_score": selected_score == min(c["score"] for c in scored) if available else None}
 
 
 def validate_parallel_queries(cfg, run_id, factory, runtime):
@@ -77,6 +108,7 @@ def validate_parallel_queries(cfg, run_id, factory, runtime):
         source = controller.spool.nas if controller.spool else controller.export_root
         graphs = Counter()
         score_errors = []
+        selection_audit = None
         summary = message.get("extra", {}).get("dycon_parallel")
         if summary:
             branch = read_branch_index(source, sid)
@@ -96,9 +128,7 @@ def validate_parallel_queries(cfg, run_id, factory, runtime):
                     np.testing.assert_allclose(online, offline, rtol=1e-10, atol=1e-10)
                     score_errors.append(abs(online - offline))
             if selection is None:
-                winner = min(summary["candidates"], key=lambda c: (c["score"], c["branch_id"]))
-                if winner["branch_id"] != summary["selected_branch_id"]:
-                    raise ValueError("Selected branch differs from minimum real Ridge score")
+                selection_audit = validate_selection(summary, cfg["generation"]["seed"])
             tokens = summary["total_usage"]["completion_tokens"]
         else:
             tokens = message["extra"]["response"]["usage"]["completion_tokens"]
@@ -112,7 +142,7 @@ def validate_parallel_queries(cfg, run_id, factory, runtime):
                 "completion_tokens": tokens, "tokens_per_second": tokens / (query_ms / 1000),
                 "graph_close_counts": dict(graphs), "session_id": sid,
                 "score_absolute_errors": score_errors, "capture_status": result["capture_status"],
-                "parallel": summary, "actions_executed": False}
+                "parallel": summary, "selection_audit": selection_audit, "actions_executed": False}
         with case_lock:
             cases.append(case)
             write_json(out / "progress.json", list(cases))
@@ -146,7 +176,12 @@ def validate_parallel_queries(cfg, run_id, factory, runtime):
     overlap = grouped["parallel_overlap"]
     window = max(r["query_finished_monotonic"] for r in overlap) - min(
         r["query_started_monotonic"] for r in overlap)
+    audits = [case["selection_audit"] for case in cases if case["selection_audit"] is not None]
     report = {"passed": True, "cases": cases, "metrics": metrics, "reasoning_loop_abort": loop_check,
+              "selection_audit": {"rollout_mode": cfg["parallel"].get("mode", "parallel"),
+                                  "scored_decisions": len(audits),
+                                  "selected_branch_counts": dict(Counter(str(a["selected_branch_id"]) for a in audits)),
+                                  "selected_minimum_score_count": sum(bool(a["selected_minimum_score"]) for a in audits)},
               "overlap": {"groups": groups, "branches_per_group": branches,
                           "query_window_ms": window * 1000,
                           "completion_tokens_per_wall_second": sum(r["completion_tokens"] for r in overlap) / window},
@@ -183,6 +218,9 @@ def validate_reasoning_loop_abort(cfg, run_id, factory, runtime, out):
         if exc.messages[-1]["extra"].get("limit_reason") != "all_parallel_branches_reasoning_loop":
             raise
         exit_message = exc.messages[-1]
+        expected = "reasoning_loop" if cfg["parallel"].get("mode") == "parallel_baseline" else "LimitsExceeded"
+        if exit_message["extra"].get("exit_status") != expected:
+            raise ValueError("Loop abort has incorrect rollout exit status")
     else:
         raise ValueError("Controlled repeated-token branches did not stop with LimitsExceeded")
     decisions = [row for row in controller.parallel_decisions.values() if row["session_id"] == sid]
@@ -212,7 +250,8 @@ def validate_reasoning_loop_abort(cfg, run_id, factory, runtime, out):
     coverage = read_json(controller.export_root / f"sessions/{sid}/parallel/branch-coverage.json")
     if coverage["missing"] or len(coverage["not_required"]) != len(branches):
         raise ValueError("Loop abort close requirements were not classified")
-    return {"passed": True, "query_ms": (time.monotonic() - started) * 1000,
+    return {"passed": True, "exit_status": exit_message["extra"]["exit_status"],
+            "query_ms": (time.monotonic() - started) * 1000,
             "session_id": sid, "branches": branches, "actions_executed": False,
             "capture_status": finalized["capture_status"],
             "scope": "controlled native allowed-token diagnostic; no accepted assistant or close tensor"}
