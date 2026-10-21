@@ -101,6 +101,11 @@ class DyConCapturePlugin:
                 if action == "reserve":
                     return await asyncio.to_thread(self.scoring.reserve, value["decision_id"], value["branches"])
                 if action == "results":
+                    # A completed generate can reach this endpoint before the
+                    # periodic drain loop has published its close row. Drain
+                    # once synchronously so scoring observes the native event
+                    # without increasing the model request or GPU wait.
+                    await self.drain_once()
                     return await asyncio.to_thread(self.scoring.results, value["decision_id"], value["timeout"])
                 if action == "release":
                     return self.scoring.release(value["decision_id"])

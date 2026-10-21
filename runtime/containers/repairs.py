@@ -10,7 +10,7 @@ def environment_overrides(cfg: dict, instance: dict) -> dict:
     iid = instance["instance_id"]
     # These upstream test suites fetch real HTTP resources. Dependency bootstrap
     # remains offline; the isolated task's runtime needs the Docker bridge.
-    if iid in {
+    network_tasks = {
         "psf__requests-1921",
         "pydicom__pydicom-1194",
         "pydicom__pydicom-1236",
@@ -27,16 +27,80 @@ def environment_overrides(cfg: dict, instance: dict) -> dict:
         "sphinx-doc__sphinx-10435",
         "sphinx-doc__sphinx-7985",
         "sphinx-doc__sphinx-8475",
-    }:
+        # Non-Verified 600: original suites require external test resources.
+        "psf__requests-1635",
+        "psf__requests-1689",
+        "psf__requests-1713",
+        "psf__requests-1733",
+        "psf__requests-1768",
+        "psf__requests-1776",
+        "psf__requests-1944",
+        "psf__requests-1962",
+        "psf__requests-1963",
+        "psf__requests-2148",
+        "psf__requests-2153",
+        "psf__requests-2193",
+        "psf__requests-2413",
+        "psf__requests-2617",
+        "psf__requests-2674",
+        "psf__requests-2821",
+        "psf__requests-2873",
+        "psf__requests-3362",
+        "psf__requests-3738",
+        "mwaskom__seaborn-2457",
+        "scikit-learn__scikit-learn-13620",
+        "sphinx-doc__sphinx-11266",
+        "sphinx-doc__sphinx-8509",
+        "sphinx-doc__sphinx-9309",
+        "sphinx-doc__sphinx-9467",
+    }
+    if iid in network_tasks:
         overrides["network_mode"] = "bridge"
+        # Image-provided host proxies are unreachable or present the wrong TLS
+        # identity from rootless task containers. These suites need direct egress.
+        overrides["variables"] = {
+            **cfg["environment"].get("variables", {}),
+            **overrides.get("variables", {}),
+            **{
+                key: "" for key in [
+                    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy",
+                ]
+            },
+            "NO_PROXY": "*",
+            "no_proxy": "*",
+        }
+    if iid in {
+        "scikit-learn__scikit-learn-13933",
+        "scikit-learn__scikit-learn-14309",
+        "scikit-learn__scikit-learn-14869",
+    }:
+        # Old OpenMP suites see all host CPUs; bound nested parallelism to
+        # avoid oversubscription under the concurrent harness.
+        overrides["variables"] = {
+            **cfg["environment"].get("variables", {}),
+            **overrides.get("variables", {}),
+            **{key: "1" for key in ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"]},
+        }
     fixes = {
         "sympy__sympy-23262": ["scipy==1.13.1", "numpy==1.26.4"],
         "pylint-dev__pylint-4661": ["appdirs==1.4.4"],
+        "mwaskom__seaborn-2457": ["matplotlib==3.5.3"],
+        **{
+            key: [
+                "pytest-httpbin==1.0.2", "httpbin==0.7.0", "Flask==1.1.4", "Werkzeug==0.16.1",
+                "Jinja2==2.11.3", "MarkupSafe==2.0.1", "itsdangerous==1.1.0", "click==7.1.2",
+                "decorator==5.1.1", "cffi==1.15.1", "pycparser==2.21", "blinker==1.6.3",
+            ]
+            for key in ["psf__requests-2873", "psf__requests-3362", "psf__requests-3738"]
+        },
     }
     if iid not in fixes:
         return overrides
     # These wheels are maintained inside this project and mounted read-only.
-    overrides["wheelhouse"] = str(Path(cfg["project_root"]) / "runtime/cache/gold-wheels")
+    wheel_dir = "gold600-wheels" if iid in {
+        "mwaskom__seaborn-2457", "psf__requests-2873", "psf__requests-3362", "psf__requests-3738",
+    } else "gold-wheels"
+    overrides["wheelhouse"] = str(Path(cfg["project_root"]) / "runtime/cache" / wheel_dir)
     repo = instance["repo"]
     pins = {**cfg["environment"]["repo_pins"], **overrides.get("repo_pins", {})}
     names = {text.split("==")[0] for text in fixes[iid]}

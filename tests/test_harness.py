@@ -6,8 +6,8 @@ import pytest
 pytest.importorskip("docker")
 from conftest import import_fixture
 
-from baseline.catalog import Catalog
-from baseline.evaluation import harness
+from catalog.store import Catalog
+from benchmark_evaluation import harness
 from core.deadline import Deadline
 
 

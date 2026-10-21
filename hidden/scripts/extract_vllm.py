@@ -11,10 +11,18 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--set", action="append", default=[])
+    p.add_argument("--run-id")
     p.add_argument("dataset_id")
     p.add_argument("capture_id")
     a = p.parse_args()
-    cfg = resolve(a.config, a.set)
+    if a.run_id:
+        if a.set:
+            raise ValueError("Run replay uses frozen config")
+        from application.execution.run_plan import load_plan
+        from pathlib import Path
+        cfg = load_plan(Path(a.config).resolve().parent, a.run_id)["config"]
+    else:
+        cfg = resolve(a.config, a.set)
     if cfg["hidden"]["adapter"] != "vllm_eager":
         raise ValueError("Set hidden.adapter=vllm_eager explicitly")
     configure_environment(cfg)

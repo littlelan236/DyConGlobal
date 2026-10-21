@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from action.datasets.trajectories import select_trajectories
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.io import artifact_dir, identifier, now, sha256, write_json
 from core.locking import exclusive_artifact
 from difficulty.evaluation.instability import aggregate_steps, metric_names, summarize_groups

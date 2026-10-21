@@ -2,7 +2,7 @@ from pathlib import Path
 
 from conftest import task
 
-from baseline.importers.legacy import import_rollout
+from rollout.artifacts import import_rollout
 from core.io import read_json, write_json
 from enrichment.token_trace import trace_rollout
 

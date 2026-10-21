@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from baseline.rollout.parallel import ParallelReasoningCoordinator, active
+from rollout.parallel import ParallelReasoningCoordinator, active
 from core.config import Parallel, resolve
 from core.io import read_json, sha256, write_json
 from enrichment.online_trace import finalize_token_events
@@ -273,7 +273,7 @@ def test_recording_model_executes_one_branch_and_clears_next_query(cfg, tmp_path
     from litellm import ModelResponse
     from minisweagent.models.litellm_model import LitellmModel
 
-    from baseline.rollout.model import make_model
+    from rollout.model import make_model
 
     options = provider(tmp_path, monkeypatch)
     options["policy"] = "first_step"
@@ -312,7 +312,7 @@ def test_recording_model_executes_one_branch_and_clears_next_query(cfg, tmp_path
         assert winner["extra"]["dycon_parallel"]["selected_branch_id"] == 1
         assert len(winner["extra"]["actions"]) == 1
         assert "1" in json.dumps(winner["extra"]["actions"])
-        from baseline.rollout.agent import DurableAgent
+        from rollout.agent import DurableAgent
 
         executed = []
 
@@ -407,7 +407,7 @@ def test_missing_rejected_close_reports_partial_without_breaking_winner(tmp_path
 def test_score_transport_failure_fallback_or_persist_stop(fallback):
     import requests
 
-    from baseline.rollout.parallel import ParallelSelectionError
+    from rollout.parallel import ParallelSelectionError
 
     evidence = []
 
@@ -511,8 +511,8 @@ def test_parallel_action_receipts_keep_selection_separate(tmp_path, cfg):
     pytest.importorskip("minisweagent")
     from minisweagent.agents.default import DefaultAgent
 
-    from baseline.rollout.agent import DurableAgent
-    from baseline.rollout.model import make_model
+    from rollout.agent import DurableAgent
+    from rollout.model import make_model
 
     c = controller(tmp_path)
     md = capture_request_metadata("s", "t", "run", "pending", 0, ["think_close"])

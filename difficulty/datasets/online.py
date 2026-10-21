@@ -3,7 +3,7 @@
 import math
 from pathlib import Path
 
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.io import artifact_dir, read_json, sha256, write_json
 
 
@@ -12,7 +12,7 @@ def build_published_index(cfg, run_id, index_id):
     from core.config import load_snapshot
 
     frozen = load_snapshot(cfg["project_root"], run_id)
-    trace = artifact_dir(cfg, "enrichment", run_id)
+    trace = Path(cfg["project_root"]) / "runs" / run_id / "enrichment/online"
     receipt = read_json(trace / "receipt.json")
     for name, digest in receipt["files"].items():
         if sha256(trace / name) != digest:
@@ -51,7 +51,7 @@ def build_published_index(cfg, run_id, index_id):
             "hidden_root": str(source),
             "samples": samples,
             "source_receipt_sha256": sha256(trace / "receipt.json"),
-            "split_authority": "baseline/manifest.json task partition",
+            "split_authority": "catalog/manifest.json task partition",
             "catalog_revision": catalog["catalog_revision"],
         },
     )
@@ -82,7 +82,7 @@ def build_online_index(cfg, capture_id, index_id):
             "capture_id": capture_id,
             "capture_receipt_sha256": sha256(source / "receipt.json"),
             "samples": rows,
-            "split_authority": "baseline/manifest.json task partition; no token-level random split",
+            "split_authority": "catalog/manifest.json task partition; no token-level random split",
         },
     )
     action = artifact_dir(cfg, "action", index_id, "datasets")

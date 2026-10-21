@@ -14,7 +14,7 @@ from pathlib import Path
 
 import docker
 
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.io import now, read_json, sha256, write_json
 from core.locking import file_lock
 from runtime.images.nas import NasImageStore

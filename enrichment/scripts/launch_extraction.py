@@ -9,7 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.config import resolve
 from core.io import read_json, sha256, write_json
 from core.locking import file_lock

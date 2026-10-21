@@ -13,7 +13,8 @@ def replay_group(row):
     Rows without trajectory metadata conservatively share one serial queue.
     Native token hashes, not this grouping, determine cache compatibility.
     """
-    return tuple(row.get(key) or "" for key in ("rollout_id", "session_id", "branch_id"))
+    return tuple("" if row.get(key) is None else str(row[key])
+                 for key in ("rollout_id", "session_id", "branch_id"))
 
 
 def replay_windows(rows, limit):

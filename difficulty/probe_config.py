@@ -22,9 +22,14 @@ class RidgeProbe(BaseModel):
     standardize: bool = True
     split_seed: int = 42
     validation_tasks: int = Field(default=48, gt=0)
+    validation_fraction: float = Field(default=0.2, gt=0, lt=1)
+    test_fraction: float = Field(default=0.2, gt=0, lt=1)
     expected_tasks: int = Field(default=238, gt=1)
+    expected_rollouts: int | None = Field(default=None, gt=1)
     expected_samples: int = Field(default=14384, gt=1)
-    split_strategy: Literal["repo_source_quota_v1"] = "repo_source_quota_v1"
+    split_strategy: Literal["repo_source_quota_v1", "inherit_task_split_v1", "event_random_v1", "task_random_v1"] = "repo_source_quota_v1"
+    parent_experiment_id: str | None = None
+    parent_receipt_sha256: str | None = None
     selection_metric: Literal["validation_pooled_r2"] = "validation_pooled_r2"
     tie_tolerance: float = Field(default=1e-10, ge=0)
     blas_threads: int = Field(default=4, gt=0, le=32)
@@ -34,6 +39,18 @@ class RidgeProbe(BaseModel):
         from core.io import identifier
 
         identifier(self.dataset_id)
+        if self.split_strategy == "inherit_task_split_v1":
+            if not self.parent_experiment_id or not self.parent_receipt_sha256:
+                raise ValueError("Inherited task split requires parent experiment and receipt SHA")
+            identifier(self.parent_experiment_id)
+            if len(self.parent_receipt_sha256) != 64 or any(
+                c not in "0123456789abcdef" for c in self.parent_receipt_sha256
+            ):
+                raise ValueError("Invalid parent receipt SHA")
+            if self.expected_rollouts is None:
+                raise ValueError("Expanded selection requires an explicit rollout count")
+        elif self.parent_experiment_id is not None or self.parent_receipt_sha256 is not None:
+            raise ValueError("Parent experiment is only used by inherited task split")
         if len(self.dataset_receipt_sha256) != 64 or any(
             c not in "0123456789abcdef" for c in self.dataset_receipt_sha256
         ):
@@ -54,6 +71,8 @@ class RidgeProbe(BaseModel):
             raise ValueError("This pilot requires training-only feature standardization")
         if self.validation_tasks >= self.expected_tasks:
             raise ValueError("Validation must leave training tasks")
+        if self.split_strategy in {"event_random_v1", "task_random_v1"} and self.validation_fraction + self.test_fraction >= 1:
+            raise ValueError("Three-way split fractions must leave training data")
         if not math.isfinite(self.tie_tolerance):
             raise ValueError("Tie tolerance must be finite")
         return self

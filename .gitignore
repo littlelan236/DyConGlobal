@@ -20,7 +20,7 @@ dist/
 htmlcov/
 .ipynb_checkpoints/
 
-# Local credentials and editor/OS state
+# Credentials and local editor/OS state
 .env
 .env.*
 !.env.example
@@ -36,41 +36,36 @@ htmlcov/
 Thumbs.db
 desktop.ini
 
-# Local migration inputs and all generated run/state artifacts
-/.migration/
-/state/**
+# Run-local products, machine state, external assets and isolated history
 /runs/**
+/state/**
+/isolated/
+/baseline/
 /assets/
-/tmp/
-/.cache/
+/models/
+/checkpoints/
 /reports/**
+/.migration/
+/.cache/
+/tmp/
+/temp/**
 /capture/**
 /online/**
-*.log
-*.pid
 
-# Atomic writes, interrupted SSH uploads and process locks.
-# Dependency lockfiles under locks/ remain versioned.
-.write-*
-*.tmp
-*.part
-*.kv-replay-pending
-/baseline/manifest.lock
+# Generated business indexes and import/maintenance evidence (source stays tracked)
+/catalog/manifest.json
+/catalog/manifest.lock
+/catalog/imports/**
+/catalog/maintenance/**
+/enrichment/manifest.json
 /enrichment/manifest.lock
+/hidden/manifest.json
 /hidden/manifest.lock
 
-# One-off machine-specific diagnostic (supported tools live in hidden/evaluation)
-/dense_capture_smoke.py
-
-# Keep the canonical baseline manifest and source; exclude rollout payloads
-/baseline/trajectories/**
-/baseline/patches/**
-/baseline/evaluations/**
-/baseline/provenance/**
-
-# Enrichment and hidden-state products belong to local/NAS storage
+# Enrichment and hidden payloads, diagnostic outputs and upload spool
 /enrichment/outputs/**
 /enrichment/reports/**
+/enrichment/token-traces/**
 /hidden/outputs/**
 /hidden/reports/**
 /hidden/online/**
@@ -78,18 +73,25 @@ desktop.ini
 /hidden/evaluation/outputs/**
 /hidden/evaluation/*.json
 
-# Estimator/action source stays tracked; generated datasets and models do not
+# Estimator/action implementation remains tracked; generated experiments do not
 /difficulty/datasets/*/
 /difficulty/checkpoints/**
+/difficulty/predictions/**
 /difficulty/evaluation/outputs/**
 /action/datasets/*/
+/action/checkpoints/**
 /action/evaluation/outputs/**
 /action/outputs/**
 /action/reports/**
-# Curated action/provenance summaries and frozen selections remain versioned.
-/action/checkpoints/**
 
-# Runtime caches and machine-specific observations
+# Offline conversion utilities are source; inventory/bundle outputs are local
+/migration/*.json
+/migration/*.jsonl
+/migration/*.csv
+/migration/outputs/
+/migration/bundles/
+
+# Runtime assets, caches and machine-specific observations
 /runtime/cache/**
 /runtime/reports/**
 /runtime/model-identities/**
@@ -101,9 +103,15 @@ desktop.ini
 /runtime/serving/outputs/
 /runtime/serving/logs/
 
-# Checkpoints and package/image archives are assets, not source
-/models/
-/checkpoints/
+# Atomic writes, interrupted transfers and process observations
+.write-*
+*.tmp
+*.part
+*.kv-replay-pending
+*.log
+*.pid
+
+# Model/tensor payloads, archives and analysis databases
 *.pt
 *.pth
 *.ckpt
@@ -114,8 +122,6 @@ desktop.ini
 *.tar
 *.tar.gz
 *.tgz
-
-# Generated tensors and analysis databases
 *.npy
 *.npz
 *.pickle
@@ -129,8 +135,7 @@ desktop.ini
 *.db-shm
 *.db-wal
 
-# EasySteer uses the separate pinned vendor/easysteer-vllm overlay.
-# Its upstream checkout contains a redundant embedded vLLM source tree.
+# Pinned overlay is separate from EasySteer's redundant embedded vLLM tree
 /vendor/EasySteer/vllm-steer/
 /vendor/**/.git/
 /vendor/**/.git
@@ -138,16 +143,17 @@ desktop.ini
 /vendor/**/build/
 /vendor/**/dist/
 
-# Preserve deliberate placeholders in otherwise empty functional directories
-!.gitkeep
-
-# Machine-local experiment exports; keep curated Markdown summaries visible.
+# Deliberately curated Markdown reports remain visible
 /artifacts/*
 !/artifacts/*.md
 
-# One-off run-specific root drivers (supported commands live in package modules).
+# Retired one-off root drivers; maintained commands live in package modules
+/dense_capture_smoke.py
 /finalize_eval27_report.py
 /launch_eval27.py
 /launch_retry6.py
 /start_eval27_background.py
 /start_retry6_bg.py
+
+# Keep intentional directory placeholders, but not historical payloads
+!.gitkeep

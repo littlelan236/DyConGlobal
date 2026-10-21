@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from conftest import import_fixture, task
 
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.config import load_snapshot, resolve, snapshot
 
 
@@ -66,7 +66,7 @@ def test_frozen_snapshot_integrity(cfg):
 
 
 def test_imported_harness_evidence_must_match_patch(cfg):
-    from baseline.importers.evaluation import import_evaluation
+    from catalog.importers.evaluation import import_evaluation
     from core.io import sha256, write_json
 
     rid = import_fixture(cfg)
@@ -87,3 +87,12 @@ def test_imported_harness_evidence_must_match_patch(cfg):
     patch.write_text("different")
     with pytest.raises(ValueError, match="different patch"):
         import_evaluation(root, spec)
+
+
+def test_catalog_uses_canonical_catalog_directory(tmp_path):
+    from catalog.store import Catalog, empty_manifest
+    from core.io import write_json
+
+    write_json(tmp_path / "catalog/manifest.json", empty_manifest())
+    catalog = Catalog(tmp_path)
+    assert catalog.path == tmp_path / "catalog/manifest.json"

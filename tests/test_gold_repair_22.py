@@ -1,7 +1,7 @@
 import pytest
 import requests
 
-from baseline.evaluation.metadata import make_cached_get
+from benchmark_evaluation.metadata import make_cached_get
 from core.io import hash_json, read_json, write_json
 
 
@@ -14,7 +14,7 @@ def response(code, content=b"numpy<2\n"):
 
 
 def test_metadata_retries_reset_and_uses_exact_cached_content(tmp_path, monkeypatch):
-    monkeypatch.setattr("baseline.evaluation.metadata.time.sleep", lambda _: None)
+    monkeypatch.setattr("benchmark_evaluation.metadata.time.sleep", lambda _: None)
     calls = []
     url = "https://raw.githubusercontent.com/owner/repo/revision/requirements.txt"
 
@@ -47,7 +47,7 @@ def test_real_404_reaches_official_path_fallback(tmp_path):
 
 
 def test_exhausted_metadata_failure_never_fabricates_empty_requirements(tmp_path, monkeypatch):
-    monkeypatch.setattr("baseline.evaluation.metadata.time.sleep", lambda _: None)
+    monkeypatch.setattr("benchmark_evaluation.metadata.time.sleep", lambda _: None)
     calls = []
 
     def fetch(url, **kwargs):

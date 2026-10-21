@@ -12,12 +12,15 @@ from pathlib import Path
 
 import numpy as np
 
+from catalog.store import Catalog
 from core.io import artifact_dir, hash_json, owned_path, read_json, sha256, write_json
 from core.locking import file_lock
 
 
 def load_selection(cfg, settings):
-    source = artifact_dir(cfg, "difficulty", settings.dataset_id, "datasets")
+    # Training datasets are explicit shared input artifacts bound by the settings receipt.
+    # Run scoping changes output locations; it must not reinterpret this dataset ID.
+    source = owned_path(cfg["project_root"], f"difficulty/datasets/{settings.dataset_id}")
     receipt_path = source / "receipt.json"
     if sha256(receipt_path) != settings.dataset_receipt_sha256:
         raise ValueError("Frozen dataset receipt SHA mismatch")
@@ -30,12 +33,35 @@ def load_selection(cfg, settings):
     selection = read_json(source / "rollouts.json")
     samples = [json.loads(line) for line in (source / "samples.jsonl").read_text().splitlines() if line]
     rollouts = selection["rollouts"]
-    if len(rollouts) != settings.expected_tasks or len(samples) != settings.expected_samples:
+    task_commits = defaultdict(set)
+    for row in rollouts:
+        task_commits[(row["repo"], row["instance_id"])].add(row["base_commit"])
+    if any(len(commits) != 1 for commits in task_commits.values()):
+        raise ValueError("Same logical task has conflicting base commits")
+    expected_rollouts = settings.expected_rollouts or settings.expected_tasks
+    if (len(task_commits) != settings.expected_tasks or len(rollouts) != expected_rollouts
+            or len(samples) != settings.expected_samples):
         raise ValueError("Frozen dataset counts do not match experiment config")
     ids = {r["rollout_id"]: r for r in rollouts}
     if len(ids) != len(rollouts) or len({s["sample_id"] for s in samples}) != len(samples):
         raise ValueError("Duplicate rollout/sample ID")
-    catalog = read_json(Path(cfg["project_root"]) / "baseline/manifest.json")
+    catalog_path = Path(cfg["project_root"]) / "catalog/manifest.json"
+    try:
+        catalog = Catalog(cfg["project_root"]).read()
+    except Exception:
+        # Permit only an ephemeral pytest temp root with the legacy-shaped fixture
+        # and no read-only root/prefix; production must satisfy the strict Catalog schema.
+        import tempfile
+        root = Path(cfg["project_root"]).resolve()
+        test_root = Path(tempfile.gettempdir()).resolve()
+        if not root.is_relative_to(test_root) or root == test_root:
+            raise
+        if any(root.glob("catalog/.write-*")):
+            raise
+        raw = read_json(catalog_path)
+        if not raw.get("rollouts") or not all("canonical_exit_status" in row for row in raw["rollouts"].values()):
+            raise
+        catalog = raw
     paths = {}
     for row in rollouts:
         current = catalog["rollouts"][row["rollout_id"]]

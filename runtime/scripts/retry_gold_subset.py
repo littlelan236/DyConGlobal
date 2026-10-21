@@ -11,7 +11,7 @@ from pathlib import Path
 
 import docker
 
-from baseline.evaluation.harness import install_harness_adapter
+from benchmark_evaluation.harness import install_harness_adapter
 from core.io import identifier, now, read_json, sha256, write_json
 from core.locking import file_lock
 from runtime.containers.factory import ContainerFactory
@@ -53,8 +53,8 @@ def retry(root, base_summary, instances_file, config_snapshot, run_id, workers=4
                 name: sha256(root / name)
                 for name in [
                     "runtime/containers/repairs.py",
-                    "baseline/evaluation/metadata.py",
-                    "baseline/evaluation/harness.py",
+                    "benchmark_evaluation/metadata.py",
+                    "benchmark_evaluation/harness.py",
                     "runtime/scripts/gold_image_audit.py",
                 ]
             },

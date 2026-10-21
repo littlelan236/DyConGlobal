@@ -10,18 +10,18 @@ import time
 import traceback
 from pathlib import Path
 
-from baseline.evaluation.harness import install_harness_adapter
+from benchmark_evaluation.harness import install_harness_adapter
 from core.io import hash_json, now, read_json, write_json
 from runtime.containers.factory import ContainerFactory
 
 
-def load_cfg(root: Path, instances: Path, output: Path) -> dict:
+def load_cfg(root: Path, instances: Path, output: Path, nas_root: str = "/VM") -> dict:
     from core.config import resolve
 
     cfg = resolve(
         root / "config.yaml",
         [
-            "paths.nas_root=/VM",
+            f"paths.nas_root={nas_root}",
             "environment.requirements_cache=state/gold-image-audit/requirements-cache",
             "execution.harness_workers=4",
             "images.load_workers=4",
@@ -43,6 +43,7 @@ def audit(
     only_file: Path | None = None,
     cold_start: bool = False,
     cfg: dict | None = None,
+    nas_root: str = "/VM",
 ) -> dict:
     out = root / "state/gold-image-audit" / audit_id
     out.mkdir(parents=True, exist_ok=False)
@@ -52,7 +53,7 @@ def audit(
         instances = [x for x in instances if x["instance_id"] in wanted]
     if not instances or not all(x.get("nas_image") for x in instances):
         raise ValueError("Expected instances with NAS image references")
-    cfg = load_cfg(root, instances_path, out) if cfg is None else copy.deepcopy(cfg)
+    cfg = load_cfg(root, instances_path, out, nas_root=nas_root) if cfg is None else copy.deepcopy(cfg)
     if cfg.get("project_root", str(root)) != str(root):
         raise ValueError("Config snapshot belongs to another project")
     cfg.update(project_root=str(root), evaluation_run_id=out.name, audit_instances=str(instances_path))
@@ -62,10 +63,17 @@ def audit(
     preflight = {"tasks": len(instances), "started_at": now(), "deep_verify": {}, "errors": []}
     from runtime.images.nas import NasImageStore
 
+    repair_proofs = {}
     for row in instances:
         try:
             store = NasImageStore(cfg, row["nas_image"])
             descriptors = store.verify(deep=False)
+            if row.get("source_nas_image"):
+                from runtime.images.ownership import validate_repair
+
+                repair_proofs[row["instance_id"]] = validate_repair(
+                    cfg, row["source_nas_image"], row["nas_image"]
+                )
             preflight["deep_verify"][row["instance_id"]] = {
                 "image_id": store.image_id,
                 "requested": store.record.get("requested"),
@@ -101,6 +109,9 @@ def audit(
             "status": "infra_error",
             "resolved": None,
         }
+        if iid in repair_proofs:
+            result.update(image_repair=repair_proofs[iid],
+                          source_image_id=repair_proofs[iid]["source_image_id"])
         stage = "make_test_spec"
         try:
             spec = official.make_test_spec(row, namespace="swebench")
@@ -227,6 +238,7 @@ def main():
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--only-file", type=Path)
     p.add_argument("--cold-start", action="store_true")
+    p.add_argument("--nas-root", default="/VM")
     p.add_argument("--config-snapshot", type=Path)
     a = p.parse_args()
     if a.workers < 1 or a.workers > 4:
@@ -241,6 +253,7 @@ def main():
                 a.only_file.resolve() if a.only_file else None,
                 a.cold_start,
                 read_json(a.config_snapshot) if a.config_snapshot else None,
+                nas_root=a.nas_root,
             ),
             ensure_ascii=False,
             indent=2,

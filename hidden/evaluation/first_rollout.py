@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.config import load_snapshot
 from core.io import hash_json, identifier, now, read_json, sha256, write_json
 from core.locking import directory_changes, file_lock

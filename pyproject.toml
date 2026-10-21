@@ -26,7 +26,7 @@ dycon_capture = "runtime.serving.cache_boundary:install"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "baseline*", "enrichment*", "hidden*", "difficulty*", "action*", "runtime*"]
+include = ["core*", "application*", "catalog*", "rollout*", "benchmark_evaluation*", "diagnostics*", "enrichment*", "hidden*", "difficulty*", "action*", "runtime*"]
 exclude = ["tests*", "vendor*"]
 namespaces = false
 

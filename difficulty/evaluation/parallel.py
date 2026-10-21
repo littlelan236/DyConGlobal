@@ -10,7 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from action.datasets.trajectories import read_actions, select_trajectories
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.config import load_snapshot
 from core.io import artifact_dir, identifier, now, owned_path, read_json, sha256, write_json
 from core.locking import exclusive_artifact

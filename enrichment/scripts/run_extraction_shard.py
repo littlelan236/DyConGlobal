@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.config import resolve
 from core.io import read_json
 from core.model_identity import verify_model

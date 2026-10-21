@@ -136,3 +136,15 @@ def test_missing_points_use_finalized_rollout_identity(tmp_path, monkeypatch):
     write_json(source / "sessions/session/finalization.json", finalization)
     with pytest.raises(ValueError, match="unaccepted"):
         replay.prepare_extras(source, path)
+
+
+def test_native_event_index_reads_only_bound_request(tmp_path, monkeypatch):
+    source, out, events, event, ledger = ledger_source(tmp_path, monkeypatch)
+    key = hash_json("req")
+    (source / "requests/req.json").rename(source / "requests" / (key + ".json"))
+    (source / "requests/unrelated.json").write_text("invalid unrelated request")
+    event["request_key"] = key
+    write_json(events, [event])
+    monkeypatch.setattr(replay, "read_request", lambda base, proof: read_json(base / proof["ledger_ref"]))
+    _, rows, _ = replay.prepare_reference(source, out, events)
+    assert len(rows) == 1 and rows[0]["sample_id"] == "x"

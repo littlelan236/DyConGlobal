@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 from conftest import task
 
-from baseline.catalog import Catalog
-from baseline.scripts.migrate_tact import apply, prepare, report_runs
+from catalog.store import Catalog
+from migration.legacy.tact import apply, prepare, report_runs
 from core.io import read_json, sha256, write_json
 
 

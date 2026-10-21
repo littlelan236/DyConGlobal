@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.config import resolve
 from core.io import read_json
 
@@ -13,10 +13,68 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="dycon")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--set", action="append", default=[])
+    parser.add_argument("--run-id", dest="analysis_run_id", help="Bind an analysis command to a frozen run")
     sub = parser.add_subparsers(dest="command", required=True)
+    run = sub.add_parser("run", help="Create and operate immutable run plans")
+    run_sub = run.add_subparsers(dest="run_command", required=True)
+    q = run_sub.add_parser("create")
+    q.add_argument("run_id")
+    q.add_argument("--operation", choices=["rollout", "harness", "enrichment", "hidden", "analysis"], required=True)
+    q.add_argument("--tasks-file", type=Path)
+    q.add_argument("--task-id", action="append", default=[])
+    q.add_argument("--partition")
+    q = run_sub.add_parser("show")
+    q.add_argument("run_id")
+    q = run_sub.add_parser("status")
+    q.add_argument("run_id")
+    q = run_sub.add_parser("reconcile")
+    q.add_argument("run_id")
+    q = run_sub.add_parser("start")
+    q.add_argument("run_id")
+    q.add_argument("--detach", action="store_true")
+    q = run_sub.add_parser("wait")
+    q.add_argument("run_id")
+    q = run_sub.add_parser("resume")
+    q.add_argument("run_id")
+    q.add_argument("--detach", action="store_true")
+    q = run_sub.add_parser("cancel")
+    q.add_argument("run_id")
+    q.add_argument("--reason", default="user requested cancellation")
+    run_sub.add_parser("list")
+    harness = sub.add_parser("harness", help="Prepare, run and inspect run-local harness results")
+    harness_sub = harness.add_subparsers(dest="harness_command", required=True)
+    q = harness_sub.add_parser("prepare")
+    q.add_argument("run_id")
+    q.add_argument("--rollout-id", action="append", default=[])
+    q = harness_sub.add_parser("run")
+    q.add_argument("run_id")
+    q.add_argument("eval_id")
+    q.add_argument("--gold", action="store_true")
+    q = harness_sub.add_parser("status")
+    q.add_argument("run_id")
+    report = sub.add_parser("report", help="Project a run-local report")
+    report_sub = report.add_subparsers(dest="report_command", required=True)
+    q = report_sub.add_parser("run")
+    q.add_argument("run_id")
+    capture = sub.add_parser("capture", help="Inspect or recover online capture")
+    capture_sub = capture.add_subparsers(dest="capture_command", required=True)
+    q = capture_sub.add_parser("status")
+    q.add_argument("run_id")
+    q = capture_sub.add_parser("recover")
+    q.add_argument("run_id")
+    artifact = sub.add_parser("artifact", help="Inspect or verify run artifacts")
+    artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
+    q = artifact_sub.add_parser("show")
+    q.add_argument("run_id")
+    q = artifact_sub.add_parser("verify")
+    q.add_argument("run_id")
     for cmd in ["config-check", "catalog-check", "runtime-check", "recover"]:
         sub.add_parser(cmd)
     sub.add_parser("capture-recover").add_argument("run_id")
+    p = sub.add_parser("capture-reclassify", help="Reclassify finalized branch captures from native token evidence")
+    p.add_argument("run_id")
+    p.add_argument("--session-id", required=True, action="append")
+    p.add_argument("--wait-for-run", action="store_true", help=argparse.SUPPRESS)
     p = sub.add_parser("online-index")
     p.add_argument("run_id")
     p.add_argument("index_id")
@@ -40,7 +98,10 @@ def main(argv=None):
         action="store_true",
         help="Run the real tool/capture startup gate without admitting tasks",
     )
-    sub.add_parser("prepare-evaluation").add_argument("run_id")
+    p = sub.add_parser("prepare-evaluation")
+    p.add_argument("run_id")
+    p.add_argument("--rollout-id", action="append", default=[],
+                   help="Freeze exactly these canonical rollout IDs")
     p = sub.add_parser("evaluate")
     p.add_argument("run_id")
     p.add_argument("eval_id")
@@ -75,6 +136,10 @@ def main(argv=None):
     p = sub.add_parser("action-index")
     p.add_argument("shared_index_id")
     p.add_argument("index_id")
+    p = sub.add_parser("difficulty-predict", help="Apply a published predictor to replay hidden")
+    p.add_argument("index_id")
+    p.add_argument("predictor")
+    p.add_argument("prediction_id")
     p = sub.add_parser("difficulty-evaluate")
     p.add_argument("index_id")
     p.add_argument("predictions")
@@ -105,6 +170,17 @@ def main(argv=None):
     p = sub.add_parser("difficulty-ridge")
     p.add_argument("experiment_id")
     p.add_argument("--mode", choices=["dry-run", "check-data", "fit"], default="fit")
+    p = sub.add_parser("predictor-publish", help="Publish an existing estimator for online branch selection")
+    p.add_argument("predictor_id")
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--experiment", type=Path)
+    source.add_argument("--checkpoint", type=Path)
+    p.add_argument("--target", default="reasoning_length")
+    p.add_argument("--fit-scope", choices=["refit", "train"], default="refit")
+    p.add_argument("--loader", default="runtime.serving.ridge_provider:load")
+    p.add_argument("--sites", type=int, nargs="+")
+    p.add_argument("--hidden-size", type=int)
+    p.add_argument("--endpoint", default="submission")
     a = parser.parse_args(argv)
     if a.command == "difficulty-plot-parallel":
         if a.list and (a.plot_id or a.attempt_id or a.step_start != 0 or a.step_end is not None):
@@ -115,18 +191,116 @@ def main(argv=None):
             parser.error("--attempt-id requires --task-id")
     if a.command == "difficulty-evaluate-parallel" and a.attempt_id and not a.task_id:
         parser.error("--attempt-id requires --task-id")
+    if a.command == "run" and a.run_command != "create" and a.set:
+        parser.error("run status/resume/reconcile accepts only the frozen run plan; use run create for overrides")
+    if a.command == "run" and a.run_command == "create":
+        root_only = ("generation.", "agent.", "timeouts.")
+        forbidden = [item.split("=", 1)[0] for item in a.set if item.startswith(root_only)]
+        if forbidden:
+            parser.error("generation, agent limits and timeouts belong to root config.yaml: " + ", ".join(forbidden))
     if a.command == "rollout" and a.set:
         parser.error("rollout rejects --set; edit the unique config.yaml or resume its immutable snapshot")
     if a.command == "rollout" and a.resume and (a.task_id or a.unrolled):
         parser.error("resume uses the immutable task selection")
-    cfg = resolve(a.config, a.set)
+    explicit_run = a.analysis_run_id or getattr(a, "run_id", None)
+    run_commands = {"rollout", "harness", "capture", "artifact", "report", "capture-recover", "online-index"}
+    if a.command in {"enrich", "token-trace", "trajectory-token-audit", "hidden", "dataset-index", "token-join"}:
+        candidate = Path(a.config).resolve().parent / "runs" / a.dataset_id / "plan.json"
+        if candidate.exists():
+            explicit_run = a.dataset_id
+    use_snapshot = ((a.command == "run" and a.run_command != "create" and a.run_command != "list")
+                    or a.command in run_commands or a.analysis_run_id is not None
+                    or (a.command in {"enrich", "token-trace", "trajectory-token-audit", "hidden", "dataset-index", "token-join"} and explicit_run is not None))
+    if use_snapshot:
+        if a.set:
+            parser.error("Existing runs use frozen config; create a new run to change settings")
+        from application.execution.run_plan import load_plan
+        cfg = load_plan(Path(a.config).resolve().parent, explicit_run)["config"]
+    else:
+        cfg = resolve(a.config, a.set)
     catalog = Catalog(cfg["project_root"])
+    def publish_artifacts(capture=False):
+        if cfg.get("run_id"):
+            from application.execution.artifact import capture_publication, refresh
+            if capture:
+                capture_publication(cfg["project_root"], cfg["run_id"])
+            refresh(cfg["project_root"], cfg["run_id"])
+
+    if a.command == "capture":
+        from application.execution.status import run_status
+        if a.capture_command == "status":
+            result = run_status(cfg["project_root"], a.run_id)
+        else:
+            from hidden.recover_online import recover_online
+            result = recover_online(cfg, a.run_id)
+        if a.capture_command == "recover":
+            publish_artifacts(capture=True)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if a.command == "artifact":
+        from application.execution.artifact import show, verify
+        result = show(cfg["project_root"], a.run_id) if a.artifact_command == "show" else verify(cfg["project_root"], a.run_id)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if a.command == "harness":
+        from application.execution.harness import prepare, run
+        from application.execution.status import run_status
+
+        if a.harness_command == "prepare":
+            result = prepare(cfg["project_root"], a.run_id, a.rollout_id)
+        elif a.harness_command == "run":
+            result = run(cfg["project_root"], a.run_id, a.eval_id, a.gold)
+        else:
+            result = run_status(cfg["project_root"], a.run_id)
+        publish_artifacts()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if a.command == "report":
+        from application.execution.report import report
+        result = report(cfg["project_root"], a.run_id)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if a.command == "run":
+        from application.execution.run_plan import create_run, list_runs, show_run
+        from application.execution.status import cancel_run, reconcile_run, run_status
+        from application.execution.supervisor import launch, wait
+
+        if a.run_command == "create":
+            result = {"run_id": a.run_id, "path": str(create_run(
+                cfg, a.run_id, operation=a.operation, tasks_file=a.tasks_file,
+                task_ids=a.task_id, partition=a.partition))}
+        elif a.run_command == "show":
+            result = show_run(cfg["project_root"], a.run_id)
+        elif a.run_command == "status":
+            result = run_status(cfg["project_root"], a.run_id)
+        elif a.run_command == "list":
+            result = list_runs(cfg["project_root"])
+        elif a.run_command == "cancel":
+            result = cancel_run(cfg["project_root"], a.run_id, a.reason)
+        elif a.run_command == "wait":
+            result = wait(cfg["project_root"], a.run_id)
+        elif a.run_command in {"start", "resume"}:
+            result = launch(cfg["project_root"], a.run_id, resume=True, detach=a.detach)
+        else:
+            result = reconcile_run(cfg["project_root"], a.run_id)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if result.get("exit_code", 0) != 0:
+            raise SystemExit(result["exit_code"])
+        return
     if a.command == "config-check":
         result = cfg
+    elif a.command == "predictor-publish":
+        from runtime.serving.predictors import publish_predictor
+
+        result = publish_predictor(
+            cfg, a.predictor_id, experiment=a.experiment, checkpoint=a.checkpoint,
+            target=a.target, fit_scope=a.fit_scope, loader=a.loader, sites=a.sites,
+            hidden_size=a.hidden_size, endpoint=a.endpoint,
+        )
     elif a.command == "catalog-check":
         result = catalog.verify()
     elif a.command == "runtime-check":
-        from baseline.workflow import assert_runtime_ready
+        from benchmark_evaluation.selection import assert_runtime_ready
 
         assert_runtime_ready(cfg)
         result = {"ready": True}
@@ -134,6 +308,10 @@ def main(argv=None):
         from hidden.recover_online import recover_online
 
         result = recover_online(cfg, a.run_id)
+    elif a.command == "capture-reclassify":
+        from hidden.reclassify_online import reclassify_online
+
+        result = reclassify_online(cfg, a.run_id, a.session_id, wait_for_run=a.wait_for_run)
     elif a.command == "online-index":
         from difficulty.datasets.online import build_published_index
 
@@ -141,11 +319,11 @@ def main(argv=None):
     elif a.command == "tasks-import":
         result = catalog.register_tasks(read_json(a.list))
     elif a.command == "rollouts-import":
-        from baseline.importers.legacy import import_list
+        from rollout.artifacts import import_list
 
         result = import_list(cfg["project_root"], a.list)
     elif a.command == "evaluations-import":
-        from baseline.importers.evaluation import import_evaluation
+        from catalog.importers.evaluation import import_evaluation
 
         result = [import_evaluation(cfg["project_root"], spec) for spec in read_json(a.list)]
     elif a.command == "model-register":
@@ -153,7 +331,7 @@ def main(argv=None):
 
         result = {"fingerprint": register(cfg["project_root"], a.checkpoint)}
     elif a.command == "benchmark-pull":
-        from baseline.benchmark import publish
+        from catalog.benchmark import publish
 
         result = publish(
             cfg,
@@ -167,23 +345,24 @@ def main(argv=None):
     elif a.command == "rollout":
         if a.resume and a.set:
             raise ValueError("Resume uses immutable snapshot; --set requires a new run")
-        from baseline.rollout.runner import run_manifest
+        from rollout.runner import run_manifest
 
         result = run_manifest(
             cfg, a.run_id, a.resume, task_ids=a.task_id, unrolled=a.unrolled, check_only=a.check_only
         )
     elif a.command == "prepare-evaluation":
-        from baseline.workflow import prepare_run
+        from benchmark_evaluation.selection import prepare_run
 
         result = str(
             prepare_run(
-                cfg, a.run_id, partition=cfg["benchmark"]["partition"], purposes=cfg["benchmark"]["purposes"]
+                cfg, a.run_id, partition=cfg["benchmark"]["partition"], purposes=cfg["benchmark"]["purposes"],
+                rollout_ids=a.rollout_id,
             )
         )
     elif a.command == "evaluate":
         if a.set:
             raise ValueError("Evaluation uses the saved run configuration")
-        from baseline.evaluation.harness import evaluate
+        from benchmark_evaluation.harness import evaluate
         from core.config import load_snapshot
 
         cfg = load_snapshot(cfg["project_root"], a.run_id)
@@ -222,9 +401,12 @@ def main(argv=None):
             "--config",
             cfg["config_source"],
         ]
+        if cfg.get("run_id"):
+            args += ["--run-id", cfg["run_id"]]
         for override in a.set:
             args += ["--set", override]
         subprocess.run([*args, a.dataset_id, a.capture_id], cwd=cfg["project_root"], check=True)
+        publish_artifacts()
         return
     elif a.command == "images-check":
         from runtime.images.nas import NasImageStore
@@ -262,6 +444,9 @@ def main(argv=None):
         from action.datasets.index import create_action_index
 
         result = str(create_action_index(cfg, a.shared_index_id, a.index_id))
+    elif a.command == "difficulty-predict":
+        from difficulty.evaluation.predict import predict_hidden
+        result = predict_hidden(cfg, a.index_id, a.predictor, a.prediction_id)
     elif a.command == "difficulty-evaluate":
         from difficulty.evaluation.run import evaluate_predictions
 
@@ -295,7 +480,10 @@ def main(argv=None):
         from runtime.containers.recovery import recover
 
         result = recover(cfg)
+    publish_artifacts(capture=a.command in {"rollout", "capture-recover"})
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    if a.command == "rollout" and read_json(Path(cfg["project_root"])/"runs"/a.run_id/"status.json")["stage"]=="failed":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

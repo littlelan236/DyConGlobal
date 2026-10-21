@@ -356,7 +356,7 @@ def test_query_does_not_wait_for_capture_and_keeps_format_error(cfg, monkeypatch
     from minisweagent.exceptions import FormatError
     from minisweagent.models.litellm_model import LitellmModel
 
-    from baseline.rollout.model import make_model
+    from rollout.model import make_model
     from core.deadline import Deadline
 
     cfg["capture"]["enabled"] = True
@@ -531,7 +531,7 @@ def test_block_policy_saves_response_without_api_resampling(cfg, tmp_path, monke
     import litellm
     from minisweagent.models.litellm_model import LitellmModel
 
-    from baseline.rollout.model import make_model
+    from rollout.model import make_model
     from core.deadline import Deadline
     from runtime.serving.errors import CaptureError
 

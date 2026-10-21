@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from jinja2 import StrictUndefined, Template
 
-from baseline.rollout.model import model_config
+from rollout.model import model_config
 
 
 @pytest.mark.parametrize("size", [9999, 10000, 12345])
@@ -46,7 +46,7 @@ def test_native_format_error_uses_finish_reason(cfg, finish):
 
 @pytest.mark.parametrize("mode", ["plain", "capture", "steering"])
 def test_modes_share_explicit_sampling_and_prompt_contract(cfg, monkeypatch, mode):
-    import baseline.rollout.model as module
+    import rollout.model as module
 
     cfg["capture"]["enabled"] = mode == "capture"
     cfg["steering"]["enabled"] = mode == "steering"

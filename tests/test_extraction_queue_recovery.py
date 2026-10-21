@@ -63,7 +63,7 @@ def test_system_failure_stops_before_claiming_second_job(cfg, monkeypatch):
     def broken_model(cfg):
         raise RuntimeError('checkpoint cannot load')
     monkeypatch.setattr(worker, 'verify_model', broken_model)
-    from baseline.catalog import Catalog
+    from catalog.store import Catalog
     original_select = Catalog.select
     with pytest.raises(RuntimeError, match='System error'):
         worker.worker(root, 0, snapshot)

@@ -68,8 +68,14 @@ def owned_path(root, relative):
 
 
 def artifact_dir(cfg, module, artifact_id, category="outputs"):
-    if module not in {"enrichment", "hidden", "difficulty", "action", "baseline", "runtime"}:
+    if module not in {"enrichment", "hidden", "difficulty", "action", "runtime"}:
         raise ValueError(module)
+    if cfg.get("run_id") and module in {"enrichment", "hidden", "difficulty", "action"}:
+        base = f"runs/{identifier(cfg['run_id'])}/{module}"
+        if module == "enrichment":
+            rel = "offline" if category == "outputs" else category
+            return owned_path(cfg["project_root"], f"{base}/{rel}")
+        return owned_path(cfg["project_root"], f"{base}/{category}/{identifier(artifact_id)}")
     return owned_path(cfg["project_root"], f"{module}/{category}/{identifier(artifact_id)}")
 
 

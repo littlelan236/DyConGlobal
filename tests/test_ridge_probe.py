@@ -107,8 +107,8 @@ def fixture_project(tmp_path):
     rng = np.random.default_rng(91)
     for i in range(8):
         rid, task_key = f"r{i}", f"t{i}"
-        trajectory = f"baseline/trajectories/{rid}.json"
-        patch = f"baseline/patches/{rid}.diff"
+        trajectory = f"runs/source/rollout/trajectories/{rid}.json"
+        patch = f"runs/source/rollout/patches/{rid}.diff"
         write_json(tmp_path / trajectory, {"info": {"exit_status": "Submitted"},
                    "messages": [{"role": "assistant"} for _ in range(3)]})
         (tmp_path / patch).parent.mkdir(parents=True, exist_ok=True)
@@ -142,7 +142,7 @@ def fixture_project(tmp_path):
                 "remaining_reasoning_tokens_to_submission": (2-step)*(i+1),
                 "hidden_root": str(hidden.parent), "hidden_path": hidden.name,
                 "hidden_sha256": sha256(hidden), "array_name": "hidden", "array_row": step})
-    write_json(tmp_path / "baseline/manifest.json", {"catalog_revision": 1, "rollouts": live_rollouts, "tasks": live_tasks})
+    write_json(tmp_path / "catalog/manifest.json", {"catalog_revision": 1, "rollouts": live_rollouts, "tasks": live_tasks})
     write_json(dataset / "rollouts.json", {"rollouts": rollouts})
     (dataset / "samples.jsonl").write_text("".join(json.dumps(s)+"\n" for s in samples))
     write_json(dataset / "receipt.json", {"state": "complete", "files": {
@@ -189,7 +189,7 @@ def test_tampered_selection_and_non_submission_fail(fixture_project):
     with pytest.raises(ValueError, match="selection file changed"):
         load_selection(cfg, settings)
     (dataset / "samples.jsonl").write_bytes(samples)
-    path = Path(cfg["project_root"]) / "baseline/manifest.json"
+    path = Path(cfg["project_root"]) / "catalog/manifest.json"
     catalog = read_json(path)
     catalog["rollouts"]["r0"]["submission_status"] = "unsubmitted"
     write_json(path, catalog)
@@ -221,8 +221,57 @@ def test_optional_config_hash_compatibility(tmp_path):
     raw = yaml.safe_load((root / "config.yaml").read_text())
     old = copy.deepcopy(raw)
     old["difficulty"].pop("ridge_probe", None)
+    # Relocating config must not make an existing external estimator path relative to tmp_path.
+    if old.get("parallel", {}).get("estimator_ref"):
+        old["parallel"]["estimator_ref"] = str((root / old["parallel"]["estimator_ref"]).resolve())
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(old))
     resolved = resolve(path)
     assert "ridge_probe" not in resolved["difficulty"]
     assert resolved["config_hash"] == hash_json({k: v for k, v in resolved.items() if k != "config_hash"})
+
+
+def test_expanded_selection_load_and_inherited_dryrun(fixture_project):
+    cfg, settings, dataset = fixture_project
+    root = Path(cfg["project_root"])
+    original = read_json(dataset / "rollouts.json")["rollouts"]
+    samples = [json.loads(line) for line in (dataset / "samples.jsonl").read_text().splitlines()]
+    parent = make_split(original, samples, settings.validation_tasks, settings.split_seed)
+    parent_path = root / "difficulty/checkpoints/parent"
+    write_json(parent_path / "split.json", parent)
+    write_json(parent_path / "receipt.json", {"state": "complete", "files": {
+        "split.json": sha256(parent_path / "split.json")}})
+    catalog = read_json(root / "catalog/manifest.json")
+    for row in original[:2]:
+        addition = copy.deepcopy(row)
+        rid = row["rollout_id"] + "-additional"
+        addition["rollout_id"] = rid
+        path = f"runs/source/rollout/trajectories/{rid}.json"
+        trajectory = read_json(root / row["trajectory_path"])
+        trajectory["independent_attempt"] = rid
+        write_json(root / path, trajectory)
+        addition["trajectory_path"] = path
+        addition["trajectory_sha256"] = sha256(root / path)
+        catalog["rollouts"][rid] = {**addition, "provenance": {}}
+        for sample in list(samples):
+            if sample["rollout_id"] == row["rollout_id"]:
+                samples.append({**sample, "sample_id": sample["sample_id"]+"-additional",
+                                "rollout_id": rid, "trajectory_sha256": addition["trajectory_sha256"]})
+        original.append(addition)
+    write_json(root / "catalog/manifest.json", catalog)
+    write_json(dataset / "rollouts.json", {"rollouts": original})
+    (dataset / "samples.jsonl").write_text("".join(json.dumps(s)+"\n" for s in samples))
+    write_json(dataset / "receipt.json", {"state": "complete", "files": {
+        name: sha256(dataset / name) for name in ("rollouts.json", "samples.jsonl")}})
+    options = settings.model_dump()
+    options.update(expected_rollouts=10, expected_samples=30,
+                   dataset_receipt_sha256=sha256(dataset / "receipt.json"),
+                   split_strategy="inherit_task_split_v1", parent_experiment_id="parent",
+                   parent_receipt_sha256=sha256(parent_path / "receipt.json"))
+    cfg["difficulty"]["ridge_probe"] = options
+    cfg["config_hash"] = hash_json({k: v for k, v in cfg.items() if k != "config_hash"})
+    result = run_probe(cfg, "expanded-dry", mode="dry-run")
+    split = read_json(Path(result["path"]) / "split.json")
+    assert split["task_counts"] == parent["task_counts"]
+    assert len(split["rollouts"]) == 10
+    assert sum(split["sample_counts"].values()) == 30

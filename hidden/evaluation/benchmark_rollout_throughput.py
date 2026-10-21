@@ -10,8 +10,8 @@ from pathlib import Path
 import time
 from multiprocessing.connection import wait as wait_connections
 
-from baseline.catalog import Catalog
-from baseline.rollout.runner import run_task
+from catalog.store import Catalog
+from rollout.runner import run_task
 from core.config import resolve
 from core.io import now, read_json, sha256, write_json
 from core.model_identity import verify_model

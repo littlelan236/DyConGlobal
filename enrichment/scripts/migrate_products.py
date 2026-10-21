@@ -7,7 +7,7 @@ import json
 import shutil
 from pathlib import Path
 
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.io import now, read_json, sha256, write_json
 
 

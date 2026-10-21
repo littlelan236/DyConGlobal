@@ -1,6 +1,6 @@
 # DyConGlobal 工作约定
 
-先读 `README.md`、`docs/ENTRYPOINTS.md` 和 `docs/IMPLEMENTATION.md`，再核对实际代码。历史 run 证据不代表当前实现或当前数据规模。
+先读 `README.md`、`docs/ENTRYPOINTS.md` 和 `docs/MINIMUM-RUN-CN.md`；容器问题另读 `docs/container-environment-repair-cn.md`，再核对实际代码。历史 run 证据不代表当前实现或当前数据规模。
 
 ## 统一入口与行为对齐
 
@@ -14,7 +14,7 @@
 
 ## 配置与数据
 
-- 唯一可编辑配置为 `config.yaml`；唯一任务分区、用途、轨迹和评测关系来源为 `baseline/manifest.json`。
+- 唯一可编辑配置为 `config.yaml`；唯一任务分区、用途、轨迹和评测关系来源为 `catalog/manifest.json`。
 - `runs/<run>/resolved-config.json`、selection、hash 和 artifact receipt 是不可变证据，禁止为适配新参数而修改旧快照。
 - unresolved、未评测和基础设施故障的成功剩余量标签保留 null；重建 token 证据不能冒充 exact IDs；action 分析复用现有 hidden。
 - 使用任务对应的 `.venvs/runner`、`.venvs/analysis`、`.venvs/easysteer`、`.venvs/latent-vllm`，不混用推理和提取 runtime。

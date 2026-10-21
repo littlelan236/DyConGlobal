@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.io import hash_json, owned_path
 
 

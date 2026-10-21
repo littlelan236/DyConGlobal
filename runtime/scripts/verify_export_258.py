@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from core.config import resolve
 from core.io import read_json, write_json
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from runtime.images.nas import NasImageStore
 
 root = Path('/home/wangtianyi/DyConGlobal')

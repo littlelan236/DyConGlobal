@@ -96,4 +96,17 @@ def read_branch_index(root, session_id):
             raise ValueError("Branch evidence checksum mismatch")
     rows = read_json(base / "branch-index.json")
     coverage = read_json(base / "branch-coverage.json")
+    classification = base / "branch-classification-v2.json"
+    if classification.exists():
+        proof = read_json(base / "branch-classification-v2-receipt.json")
+        for relative, digest in proof["files"].items():
+            if sha256(owned_path(root, relative)) != digest:
+                raise ValueError("Branch classification receipt checksum mismatch")
+        revision = read_json(classification)
+        for relative, digest in revision["source_files"].items():
+            if sha256(owned_path(root, relative)) != digest:
+                raise ValueError("Branch classification evidence checksum mismatch")
+        coverage = revision["coverage"]
+        states = {(r["decision_id"], r["branch_id"]): r["close_capture"] for r in revision["branches"]}
+        rows = [{**row, "close_capture": states[(row["decision_id"], row["branch_id"])]} for row in rows]
     return {"samples": rows, "coverage": coverage, "receipt": receipt}

@@ -3,16 +3,50 @@
 同 action、不同 reasoning 的评分不稳定性评测使用 `dycon difficulty-evaluate-parallel RUN_ID EVALUATION_ID`，
 实现与已有并行轨迹可视化同在 `difficulty/evaluation/` 并复用轨迹对齐。
 支持平均两两差、标准差/极差、log1p 倍数分歧率和相对 Q，以及去重/原采样两种口径和 task/repo CI。
-参数、分组、汇总与产物见 [使用说明](../docs/parallel-score-instability.md)。
+参数、分组、汇总与产物见 [使用说明](../docs/ENTRYPOINTS.md#7-ridge可视化和一致性指标)。
 
 并行解码的在线评分可使用 `dycon difficulty-plot-parallel RUN_ID PLOT_ID --rollout-id ROLLOUT_ID`
 绘制实际选中轨迹的逐步预测折线及全部候选分支散点，并导出 PNG/SVG、评分 CSV 和来源 receipt。
 无需加载 checkpoint、hidden tensor 或启动 GPU；具体选择、单位、缺失评分与噪音解释见
-[并行轨迹评分可视化](../docs/parallel-score-visualization.md)。
+[并行轨迹评分可视化](../docs/ENTRYPOINTS.md#7-ridge可视化和一致性指标)。
 
-新增正式 `dycon difficulty-ridge EXPERIMENT_ID`：在 analysis 环境消费冻结的 submission 选择，执行 task 分组的单层 Ridge × alpha 搜索、验证R²选优和参数/报告保存。`--mode dry-run` 只核验/划分，`--mode check-data` 另检查真实hidden及缓存，默认fit。见 [实验入口与语义](../docs/ridge-submission-pilot.md)。这是到该次提交的独立标签视图，允许已提交但未成功/未评测的轨迹，原成功标签不改。
+`dycon difficulty-ridge EXPERIMENT_ID` 在 analysis 环境消费冻结的 submission 选择，执行单层 Ridge × alpha 搜索、验证 R²选优及参数/可视化报告保存。支持原 task 两划分，以及 event/task 两种三划分：`event_random_v1` 允许同 task 的 step 跨分区，`task_random_v1` 将同 task 的全部轨迹和 step 放在同一分区；三划分均在 train＋validation 重拟合冠军后评估 test。这是“到该次提交”的独立标签视图，允许已提交但未成功或未评测的轨迹，原成功标签不改。完整协议见 [实验指南](../docs/ENTRYPOINTS.md#7-ridge可视化和一致性指标)。
 
 2026-10-19 按实际代码更新。正式命令见 [任务入口表](../docs/ENTRYPOINTS.md)。已有索引、评分和 hidden 提取入口时直接复用，不另写临时脚本拼接数据或重定义标签。
+
+## Ridge 实验与可视化
+
+在工程根目录执行，使用不同的新实验 ID；已有目录（含未完成目录）拒绝覆盖：
+
+```bash
+.venvs/analysis/bin/dycon difficulty-ridge SPLIT_CHECK_ID --mode dry-run
+.venvs/analysis/bin/dycon difficulty-ridge DATA_CHECK_ID --mode check-data
+.venvs/analysis/bin/dycon difficulty-ridge EXPERIMENT_ID
+```
+
+`dry-run` 核验来源并保存划分；`check-data` 另读回全部 hidden、核验哈希/有限值并生成缓存；默认 `fit` 执行拟合、选优、指标与图表。正式配置在唯一 `config.yaml` 的 `difficulty.ridge_probe`：238 个 task、14,384 个共同可用 close 样本，190 task 训练、48 task 验证；32 个 public layers × 13 个 alpha × 2 个目标，共 832 个候选。来源清单旧 `split=train` 由本次 `split.json` 覆盖。标准化和 Ridge 参数只在训练集拟合，验证集分别为两个目标选择最佳 layer/alpha，最高验证 R²是模型选择分数。
+
+画图库包名为 **matplotlib**，代码使用 `import matplotlib.pyplot as plt`，没有单独的 `plt` 包。runner 和 analysis 环境已安装 `matplotlib 3.11.2`；runner 依赖固定在 `locks/runner.in`、`locks/runner.txt`，analysis 的依赖声明包含 matplotlib。完整实验推荐 analysis，runner 也可执行不依赖 torch 的 Ridge/可视化测试。SSH 无显示器时使用 `Agg` 后端保存 PNG，无需桌面窗口。
+
+```bash
+.venvs/runner/bin/python -m pytest -q tests/test_ridge_probe.py
+.venvs/analysis/bin/python -m pytest -q tests/test_ridge_probe.py tests/test_difficulty_estimators.py
+```
+
+fit 产物在 `difficulty/checkpoints/EXPERIMENT_ID/`：
+
+| 文件 | 内容 |
+|---|---|
+| `experiment.json`、`split.json` | 实际配置、输入证据、固定 task/样本划分 |
+| `trials.jsonl`、`models/` | 所有组合的训练/验证指标及可无 pickle 加载的 NPZ 参数 |
+| `selected.json`、`validation-predictions.jsonl` | 两个目标的最优组合、验证逐样本预测 |
+| `metrics.json`、`report.md` | 验证指标、训练均值基线、repo/source/task 分组结果 |
+| `plots/*-grid.png` | 每目标一张 layer × alpha 验证 R²热图 |
+| `plots/*-validation.png` | 每目标一张验证真值与预测散点图 |
+| `plots/*-trajectories.png` | 每目标一张短/中/长验证轨迹比较图 |
+| `receipt.json` | 完成模式与产物 SHA；必须区分数据检查与实际 fit |
+
+两个目标共输出 6 张图；所有图均采用拟合空间：reasoning 为 log1p token 数，steps 为线性 step 数。单独的原单位指标保存在 metrics 中。此前 `ridge-grid-real-debug-20261019` 是 2 层 × 3 alpha × 2 目标的 12 候选调试，只证明入口与报告流程，不是 832 候选正式搜索。独立新任务测试不属于当前选择验证集。
 
 ## 正式数据与评分命令
 
@@ -48,7 +82,7 @@ hidden `[samples, selected_layers, hidden_size]` 展平为 `[samples, selected_l
 | `remaining_steps_log1p` | `log1p(remaining_steps)` |
 | `remaining_steps_linear` | 原始 remaining steps |
 
-`transform_target`/`inverse_target` 提供变换与逆变换。`train_estimators` 返回模型对象、transformed-space MAE/RMSE/R²、逆变换后的 validation predictions/targets；不自动输出 scorer 所需的 sample_id/target 预测清单或保存 checkpoint。预测格式见 [INPUTS.md](../docs/INPUTS.md)。
+`transform_target`/`inverse_target` 提供变换与逆变换。`train_estimators` 返回模型对象、transformed-space MAE/RMSE/R²、逆变换后的 validation predictions/targets；不自动输出 scorer 所需的 sample_id/target 预测清单或保存 checkpoint。预测格式见 [INPUTS.md](../docs/ENTRYPOINTS.md#4-显式输入格式)。
 
 ## Python API 和划分限制
 

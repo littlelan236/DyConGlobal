@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from baseline.rollout.model import model_config
+from rollout.model import model_config
 from hidden.backends.vllm.online import (
     capture_request_metadata,
     classify_capture_anchor,

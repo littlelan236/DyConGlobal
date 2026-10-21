@@ -8,7 +8,7 @@ from conftest import import_fixture
 
 from action.analyzers.taxonomy import Classifier, shell_literal
 from action.analyzers.trajectories import check_analysis, classify_trajectories
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.io import read_json, sha256, write_json
 
 
@@ -68,10 +68,10 @@ def test_direct_cli_no_enrichment_immutable_and_tamper_detection(cfg, capsys):
 
     rid, path = _source(cfg)
     root = Path(cfg["project_root"])
-    manifest_before = sha256(root / "baseline/manifest.json")
+    manifest_before = sha256(root / "catalog/manifest.json")
     main(["--config", cfg["config_source"], "action-classify", "report", "--rollout-id", rid])
     assert not (root / "enrichment").exists()
-    assert sha256(root / "baseline/manifest.json") == manifest_before
+    assert sha256(root / "catalog/manifest.json") == manifest_before
     out = root / "action/outputs/report"
     rows = [json.loads(s) for s in (out / "labels.jsonl").read_text().splitlines()]
     assert [r["label"] for r in rows] == ["INSPECT", "RUN"]

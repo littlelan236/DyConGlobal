@@ -13,8 +13,8 @@ def test_real_agent_request_and_submission_protocol(cfg, tmp_path, monkeypatch):
     monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
     from minisweagent.environments.docker import DockerEnvironment
 
-    from baseline.rollout.agent import DurableAgent
-    from baseline.rollout.model import make_model
+    from rollout.agent import DurableAgent
+    from rollout.model import make_model
     from core.deadline import Deadline
 
     seen = []

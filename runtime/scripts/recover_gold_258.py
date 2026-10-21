@@ -9,7 +9,7 @@ from pathlib import Path
 
 import docker
 
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.config import resolve
 from core.io import now, read_json, write_json
 from core.locking import file_lock

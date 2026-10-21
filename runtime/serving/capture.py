@@ -985,14 +985,15 @@ class OnlineCaptureController:
                 return read_json(previous)
             return None
         from enrichment.online_trace import reasoning_targets
+        from hidden.branch_coverage import classify_close, summarize_branches
 
-        rows, missing = [], []
+        rows = []
         for decision in decisions:
             for candidate in decision["candidates"]:
                 rid = candidate.get("native_request_id")
                 receipt = self.request_outputs.get(rid)
                 events = [e for e in session.samples if e["request_id"] == rid and e["anchor"] == "think_close"]
-                targets, available = reasoning_targets(receipt, self.config.get("open_token_ids", [248068]),
+                targets, _ = reasoning_targets(receipt, self.config.get("open_token_ids", [248068]),
                                                        receipt.get("close_token_ids", [248069])) if receipt else (set(), [])
                 close_positions = {p for p, a in targets if a == "think_close"}
                 matched = []
@@ -1002,19 +1003,18 @@ class OnlineCaptureController:
                         stored = read_json(path)
                         if stored.get("status") != "failed" and stored.get("sha256"):
                             matched.append(stored)
-                if not matched:
-                    missing.append({"decision_id": decision["decision_id"], "branch_id": candidate["branch_id"],
-                                    "reason": "missing_close_hidden", "availability": available})
+                close_capture = classify_close(receipt, matched, self.config.get("open_token_ids", [248068]))
                 rows.append({"decision_id": decision["decision_id"], "branch_id": candidate["branch_id"],
                              "selected": candidate["branch_id"] == decision["selected_branch_id"],
                              "native_request_id": rid, "close_sample_ids": [e["sample_id"] for e in matched],
                              "close_events": matched,
+                             "close_capture": close_capture,
                              "score": candidate.get("score"), "rollout_id": rollout_id,
                              "trajectory_sha256": trajectory_sha256,
                              "labels": {"remaining_steps": None, "remaining_reasoning_tokens": None}})
         base = f"sessions/{session_id}/parallel"
         self._write(base + "/branch-index.json", rows, immutable=True)
-        coverage = {"expected": len(rows), "observed": len(rows) - len(missing), "missing": missing}
+        coverage = summarize_branches(rows)
         self._write(base + "/branch-coverage.json", coverage, immutable=True)
         files = {str(p.relative_to(self.export_root)): sha256(p)
                  for p in (self.export_root / base).rglob("*.json") if p.name != "branch-receipt.json"}

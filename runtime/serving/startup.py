@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import requests
 
-from baseline.rollout.model import make_model
+from rollout.model import make_model
 from core.io import read_json, sha256, write_json
 from hidden.artifacts import event_records, read_arrays, read_request
 from hidden.backends.vllm.online import capture_request_metadata
@@ -161,6 +161,8 @@ def check_tool_chain(cfg, run_id, task, factory, runtime):
 
 def check_mixed_batches(cfg, run_id, factory, runtime):
     """Controlled functional overlap; native scheduling, no timing measurements."""
+    if "reasoning_newline" not in cfg["capture"]["anchors"]:
+        return {"status": "skipped", "reason": "requires_reasoning_newline_capture"}
     import threading
     from concurrent.futures import ThreadPoolExecutor
 

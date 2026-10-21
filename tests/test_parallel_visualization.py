@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.io import hash_json, read_json, sha256, write_json
 from difficulty.evaluation.parallel import collect_parallel_scores, visualize_parallel
 
@@ -19,7 +19,7 @@ def published(tmp_path, monkeypatch):
     frozen["config_hash"] = hash_json(frozen)
     frozen.update(selection={}, selection_sha256=hash_json({}))
     write_json(tmp_path / "runs/run/resolved-config.json", frozen)
-    trajectory = tmp_path / "baseline/trajectories/r-one/raw.traj.json"
+    trajectory = tmp_path / "runs/source/rollout/trajectories/r-one/raw.traj.json"
     write_json(trajectory, {"messages": [{"role": "system"}, {"role": "user"},
                {"role": "assistant"}, {"role": "tool"}, {"role": "assistant"},
                {"role": "tool"}, {"role": "assistant"}]})

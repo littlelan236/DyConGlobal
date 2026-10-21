@@ -42,6 +42,10 @@ def artifact_contract(path, expected_sha=None, model_fingerprint=None):
     for relative, digest in value["files"].items():
         if sha256(owned_path(path.parent, relative)) != digest:
             raise ValueError("Parallel estimator file changed: " + relative)
+    for module, digest in value.get("implementation_sha256", {}).items():
+        implementation = importlib.import_module(module)
+        if not getattr(implementation, "__file__", None) or sha256(implementation.__file__) != digest:
+            raise ValueError("Online predictor implementation changed: " + module)
     return value
 
 

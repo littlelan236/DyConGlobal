@@ -16,9 +16,18 @@ def consolidate(paths: list[Path], output: Path):
         for result in report["results"]:
             iid = result["instance_id"]
             previous = rows[iid]
-            for key in ["image_id", "patch_sha256"]:
-                if previous[key] != result[key]:
-                    raise ValueError(f"Incompatible {key} for {iid}: {path}")
+            if previous["patch_sha256"] != result["patch_sha256"]:
+                raise ValueError(f"Incompatible patch_sha256 for {iid}: {path}")
+            if previous["image_id"] != result["image_id"]:
+                proof = result.get("image_repair", {})
+                source_id = previous.get("source_image_id", previous["image_id"])
+                if not (
+                    proof.get("kind") == "rootless-ownership-v1"
+                    and proof.get("source_image_id") == source_id
+                    and proof.get("derived_reference", {}).get("image_id") == result["image_id"]
+                    and result.get("source_image_id") == source_id
+                ):
+                    raise ValueError(f"Incompatible image_id for {iid}: {path}")
             rows[iid] = result
             provenance[iid] = str(path)
     failures = [

@@ -18,6 +18,11 @@ def load(directory, contract):
     model = load_model(Path(directory) / filename)
     if len(contract["sites"]) != 1 or len(model["coef"]) != contract["hidden_size"]:
         raise ValueError("Ridge bridge requires one matching public site")
+    with np.load(Path(directory) / filename, allow_pickle=False) as archive:
+        if "layer" in archive and int(archive["layer"].item()) != contract["sites"][0]:
+            raise ValueError("Ridge public site differs from trained checkpoint")
+        if "target" in archive and archive["target"].item() != contract["target"]:
+            raise ValueError("Ridge target differs from trained checkpoint")
 
     class Predictor:
         def predict(self, batch):

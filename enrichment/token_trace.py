@@ -1,6 +1,7 @@
 """Build exact per-token trajectory traces and reasoning-block labels."""
 
 from __future__ import annotations
+from application.execution.selection import rollout_selection
 
 import json
 import tempfile
@@ -8,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.io import artifact_dir, hash_json, sha256, write_json
 from enrichment.reader import TrajectoryReader
 
@@ -142,11 +143,7 @@ def trace_rollout(cfg, rollout_id, tokenizer, dataset_id=None, *, selection=None
     selected = (
         selection
         if selection is not None
-        else catalog.select(
-            partition=cfg["benchmark"]["partition"],
-            purposes=cfg["benchmark"]["purposes"],
-            profile=cfg["benchmark"]["profile"],
-        )
+        else rollout_selection(cfg)
     )
     if rollout_id not in selected["rollouts"]:
         raise ValueError(f"Rollout is outside the selected scope: {rollout_id}")
@@ -378,11 +375,7 @@ def trace_rollout(cfg, rollout_id, tokenizer, dataset_id=None, *, selection=None
 
 
 def build_token_traces(cfg, dataset_id, tokenizer):
-    selected = Catalog(cfg["project_root"]).select(
-        partition=cfg["benchmark"]["partition"],
-        purposes=cfg["benchmark"]["purposes"],
-        profile=cfg["benchmark"]["profile"],
-    )
+    selected = rollout_selection(cfg)
     if not selected["rollout_ids"]:
         raise ValueError("No explicit rollout scope has been registered")
     result = []

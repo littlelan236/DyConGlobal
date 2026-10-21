@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import requests
 
-from baseline.rollout.model import make_model
+from rollout.model import make_model
 from core.io import read_json, sha256, write_json
 from hidden.artifacts import event_records, read_arrays, read_branch_index
 from hidden.backends.vllm.online import capture_request_metadata
@@ -60,7 +60,8 @@ def validate_parallel_queries(cfg, run_id, factory, runtime):
             "diagnostic_selection_mode": selection, "diagnostic_branch_count": branches})
         start = time.monotonic()
         message = model.query(messages)
-        query_ms = (time.monotonic() - start) * 1000
+        query_end = time.monotonic()
+        query_ms = (query_end - start) * 1000
         path = out / f"{repeat}-{mode}.json"
         write_json(path, {"messages": [*messages, message]})
         endpoint = cfg["serving"]["base_url"].removesuffix("/v1").rstrip("/")
@@ -107,6 +108,7 @@ def validate_parallel_queries(cfg, run_id, factory, runtime):
         if not graphs.get("full"):
             raise ValueError("Benchmark has no FULL close evidence")
         case = {"mode": mode, "repeat": repeat, "query_ms": query_ms,
+                "query_started_monotonic": start, "query_finished_monotonic": query_end,
                 "completion_tokens": tokens, "tokens_per_second": tokens / (query_ms / 1000),
                 "graph_close_counts": dict(graphs), "session_id": sid,
                 "score_absolute_errors": score_errors, "capture_status": result["capture_status"],
@@ -119,11 +121,14 @@ def validate_parallel_queries(cfg, run_id, factory, runtime):
         # Rotate modes so C is not always favored by warmup/cache order.
         for mode in modes[repeat % len(modes):] + modes[:repeat % len(modes)]:
             run_case(repeat, *mode)
-    # Three B=2 groups exceed max_num_seqs=4 in total: verify whole-group
-    # admission, cross-decision isolation, concurrent spool/finalization.
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(run_case, repetitions + index, "parallel_overlap", False, None, 2)
-                   for index in range(3)]
+    # Exercise the configured task/branch concurrency through the same model
+    # wrapper, admission controller and concurrent publication/finalization.
+    branches = cfg["parallel"]["branch_count"]
+    groups = min(cfg["execution"]["rollout_workers"],
+                 cfg["parallel"]["max_inflight_branches"] // branches)
+    with ThreadPoolExecutor(max_workers=groups) as pool:
+        futures = [pool.submit(run_case, repetitions + index, "parallel_overlap", False, None, branches)
+                   for index in range(groups)]
         for future in futures:
             future.result()
     grouped = defaultdict(list)
@@ -135,7 +140,13 @@ def validate_parallel_queries(cfg, run_id, factory, runtime):
         "completion_tokens": sum(r["completion_tokens"] for r in rows),
         "aggregate_tokens_per_second": sum(r["completion_tokens"] for r in rows) /
                                        (sum(r["query_ms"] for r in rows) / 1000)} for mode, rows in grouped.items()}
+    overlap = grouped["parallel_overlap"]
+    window = max(r["query_finished_monotonic"] for r in overlap) - min(
+        r["query_started_monotonic"] for r in overlap)
     report = {"passed": True, "cases": cases, "metrics": metrics,
+              "overlap": {"groups": groups, "branches_per_group": branches,
+                          "query_window_ms": window * 1000,
+                          "completion_tokens_per_wall_second": sum(r["completion_tokens"] for r in overlap) / window},
               "scope": "small natural-query diagnostic; shared GPUs, variable lengths, no success-rate claim"}
     write_json(out / "report.json", report)
     return {"passed": True, "metrics": metrics, "report": str(out / "report.json")}

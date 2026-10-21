@@ -13,32 +13,49 @@ from hidden.backends.vllm.engine import configure_environment, gpu_reservation
 from hidden.evaluation.compare_vllm_replay import compare_replay
 
 
-def finalized_request(source, row):
+def finalized_request(source, row, project_root=None, catalog=None, verified=None):
     finalization_path = Path(source) / "sessions" / row["session_id"] / "finalization.json"
     if not finalization_path.exists():
         return row
     finalization = read_json(finalization_path)
     if row["request_id"] not in finalization["accepted_native_request_ids"]:
         return None
-    if sha256(finalization["trajectory_path"]) != finalization["trajectory_sha256"]:
+    if project_root is not None:
+        from catalog.store import verified_trajectory
+        if verified is None or finalization_path not in verified:
+            verified_trajectory(project_root, finalization, catalog)
+            if verified is not None:
+                verified.add(finalization_path)
+    elif sha256(finalization["trajectory_path"]) != finalization["trajectory_sha256"]:
         raise ValueError("Finalized replay source trajectory changed")
     return {**row, **{key: finalization[key] for key in ("rollout_id", "trajectory_sha256")}}
 
 
-def prepare_reference(source, output, event_index=None):
+def prepare_reference(source, output, event_index=None, project_root=None):
     source, output = Path(source), Path(output)
     receipts = {}
+    verified = set()
+    if project_root is not None:
+        from catalog.store import Catalog
+        catalog = Catalog(project_root).read()
+    else:
+        catalog = None
     events = read_json(event_index) if event_index else [row for _, row in event_records(source)]
     paths = (
         sorted({source / row["ledger_ref"] for row in events})
         if events and all(row.get("ledger_ref") for row in events)
         else [*(source / "sessions").glob("*/requests/*.json"), *(source / "requests").glob("*.json")]
     )
+    if events and all(event.get("request_key") for event in events):
+        keys = {event["request_key"] for event in events}
+        if any(event["request_key"] != hash_json(event["request_id"]) for event in events):
+            raise ValueError("Event request key disagrees with native request identity")
+        paths = sorted(source / "requests" / (key + ".json") for key in keys)
     for path in paths:
         row = read_request(
             source, {"ledger_ref": str(path.relative_to(source)), "ledger_sha256": sha256(path)}
         )
-        row = finalized_request(source, row)
+        row = finalized_request(source, row, project_root, catalog, verified)
         if row is None:
             continue
         if row["request_id"] in receipts:
@@ -200,7 +217,7 @@ def main():
     cfg = replay_config(args.config, args.set, args.source_run)
     configure_environment(cfg)
     args.output.mkdir(parents=True, exist_ok=False)
-    reference, rows, index = prepare_reference(args.online_dir, args.output, args.event_index)
+    reference, rows, index = prepare_reference(args.online_dir, args.output, args.event_index, cfg["project_root"])
     extras = prepare_extras(args.online_dir, args.extra_prefixes) if args.extra_prefixes else []
     all_rows = rows + extras
     metadata = {row["sample_id"]: row for row in index}

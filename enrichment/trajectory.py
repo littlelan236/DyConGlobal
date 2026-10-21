@@ -1,12 +1,13 @@
 """Causal boundary reconstruction; gold outcomes are labels, never inputs."""
 
 from __future__ import annotations
+from application.execution.selection import rollout_selection
 
 import copy
 import json
 from pathlib import Path
 
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.io import artifact_dir, hash_json, read_json, sha256, write_json
 from core.locking import exclusive_artifact
 from enrichment.reader import TrajectoryReader
@@ -203,11 +204,7 @@ def reconstruct(step, reader, tokenizer, cfg):
 def enrich(cfg, dataset_id, tokenizer):
     catalog = Catalog(cfg["project_root"])
     catalog.verify()
-    selected = catalog.select(
-        partition=cfg["benchmark"]["partition"],
-        purposes=cfg["benchmark"]["purposes"],
-        profile=cfg["benchmark"]["profile"],
-    )
+    selected = rollout_selection(cfg)
     if not selected["rollout_ids"]:
         raise ValueError("No explicit rollout scope has been registered")
     out = artifact_dir(cfg, "enrichment", dataset_id)

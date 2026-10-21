@@ -3,9 +3,9 @@ from pathlib import Path
 import pytest
 from conftest import import_fixture, task
 
-from baseline.catalog import Catalog
-from baseline.importers.legacy import import_rollout
-from baseline.scripts.clean_interrupted import apply, classify
+from catalog.store import Catalog
+from rollout.artifacts import import_rollout
+from diagnostics.cleanup_rollouts import apply, classify
 from core.io import hash_json, read_json, write_json
 
 
@@ -47,7 +47,7 @@ def test_cleanup_removes_payloads_and_preserves_terminal_rollout(cfg):
     catalog = Catalog(root)
     before = catalog.read()
     removed_row = before["rollouts"][remove]
-    out = root / "baseline/provenance/cleanup"
+    out = root / "catalog/maintenance/cleanup"
     plan = out / "plan.json"
     write_json(
         plan,
@@ -72,7 +72,7 @@ def test_forged_cleanup_cannot_delete_submitted_rollout(cfg):
     root = Path(cfg["project_root"])
     keep = import_fixture(cfg)
     before = Catalog(root).read()
-    plan = root / "baseline/provenance/unsafe/plan.json"
+    plan = root / "catalog/maintenance/unsafe/plan.json"
     write_json(
         plan,
         {

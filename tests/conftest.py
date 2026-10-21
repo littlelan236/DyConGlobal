@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from baseline.catalog import empty_manifest
+from catalog.store import empty_manifest
 from core.config import resolve
 from core.io import write_json
 
@@ -26,7 +26,7 @@ def cfg(tmp_path):
         admission_seconds=2,
     )
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(raw))
-    write_json(tmp_path / "baseline/manifest.json", empty_manifest())
+    write_json(tmp_path / "catalog/manifest.json", empty_manifest())
     return resolve(tmp_path / "config.yaml")
 
 
@@ -66,8 +66,8 @@ def task(iid="t-1", partition="train"):
 
 
 def import_fixture(cfg, *, resolved=None, iid="t-1"):
-    from baseline.catalog import Catalog
-    from baseline.importers.legacy import import_rollout
+    from catalog.store import Catalog
+    from rollout.artifacts import import_rollout
 
     root = Path(cfg["project_root"])
     raw = root / (iid + ".traj.json")
@@ -120,7 +120,7 @@ def import_fixture(cfg, *, resolved=None, iid="t-1"):
     )
     if resolved is not None:
         row = Catalog(root).read()["rollouts"][rid]
-        report = root / f"baseline/evaluations/e-{iid}/summary.json"
+        report = root / f"runs/imported-evaluations/harness/e-{iid}/summary.json"
         outcomes = {rid: {"patch_sha256": row["patch_sha256"], "status": "completed", "resolved": resolved}}
         write_json(report, outcomes)
         Catalog(root).record_evaluation("e-" + iid, report, outcomes, {"fixture": True})

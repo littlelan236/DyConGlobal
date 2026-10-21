@@ -9,15 +9,15 @@ pytest.importorskip("minisweagent")
 
 from conftest import task
 
-from baseline.catalog import Catalog
+from catalog.store import Catalog
 from core.deadline import Deadline
 from core.io import write_json
 
 
 def test_rollout_registers_canonical_artifacts_and_resumes(cfg, monkeypatch):
     import core.model_identity
-    from baseline.rollout import agent, model
-    from baseline.rollout.runner import run_manifest
+    from rollout import agent, model
+    from rollout.runner import run_manifest
     from runtime.containers import rollout_adapter
     from runtime.serving import manager
 
@@ -67,10 +67,10 @@ def test_rollout_registers_canonical_artifacts_and_resumes(cfg, monkeypatch):
     assert len(result) == 4
     assert catalog.verify()["rollouts"] == 4
     for row in catalog.read()["rollouts"].values():
-        assert row["trajectory_path"].startswith("baseline/trajectories/")
+        assert row["trajectory_path"].startswith("runs/run/rollout/trajectories/")
         assert row["submission_status"] == "submitted"
         assert row["resolved"] is None
-    assert list((Path(cfg["project_root"]) / "runs/run").rglob("raw.traj.json")) == []
+    assert len(list((Path(cfg["project_root"]) / "runs/run").rglob("raw.traj.json"))) == 4
     resumed = run_manifest(cfg, "run", resume=True, factory=factory)
     assert resumed == result
 
