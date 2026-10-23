@@ -44,7 +44,7 @@ cd /home/wangtianyi/DyConGlobal
 
 
 
-全局参数放在子命令前：`--config config.yaml`、`--set key=value`、`--run-id RUN_ID`。`--run-id` 将分析命令绑定到已有 run 的冻结配置；enrichment/hidden/action 输出仍归属 run，difficulty 输出始终归属项目级 `difficulty/`；与命令中的 `SOURCE_RUN_ID` 可以不同，例如在新 analysis run 下分析旧来源 run 的分支。
+全局参数放在子命令前：`--config config.yaml`、`--set key=value`、`--run-id RUN_ID`。`--run-id` 可加载已有 run 的冻结配置；enrichment/hidden 输出归属 run，difficulty 与 action 始终写项目级目录。action 不需要 analysis run，来源由可重复的 `--source-run` 明确指定；一个分析可组合多个 run 的轨迹。`--run-id` 不改变 action 输出位置，也不隐式代替 source run。
 
 
 
@@ -126,7 +126,7 @@ runs/RUN_ID/
 
   # difficulty 新产物位于项目级 difficulty/，不在本 run 中；旧 run 内历史产物保持原位。
 
-  action/{outputs,datasets}/ID/
+  # action 新产物在项目级 action/{outputs,datasets}/ID/；旧 run 内产物只读保留。
 
   reports/ / artifacts.json
 
@@ -187,9 +187,13 @@ runs/RUN_ID/
 
 | 精确 token join | analysis | `token-join RUN_ID CAPTURE_ID JOIN_ID` | schema 2 `rows.jsonl`；`hidden-token-join-audit JOIN_ID` 审计 |
 
-| Action 分类 | analysis | `action-classify ACTION_ID --rollout-id ID ...` | 直接 canonical trajectory；也支持 `--rollout-list FILE` |
+| Action 分类与默认热力图 | analysis | `action-classify ACTION_ID --source-run RUN [--source-run OTHER] [--rollout-id ID ... 或 --rollout-list FILE]` | 项目级独立单元；多 run 清单必须逐条绑定 source_run_id |
 
 | Action 校验 | analysis | `action-check ACTION_ID` | receipt/来源内容/分类输入核验 |
+
+| Action 绘图视图 | analysis | `action-plot ACTION_ID [--plot-id NEW_ID] [--aggregation micro/macro] [--format png/svg]` | 默认复用分类时的图；新 ID 创建绑定 parent receipt 的不可变 view |
+
+| Action 统一产物校验 | analysis | `artifact verify ACTION_ID --scope action-analysis` | 支持 show；冻结 source evidence、代码、标签、统计及图表校验 |
 
 | 共享 hidden 视图 | analysis | `action-index INDEX_ID ACTION_INDEX_ID` | 引用共享 index，不重复提取 hidden |
 

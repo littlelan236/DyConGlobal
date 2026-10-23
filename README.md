@@ -29,7 +29,7 @@ cd /home/wangtianyi/DyConGlobal
 
 `catalog/manifest.json` 仅保存 benchmark/task 清单（schema 2）；rollout、patch 和 evaluation 的事实保存在 `runs/RUN_ID/evidence.json`。task、attempt、canonical rollout、patch SHA 和评测证据共同对齐。Submitted 不等于 resolved；未评测、unresolved 和 infra_error 不补造成功剩余量标签。token 重建证据不冒充 native exact IDs。
 
-rollout/harness/hidden/enrichment 的运行产物在 `runs/RUN_ID/`；difficulty 的 datasets、splits、checkpoints、predictions 和 evaluations 独立保存在 `difficulty/`，可组合多个来源 run。NAS 大张量通过 locator/receipt 引用；capture spool 在 ACK 前保留。`artifact verify`、Catalog verify、环境 gold 和模型性能评测各有范围，不能互相替代。
+rollout/harness/hidden/enrichment 的运行产物在 `runs/RUN_ID/`；difficulty 的 datasets、splits、checkpoints、predictions 和 evaluations 独立保存在 `difficulty/`。action 的最小分析单元在 `action/outputs/ANALYSIS_ID/`，共享 hidden 视图在 `action/datasets/INDEX_ID/`；两者不依赖 analysis run，action 单元可组合多个来源 run，并冻结各自轨迹选择和证据。NAS 大张量通过 locator/receipt 引用；capture spool 在 ACK 前保留。`artifact verify`、Catalog verify、环境 gold 和模型性能评测各有范围，不能互相替代。
 
 ## 代码职责
 

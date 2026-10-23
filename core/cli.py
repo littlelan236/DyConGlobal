@@ -67,11 +67,11 @@ def main(argv=None):
     artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
     q = artifact_sub.add_parser("show")
     q.add_argument("run_id", nargs="?")
-    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation"], default="run")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis"], default="run")
     q.add_argument("--dataset-id")
     q = artifact_sub.add_parser("verify")
     q.add_argument("run_id", nargs="?")
-    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation"], default="run")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis"], default="run")
     q.add_argument("--dataset-id")
     for cmd in ["config-check", "catalog-check", "runtime-check", "recover"]:
         sub.add_parser(cmd)
@@ -157,13 +157,20 @@ def main(argv=None):
     p.add_argument("--source-run")
     p.add_argument("--rollout-id", action="append", default=[])
     p.add_argument("--rollout-list", type=Path)
-    p = sub.add_parser("action-classify", help="Classify canonical rollout trajectories without enrichment")
+    p = sub.add_parser("action-classify", help="Create an immutable project-level action analysis and heatmaps")
     p.add_argument("analysis_id")
-    p.add_argument("--source-run", required=True)
+    p.add_argument("--source-run", action="append", required=True, help="Repeat for multiple source runs; use explicit rollout bindings")
     scope = p.add_mutually_exclusive_group()
     scope.add_argument("--rollout-id", action="append", default=[])
     scope.add_argument("--rollout-list", type=Path)
     sub.add_parser("action-check").add_argument("analysis_id")
+    p = sub.add_parser("action-plot", help="Inspect default plots or create a frozen plot view without rereading trajectories")
+    p.add_argument("analysis_id")
+    p.add_argument("--plot", action="append", default=[], choices=["progress-share", "transition-probability"])
+    p.add_argument("--plot-id", help="New immutable child plot ID; omit to reuse default figures")
+    p.add_argument("--aggregation", choices=["micro", "macro"], default="micro")
+    p.add_argument("--format", dest="formats", choices=["png", "svg"], action="append", default=[])
+    p.add_argument("--dpi", type=int, default=200)
     p = sub.add_parser("action-index")
     p.add_argument("shared_index_id")
     p.add_argument("index_id")
@@ -265,7 +272,7 @@ def main(argv=None):
         cfg = resolve(a.config, a.set)
     catalog = Catalog(cfg["project_root"])
     def publish_artifacts(capture=False):
-        if cfg.get("run_id"):
+        if cfg.get("run_id") and not a.command.startswith("action-"):
             from application.execution.artifact import capture_publication, refresh
             if capture:
                 capture_publication(cfg["project_root"], cfg["run_id"])
@@ -284,7 +291,12 @@ def main(argv=None):
         return
     if a.command == "artifact":
         if getattr(a, "scope", "run") != "run":
-            from difficulty.artifacts import show, verify
+            if not a.run_id:
+                parser.error("Artifact scope requires an artifact ID")
+            if a.scope == "action-analysis":
+                from action.artifacts import show, verify
+            else:
+                from difficulty.artifacts import show, verify
             operation = show if a.artifact_command == "show" else verify
             result = operation(cfg["project_root"], a.scope, a.run_id, dataset_id=a.dataset_id)
         else:
@@ -502,6 +514,10 @@ def main(argv=None):
         from action.analyzers.trajectories import check_analysis
 
         result = check_analysis(cfg, a.analysis_id)
+    elif a.command == "action-plot":
+        from action.artifacts import plot_analysis
+        result = plot_analysis(cfg, a.analysis_id, plot_id=a.plot_id, names=a.plot,
+                               aggregation=a.aggregation, formats=a.formats, dpi=a.dpi)
     elif a.command == "action-index":
         from action.datasets.index import create_action_index
 

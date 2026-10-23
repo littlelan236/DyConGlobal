@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import task
+
 from application.execution.evidence import RunEvidence
 from core.io import hash_json, read_json, sha256, write_json
 from difficulty.evaluation.parallel import collect_parallel_scores, visualize_parallel
@@ -15,22 +17,32 @@ def published(tmp_path, monkeypatch):
     cfg = {"project_root": str(tmp_path)}
     frozen = {**cfg, "paths": {"nas_root": str(tmp_path / "nas")},
               "capture": {"export": {"root": "hidden/online"}},
-              "parallel": {"enabled": True, "estimator_sha256": "predictor"}}
+              "parallel": {"enabled": True, "estimator_sha256": "predictor"}, "environment": {"cwd": "/testbed"}}
     frozen["config_hash"] = hash_json(frozen)
     frozen.update(selection={}, selection_sha256=hash_json({}))
     write_json(tmp_path / "runs/run/resolved-config.json", frozen)
-    trajectory = tmp_path / "runs/source/rollout/trajectories/r-one/raw.traj.json"
+    trajectory = tmp_path / "runs/run/rollout/trajectories/r-one/raw.traj.json"
     write_json(trajectory, {"messages": [{"role": "system"}, {"role": "user"},
                {"role": "assistant"}, {"role": "tool"}, {"role": "assistant"},
                {"role": "tool"}, {"role": "assistant"}]})
-    rollout = {"task_key": "task", "trajectory_path": str(trajectory.relative_to(tmp_path)),
+    definition = task("repo__task-1")
+    key = hash_json({k: definition[k] for k in ("benchmark", "revision", "instance_id")})
+    patch = tmp_path / "runs/run/rollout/patches/r-one/patch.diff"
+    patch.parent.mkdir(parents=True)
+    patch.write_text("patch")
+    rollout = {"task_key": key, "trajectory_path": str(trajectory.relative_to(tmp_path)),
                "trajectory_sha256": sha256(trajectory), "run_id": "run", "attempt_id": "attempt-000",
                "model_fingerprint": "model", "resolved": None, "submission_status": "submitted",
-               "termination_reason": "Submitted", "provenance": {}}
-    catalog = {"catalog_revision": 1, "rollouts": {"r-one": rollout},
-               "tasks": {"task": {"instance_id": "repo__task-1", "repo": "repo/task", "partition": "train"}}}
+               "termination_reason": "Submitted", "provenance": {}, "evaluation_status": "not_run",
+               "selected_evaluation_id": None, "patch_path": str(patch.relative_to(tmp_path)), "patch_sha256": sha256(patch)}
+    catalog = {"schema_version": 1, "run_id": "run", "rollouts": {"r-one": rollout},
+               "tasks": {key: definition}, "evaluations": {}}
     catalog["revision"] = 1
-    monkeypatch.setattr(RunEvidence, "read", lambda self: catalog)
+    def read_fixture(self):
+        self.validate(catalog)
+        write_json(self.path, catalog)
+        return catalog
+    monkeypatch.setattr(RunEvidence, "read", read_fixture)
     root = tmp_path / "nas/hidden/online/run"
     session = root / "sessions/session-one"
     final = {"rollout_id": "r-one", "trajectory_sha256": sha256(trajectory),

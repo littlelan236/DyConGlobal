@@ -115,6 +115,8 @@ desktop.ini
 *.kv-replay-pending
 *.log
 *.pid
+/.dycon-transfer/
+/dycon-transfer-jobs/
 
 # Model/tensor payloads, archives and analysis databases
 *.pt

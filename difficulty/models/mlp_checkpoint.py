@@ -35,7 +35,8 @@ def _validate(metadata, state, expected=None):
             or metadata.get('architecture_id') != architecture_id
             or metadata.get('feature_schema') != FEATURE_SCHEMA
             or metadata.get('target') not in MLP_TARGETS
-            or metadata.get('target_transform') != 'log1p'
+            or metadata.get('target_transform') != (
+                'log1p' if metadata.get('target', '').endswith('_log1p') else 'linear')
             or metadata.get('fit_scope') != 'train'
             or metadata.get('normalization') != 'layernorm'
             or metadata.get('endpoint') != 'submission'):
@@ -164,7 +165,7 @@ def verify_attempt_models(directory, attempt, receipt):
     contract = attempt['model_contract']
     selected = read_json(directory / 'selected.json')
     targets = contract['targets']
-    if (len(targets) != 2 or set(targets) != set(MLP_TARGETS)
+    if (not targets or len(targets) != len(set(targets)) or not set(targets) <= set(MLP_TARGETS)
             or selected.get('selection_metric') != 'validation_mse'
             or selected.get('selection_split') != 'validation'
             or set(selected['targets']) != set(targets)):
@@ -199,7 +200,8 @@ def verify_attempt_models(directory, attempt, receipt):
                 raise ValueError('MLP training config snapshot disagrees with attempt')
         expected = {key: attempt[key] for key in IDENTITY_KEYS}
         expected.update(model_kind=contract['model_kind'], architecture_id=contract['architecture_id'], feature_schema=FEATURE_SCHEMA,
-                        target=target, target_transform='log1p', fit_scope='train',
+                        target=target, target_transform=(
+                            'log1p' if target.endswith('_log1p') else 'linear'), fit_scope='train',
                         architecture=contract['architecture'], input_spec=contract['input_spec'],
                         best_epoch=winner['best_epoch'], epochs_trained=winner['epochs_trained'])
         if ridge_plus_mlp:

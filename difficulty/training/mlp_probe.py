@@ -167,7 +167,9 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
         'training_config': training_config_raw,
         'model_contract': {'model_kind': kind, 'architecture_id': architecture_id,
                            'feature_schema': FEATURE_SCHEMA, 'input_spec': spec, 'architecture': architecture,
-                           'targets': settings.targets, 'target_transforms': dict.fromkeys(settings.targets, 'log1p')},
+                           'targets': settings.targets, 'target_transforms': {
+                               target: ('log1p' if target.endswith('_log1p') else 'linear')
+                               for target in settings.targets}},
         'config': cfg, 'settings': settings.model_dump(), 'input': evidence, 'code': before_code,
         'environment': environment, 'actual_device': actual_device,
         'split_strategy': split['strategy'], 'task_counts': split['task_counts'],
@@ -265,7 +267,8 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
                         'split_receipt_sha256', 'split_sha256', 'sample_order_sha256', 'train_sample_ids_sha256', 'model_fingerprint')}
             metadata.update(schema_version=1, model_kind=kind, architecture_id=architecture_id,
                             feature_schema=FEATURE_SCHEMA, input_spec=spec, architecture=architecture,
-                            target=target, target_label=LABELS[target], target_transform='log1p', endpoint='submission',
+                            target=target, target_label=LABELS[target], target_transform=(
+                                'log1p' if target.endswith('_log1p') else 'linear'), endpoint='submission',
                             normalization='layernorm', fit_scope='train', seed=settings.seed,
                             best_epoch=model.best_epoch_, epochs_trained=model.epochs_trained_,
                             scheduler=settings.scheduler.model_dump(),

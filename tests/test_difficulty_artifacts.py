@@ -39,7 +39,7 @@ def test_difficulty_artifacts_are_project_owned_even_with_run_context(tmp_path):
     cfg = {"project_root": str(tmp_path), "run_id": "source-run"}
     assert artifact_dir(cfg, "difficulty", "dataset", "datasets") == tmp_path / "difficulty/datasets/dataset"
     assert artifact_dir(cfg, "difficulty", "attempt", "checkpoints") == tmp_path / "difficulty/checkpoints/attempt"
-    assert artifact_dir(cfg, "action", "analysis", "outputs") == tmp_path / "runs/source-run/action/outputs/analysis"
+    assert artifact_dir(cfg, "action", "analysis", "outputs") == tmp_path / "action/outputs/analysis"
 
 
 def test_compose_dataset_split_and_receipt_chain(tmp_path):

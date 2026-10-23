@@ -1,17 +1,17 @@
 # Action 分类与轨迹分析
 
-维护日期：2026-10-19。本模块直接读取 baseline/manifest.json 登记的 canonical rollout trajectory；不要求 enrichment、token trace、hidden tensor 或模型服务。
+维护日期：2026-10-21。本模块从显式 source run 的 evidence.json 冻结 canonical trajectory bindings；产物独立保存在项目级 action/outputs/ANALYSIS_ID/，支持同一分析组合多个 run。不要求 enrichment、token trace、hidden tensor 或模型服务。
 
 ## 统一入口
 
 从工程根目录执行：
 
-    .venvs/analysis/bin/dycon action-classify ACTION_ANALYSIS_ID
-    .venvs/analysis/bin/dycon action-classify ACTION_ANALYSIS_ID --rollout-id ROLLOUT_ID
-    .venvs/analysis/bin/dycon action-classify ACTION_ANALYSIS_ID --rollout-list /path/to/rollouts.json
+    .venvs/analysis/bin/dycon action-classify ACTION_ANALYSIS_ID --source-run SOURCE_RUN
+    .venvs/analysis/bin/dycon action-classify ACTION_ANALYSIS_ID --source-run SOURCE_RUN --rollout-id ROLLOUT_ID
+    .venvs/analysis/bin/dycon action-classify ACTION_ANALYSIS_ID --source-run SOURCE_RUN --rollout-list /path/to/rollouts.json
     .venvs/analysis/bin/dycon action-check ACTION_ANALYSIS_ID
 
-已有统一入口时不要创建临时脚本、复制 trajectory 读取逻辑或直接执行轨迹中的命令。action-classify 只解析原始 command 字符串，绝不会执行它们；它从 catalog 选择 rollout，验证 trajectory SHA，再写入新的 action/outputs/ACTION_ANALYSIS_ID。同一 ID 不覆盖已有产物。
+已有统一入口时不要创建临时脚本、复制 trajectory 读取逻辑或直接执行轨迹中的命令。action-classify 只解析原始 command 字符串，绝不会执行它们；它从 source run 的 evidence 选择 rollout，验证 trajectory SHA，再原子写入新的项目级 action/outputs/ACTION_ANALYSIS_ID。同一 ID 不覆盖已有产物。
 
 轨迹选择先给出 `--source-run RUN_ID`，再用 `--rollout-id` 或 `--rollout-list` 选取该 run 内的成员；不指定轨迹时选择该 run 内全部可用轨迹。rollout-list 为 ID 或含 `rollout_id`、可选 `trajectory_sha256`、`cohort` 的 JSON 列表。不存在跨 run 的隐式查询或全局 baseline profile。
 
@@ -49,15 +49,17 @@ RUN 有意合并复现和验证：历史 rollout 中二者会使用相同的 Pyt
 
 action/outputs/ACTION_ANALYSIS_ID/包含：
 
-- selection.json：catalog revision/SHA、rollout scope、trajectory bindings、duplicate aliases。
+- analysis.json：source runs、轨迹选择、taxonomy、有效配置及实现身份。
+- selection.json / source-evidence/：run evidence revision/SHA、冻结子集、trajectory bindings、duplicate aliases。
 - resolved-config.json：本次分析使用的配置快照。
 - labels.jsonl：每个 assistant step 一行，唯一主标签。
 - summary.json：类别、阶段、cohort、compound 和 uncertainty 统计。
 - examples.json：各类代表命令，供人工抽查。
-- receipt.json：源码、配置、输入选择和产物 SHA；action-check 重新验证全部内容。
+- code/ / receipt.json：源码快照、配置、输入选择和产物 SHA；action-check 重新验证全部内容。
+- transition.json / plots/：阶段占比与相邻 action 转移矩阵、默认图及独立 view receipt，详见 README。
 
-同一 canonical trajectory 被多个 rollout 副本引用时，selection 会保留一个 source 并记录 aliases；不同 task 绑定相同 bytes 会直接拒绝。action 分析不改变 baseline/manifest.json，也不修改已有 action-index 样本视图。
+同一 canonical trajectory 被多个 rollout 副本引用时，selection 会保留一个 source 并记录 aliases；不同 task 绑定相同 bytes 会直接拒绝。action 分析不改变 Catalog 或来源 run，也不修改已有 action-index 样本视图。
 
 ## 历史基线
 
-action/provenance/taxonomy-20261019/保存早期审计的 snapshot summary、source bindings 和 rollout 清单。它是历史证据，不是新入口。当前正式分析以运行时 catalog 和新的 analysis ID 为准。
+action/provenance/taxonomy-20261019/保存早期审计的 snapshot summary、source bindings 和 rollout 清单。它是历史证据，不是新入口。当前正式分析以显式 source run 的冻结 evidence 和新的 analysis ID 为准。

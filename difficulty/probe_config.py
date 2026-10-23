@@ -15,7 +15,12 @@ TARGETS = DEFAULT_TARGETS + (
 )
 LABELS = {target: ('remaining_steps_to_submission' if 'steps' in target
                    else 'remaining_reasoning_tokens_to_submission') for target in TARGETS}
-MLP_TARGETS = ('submission_remaining_steps_log1p', 'submission_remaining_reasoning_tokens_log1p')
+# MLP supports each step/reasoning target in either transformed space.
+MLP_TARGETS = TARGETS
+MLP_DEFAULT_TARGETS = (
+    'submission_remaining_steps_log1p',
+    'submission_remaining_reasoning_tokens_log1p',
+)
 
 
 class MLPScheduler(BaseModel):
@@ -46,7 +51,7 @@ class MLPProbe(BaseModel):
     expected_rollouts: int = Field(default=106, gt=1)
     expected_samples: int = Field(default=6104, gt=1)
     public_site: int = Field(default=2, ge=0, lt=32)
-    targets: list[str] = Field(default_factory=lambda: list(MLP_TARGETS))
+    targets: list[str] = Field(default_factory=lambda: list(MLP_DEFAULT_TARGETS))
     hidden_dim: int = Field(default=256, gt=0)
     dropout: float = Field(default=0.0, ge=0, lt=1)
     epochs: int = Field(default=100, gt=0)
@@ -71,8 +76,9 @@ class MLPProbe(BaseModel):
         for digest in (self.dataset_receipt_sha256, self.split_receipt_sha256):
             if digest is not None and not re.fullmatch('[0-9a-f]{64}', digest):
                 raise ValueError('Invalid frozen receipt SHA-256')
-        if len(self.targets) != 2 or set(self.targets) != set(MLP_TARGETS):
-            raise ValueError('MLP requires both independent submission log1p targets exactly once')
+        if not self.targets or len(self.targets) != len(set(self.targets)) or any(
+                target not in MLP_TARGETS for target in self.targets):
+            raise ValueError('MLP targets must be unique members of the four submission targets')
         if self.validation_fraction + self.test_fraction >= 1:
             raise ValueError('MLP split fractions must leave training samples')
         if not re.fullmatch(r'cpu|auto|cuda(?::[0-9]+)?', self.device):

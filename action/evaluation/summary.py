@@ -5,7 +5,7 @@ from collections import Counter, defaultdict
 from action.analyzers.taxonomy import LABELS
 
 
-def summarize(rows, sources):
+def legacy_summarize(rows, sources):
     counts = Counter(row["label"] for row in rows)
     phases = [Counter() for _ in range(5)]
     groups = defaultdict(lambda: [Counter() for _ in range(5)])
@@ -40,3 +40,7 @@ def summarize(rows, sources):
         "phase_rollout_counts": [sum(bool(g[i]) for g in groups.values()) for i in range(5)],
         "cohort_phase_counts": {k: list(map(dict, v)) for k, v in cohorts.items()},
     }
+
+
+# Versioned project-level analysis statistics.
+from action.evaluation.distributions import summarize

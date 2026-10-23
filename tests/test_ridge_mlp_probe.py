@@ -11,7 +11,7 @@ from core.io import hash_json, read_json, sha256, write_json
 from difficulty.models.estimators import FrozenRidgePlusFFNEstimator
 from difficulty.models.mlp_checkpoint import (RIDGE_MLP_ARCHITECTURE, RIDGE_MLP_KIND,
     load_checkpoint, save_checkpoint, validate_checkpoint)
-from difficulty.probe_config import MLP_TARGETS, RidgeMLPProbe
+from difficulty.probe_config import MLP_DEFAULT_TARGETS as MLP_TARGETS, RidgeMLPProbe
 from difficulty.training.ridge_source import load_sources, read_publication
 from tests.test_mlp_probe import _metadata
 from tests.test_ridge_probe import fixture_project  # noqa: F401

@@ -111,13 +111,16 @@ enrichment 生成 open/close prefix、remaining labels 和 coverage；token trac
 ## 9. Action 分类与共享 hidden 视图
 
 ```bash
-.venvs/analysis/bin/dycon --run-id RUN_ID action-classify ACTION_ID \
+.venvs/analysis/bin/dycon action-classify ACTION_ID --source-run SOURCE_RUN \
   --rollout-id ROLLOUT_ID_1 --rollout-id ROLLOUT_ID_2
-.venvs/analysis/bin/dycon --run-id RUN_ID action-check ACTION_ID
-.venvs/analysis/bin/dycon --run-id RUN_ID action-index INDEX_ID ACTION_INDEX_ID
+.venvs/analysis/bin/dycon action-check ACTION_ID
+.venvs/analysis/bin/dycon artifact verify ACTION_ID --scope action-analysis
+.venvs/analysis/bin/dycon action-plot ACTION_ID
+.venvs/analysis/bin/dycon action-plot ACTION_ID --plot-id MACRO_VIEW --aggregation macro --format png --format svg
+.venvs/analysis/bin/dycon action-index INDEX_ID ACTION_INDEX_ID
 ```
 
-上述 `--run-id RUN_ID` 指定输出和配置归属，rollout IDs 指定来源轨迹；也可用同样的方式绑定预测和绘图。分类直接读取 canonical trajectory，生成互斥 taxonomy 标签、统计与 receipt，不依赖 enrichment。action-index 引用已有 hidden，不重复提取。action taxonomy 学习、训练与独立评测尚无正式实现。
+action 输出独立于 run，位于项目级 `action/outputs/ACTION_ID/`；`analysis.json` 冻结“哪些 run 的哪些轨迹”。分类直接读取 canonical trajectory，自动生成互斥标签、阶段占比图、转移概率图和 receipt，不依赖 enrichment。多 run 使用重复 `--source-run` 和带 `source_run_id` 的 JSON binding 清单（见 action/README.md）；不需要创建 analysis run。后加图使用独立 view receipt，不能覆盖父分析。action-index 在项目级引用已有 hidden，不重复提取。action taxonomy 学习、训练与独立评测尚无正式实现。
 
 ## 10. Difficulty 数据、划分、训练和评估
 
