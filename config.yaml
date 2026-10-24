@@ -15,11 +15,11 @@ serving:
   python: .venvs/easysteer/bin/python
   dtype: float16
   kv_cache_memory_bytes: null
-  max_num_seqs: 48
+  max_num_seqs: 18
   max_num_batched_tokens: 2048
   gpus: [0, 1, 2, 3]
   tensor_parallel_size: 4
-  gpu_memory_utilization: 0.4
+  gpu_memory_utilization: 0.3
   max_model_len: 262144
   startup_seconds: 1200
   shutdown_seconds: 30
@@ -205,8 +205,8 @@ agent:
     {%- endif %}
 
 environment:
-  docker_host: unix:///run/user/1002/docker.sock
-  docker_executable: /home/wangtianyi/.local/bin/docker
+  docker_host: unix:///run/user/1018/docker.sock
+  docker_executable: /usr/bin/docker
   wheelhouse: null
   cwd: /testbed
   user: root
@@ -218,8 +218,8 @@ environment:
   network_fallback: false
   requirements_cache: runtime/cache/requirements
 images:
-  load_workers: 4
-  reserve_bytes: 107374182400
+  load_workers: 8
+  reserve_bytes: 25769803776
   expansion_factor: 6.0
   minimum_load_bytes: 8589934592
   max_reserved_bytes: 171798691840
@@ -227,7 +227,7 @@ images:
   admission_seconds: 1800
   cleanup: true
 execution:
-  rollout_workers: 12
+  rollout_workers: 20
   harness_workers: 8
   infrastructure_retry_limit: 3
   pipeline_wall_seconds: 0
@@ -264,6 +264,8 @@ difficulty:
     dataset_id: submission-shortest375-20261019-relocated-20261021
     dataset_receipt_sha256: 20831bccb341cde383f7063c2ed64d439d6d498cb550afd142e9950678057313
     targets: [submission_remaining_reasoning_tokens_log1p, submission_remaining_steps_linear]
+    validation_fraction: 0.15
+    test_fraction: 0.15
     layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
              16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
     alphas: [0.0001, 0.001, 0.01, 0.1, 1, 10, 100, 1000, 10000,
@@ -273,7 +275,7 @@ difficulty:
     validation_tasks: 48
     expected_tasks: 238
     expected_samples: 14384
-    split_strategy: repo_source_quota_v1
+    split_strategy: event_random_v1
     selection_metric: validation_pooled_r2
     tie_tolerance: 0.0000000001
     blas_threads: 4
@@ -323,11 +325,12 @@ parallel:
     max_period_tokens: 2048
     min_repeated_tokens: 1024
     check_interval_tokens: 64
-  enabled: true
-  branch_count: 4
+  enabled: false
+  branch_count: 1
+  mode: parallel
   policy: every_step
   every_k_steps: null
-  estimator_ref: runtime/parallel-artifacts/ridge-event-reasoning-best-20261019/manifest.json
+  estimator_ref: runtime/parallel-artifacts/ridge-resolved-migration331-event70-15-15-reasoning-log1p-20261024/manifest.json
   max_inflight_branches: 48
   admission_timeout_seconds: 1800
   score_timeout_ms: 200
@@ -336,4 +339,7 @@ parallel:
   save_sites:
   - 3
   fallback_policy: stop
+  consensus:
+    retention_ratio: 0.5
+    min_retained_branches: 2
   validation_repetitions: 1

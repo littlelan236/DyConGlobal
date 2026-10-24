@@ -14,7 +14,7 @@
 
 
 
-统一入口为 `core.cli:main`。已有入口时直接复用，不能复制 launcher、绕过锁/快照启动 worker，或另写模型请求和产物登记逻辑。
+统一入口为 `core.cli:main`。已有入口时直接复用，不能复制 launcher、绕过锁/快照启动 worker，或另写模型请求和产物登记逻辑。active run 统一使用 schema-2；旧 runs 由一次性 `runs-migrate-to-repetition` 迁移，生产入口不保留 schema-1 fallback。
 
 
 
@@ -66,7 +66,7 @@ cd /home/wangtianyi/DyConGlobal
 
 | 检查配置/索引 | `config-check`、`catalog-check` | 校验 strict YAML；校验 benchmark/task 清单；运行产物使用 `artifact verify RUN_ID` |
 
-| 建立实验 | `run create RUN_ID --operation rollout --task-id INSTANCE_ID` | 也支持 `--tasks-file FILE`、`--partition train/val/test/excluded`；显式 ID/列表应非空 |
+| 建立实验 | `run create RUN_ID --operation rollout --repeat-count R --task-id INSTANCE_ID` | `repeat-count` 表示每个 task 的独立 rollout 总数，默认为 1；也支持 `--tasks-file FILE`、`--partition train/val/test/excluded`；显式 ID/列表应非空 |
 
 | 查看计划/列表 | `run show RUN_ID`、`run list` | show 含冻结 tasks；list 只列有新版 plan 的 run |
 
@@ -346,6 +346,8 @@ parallel 单次 reasoning 内部循环保护由 `parallel.reasoning_loop` 配置
 
 parallel 使用并发完整 reasoning+action 请求，等待所有候选完成后比较 close hidden 的 predictor score；只执行 winner action。B=1 不代表四分支验收；fallback、终止和缺 close 的候选分别记录。predictor provider 返回有限 `[N]` 分数，输入 `[N, sites, hidden_size]`；manifest 绑定 checkpoint/model fingerprint、sites、target、endpoint、文件和实现 SHA。实现或权重变更须重新发布，不能改已有 predictor manifest。
 
+parallel_consensus 在同一并发请求链上固定生成 32 个分支，使用 run snapshot 绑定的 estimator 保留分数最低的 50%（retention_ratio 可配置），再按 exact_action 计票；票数最多者胜出，票数并列时按支持分支的最低/平均 estimator 分数和 branch ID 稳定裁决。只有获胜代表分支的 action 会进入 agent 执行；decision evidence 同时记录 retained 分支、action hash、票组和 tie-break。启用 32 分支时 serving max_num_seqs 和 parallel.max_inflight_branches 必须至少为 32。
+
 
 
 分支身份为 `decision_id → branch_id → native_request_id → sample_id`。branch index 的 `selected` 保存实际赢家，不能重选最小值冒充历史 winner，未选分支不能复制 winner 的 remaining GT。网络响应顺序不作为身份依据。
@@ -603,3 +605,23 @@ MLP 正式训练使用 `difficulty-mlp`，Ridge+MLP 使用 `difficulty-ridge-mlp
 一次性转换入口：`python -m migration.catalog_to_runs --keep-run migration-closeonly331-20261021 --apply`。本次保留 1058 个 benchmark tasks，转入该 run 的 331 条轨迹和 3 项相关评测记录，删除其余 1775 条全局 rollout 登记。原轨迹、NAS 大张量、历史冻结快照不改写。
 
 离线 join 同样要求来源 run：`dataset-index DATASET_ID CAPTURE_ID INDEX_ID --source-run SOURCE_RUN [--rollout-list FILE]` 与 `token-join DATASET_ID CAPTURE_ID INDEX_ID --source-run SOURCE_RUN [--rollout-list FILE]`。使用 `--run-id` 绑定该来源 run 时可省略重复的 `--source-run`。
+
+## GPU MIG serving
+
+Managed rollout serving accepts either physical GPU indices or MIG instance UUIDs in serving.gpus. The number of entries must equal serving.tensor_parallel_size; one MIG instance therefore uses TP=1. The UUID must be discovered at launch time with nvidia-smi -L and frozen in the run resolved configuration. Example:
+
+    serving:
+      gpus: ["MIG-INSTANCE-UUID"]
+      tensor_parallel_size: 1
+
+Run creation and execution still use the normal dycon commands. The serving manager preserves the UUID in CUDA_VISIBLE_DEVICES, checks that the instance exists and is visible as one CUDA device, and records the device and measured memory in startup/launch.json. It takes a run-local device lock so two managed runs cannot claim the same configured device. Physical GPU configurations such as gpus: [0, 1, 2, 3] with TP=4 remain unchanged. Offline hidden replay keeps its separate integer-GPU contract in this release.
+
+### Harness failure outcomes
+
+`harness run` records a stable outcome for every selected rollout:
+
+- An empty or unappliable patch is `status=completed`, `resolved=false`, `failure_type=invalid_patch`.
+- A transient network/connection failure is retried by the unified harness at most two times. Each attempt has its own evaluation task ID and is retained in the result; after exhaustion the outcome is `status=ConnectionError`, `resolved=null`, `failure_type=network_error`.
+- Other execution failures remain `status=infra_error`, `resolved=null`, `failure_type=other_error` (or the more specific non-network classification).
+
+The summary reports `network_retries`; retrying infrastructure does not create a new rollout, repetition, or canonical trajectory.

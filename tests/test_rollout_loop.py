@@ -343,7 +343,7 @@ def test_runner_persists_loop_and_resumes_without_retry(cfg, monkeypatch, captur
     else:
         assert trajectory["info"]["exit_status"] == "reasoning_loop"
         assert trajectory["messages"][-1]["extra"]["limit_reason"] == "all_parallel_branches_reasoning_loop"
-    work = Path(cfg["project_root"]) / "runs/loop-run/rollout/tasks/loop-task"
+    work = Path(cfg["project_root"]) / "runs/loop-run/rollout/tasks/loop-task/repetitions/rep-000"
     assert len(list((work / "attempts").iterdir())) == 1
     assert read_json(work / "result.json") == result
     assert RunEvidence(cfg["project_root"], "loop-run").verify()["rollouts"] == 1

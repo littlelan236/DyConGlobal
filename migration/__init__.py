@@ -1,1 +1,1 @@
-"""Explicit, offline legacy conversion tools."""
+"""Explicit one-time project migrations."""

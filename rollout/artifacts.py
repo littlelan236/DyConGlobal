@@ -76,6 +76,18 @@ def import_rollout(root, spec):
                 "reused_from": info.get("tact", {}).get("reused_from"),
             },
         }
+        sample = spec.get("sample") or {}
+        if sample:
+            row.update({
+                "sample_key": sample.get("sample_key"),
+                "repetition_id": sample.get("repetition_id"),
+                "repetition_index": sample.get("repetition_index"),
+                "sample_seed": sample.get("sample_seed"),
+                "seed_policy": sample.get("seed_policy"),
+            })
+            row["provenance"].update({"sample_key": sample.get("sample_key"),
+                                      "repetition_id": sample.get("repetition_id"),
+                                      "sample_seed": sample.get("sample_seed")})
         run_catalog.register_rollout(rid, row, task)
     return rid
 

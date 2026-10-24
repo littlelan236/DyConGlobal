@@ -46,8 +46,19 @@ class Serving(Strict):
     api_key_env: str
     management: Literal["external", "managed"]
     python: str
-    gpus: list[int]
+    gpus: list[int | str]
     tensor_parallel_size: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_devices(self):
+        from runtime.serving.resources import normalize_devices
+
+        devices = normalize_devices(self.gpus)
+        if len(devices) != self.tensor_parallel_size:
+            raise ValueError(
+                "serving.gpus count must equal serving.tensor_parallel_size"
+            )
+        return self
     gpu_memory_utilization: float = Field(gt=0, le=1)
     max_model_len: int = Field(gt=0)
     startup_seconds: int = Field(gt=0)
@@ -88,7 +99,7 @@ class Agent(Strict):
 
 
 class Images(Strict):
-    load_workers: int = Field(gt=0, le=4)
+    load_workers: int = Field(gt=0, le=8)
     reserve_bytes: int = Field(ge=0)
     expansion_factor: float = Field(ge=1)
     minimum_load_bytes: int = Field(ge=0)
@@ -246,11 +257,19 @@ class ParallelReasoningLoop(Strict):
     check_interval_tokens: int = Field(default=64, ge=1, le=1024)
 
 
+class ParallelConsensus(Strict):
+    retention_ratio: float = Field(default=0.5, gt=0, le=1, allow_inf_nan=False)
+    min_retained_branches: int = Field(default=2, ge=2)
+    rule: Literal["exact_action"] = "exact_action"
+    tie_policy: Literal["estimator_score"] = "estimator_score"
+
+
 class Parallel(Strict):
     """Optional branch selection; the predictor is supplied by a later adapter."""
 
     enabled: bool = False
-    branch_count: int = Field(default=2, gt=0, le=16)
+    mode: Literal["parallel", "parallel_baseline", "parallel_consensus"] = "parallel"
+    branch_count: int = Field(default=2, gt=0, le=32)
     policy: Literal["first_step", "every_k_steps", "every_step"] = "first_step"
     every_k_steps: int | None = Field(default=None, gt=0)
     estimator_ref: str | None = None
@@ -262,10 +281,31 @@ class Parallel(Strict):
     save_sites: list[int] = []
     fallback_policy: Literal["first_valid", "stop"] = "first_valid"
     validation_repetitions: int = Field(default=0, ge=0, le=10)
+    consensus: ParallelConsensus | None = None
     reasoning_loop: ParallelReasoningLoop = Field(default_factory=ParallelReasoningLoop)
 
     @model_validator(mode="after")
     def validate_policy(self):
+        if self.mode == "parallel_consensus" and self.enabled:
+            if self.branch_count <= 1:
+                raise ValueError("parallel consensus requires branch_count > 1")
+            if not self.estimator_ref:
+                raise ValueError("parallel consensus requires estimator_ref")
+            if self.consensus is None:
+                self.consensus = ParallelConsensus()
+            if self.consensus.min_retained_branches > self.branch_count:
+                raise ValueError("parallel consensus min_retained_branches is invalid")
+            if self.fallback_policy != "stop":
+                raise ValueError("parallel consensus requires fallback_policy=stop")
+        if self.mode == "parallel_baseline":
+            if not self.enabled:
+                raise ValueError("parallel baseline requires enabled=true")
+            if self.branch_count <= 1:
+                raise ValueError("parallel baseline requires branch_count > 1")
+            if not self.reasoning_loop.enabled:
+                raise ValueError("parallel baseline requires reasoning_loop.enabled=true")
+            if not self.estimator_ref:
+                raise ValueError("parallel baseline requires estimator_ref")
         if self.policy == "every_k_steps" and self.every_k_steps is None:
             raise ValueError("parallel.every_k_steps is required for every_k_steps")
         if self.policy != "every_k_steps" and self.every_k_steps is not None:
@@ -382,6 +422,10 @@ def resolve(path, overrides=()):
         cfg.pop("parallel")
     elif "reasoning_loop" not in raw["parallel"]:
         cfg["parallel"].pop("reasoning_loop")
+    if "mode" not in raw.get("parallel", {}):
+        cfg.get("parallel", {}).pop("mode", None)
+    if cfg.get("parallel", {}).get("consensus") is None:
+        cfg.get("parallel", {}).pop("consensus", None)
     root = path.parent
     if cfg.get("parallel", {}).get("enabled") and cfg["parallel"]["branch_count"] > 1:
         from runtime.serving.parallel import artifact_contract

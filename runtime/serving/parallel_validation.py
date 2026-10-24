@@ -27,6 +27,11 @@ def validate_selection(summary, generation_seed):
     selected = summary["selected_branch_id"]
     if mode == "minimum_score":
         expected = min(candidates, key=lambda c: (c["score"], c["branch_id"]))["branch_id"]
+    elif mode == "parallel_consensus":
+        from rollout.consensus import validate_consensus_evidence
+
+        validate_consensus_evidence(summary)
+        expected = selected
     elif mode == RANDOM_SELECTION_MODE:
         ids = sorted(c["branch_id"] for c in candidates if c.get("selection_eligible"))
         if ids != summary["selection_candidate_ids"] or not ids:

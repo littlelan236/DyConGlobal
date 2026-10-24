@@ -45,8 +45,8 @@ class MLPProbe(BaseModel):
     split_receipt_sha256: str | None = None
     split_strategy: Literal['event_random_v1', 'task_random_v1'] = 'event_random_v1'
     split_seed: int = Field(default=42, ge=0, lt=2**32)
-    validation_fraction: float = Field(default=0.2, gt=0, lt=1)
-    test_fraction: float = Field(default=0.2, gt=0, lt=1)
+    validation_fraction: float = Field(default=0.15, gt=0, lt=1)
+    test_fraction: float = Field(default=0.15, gt=0, lt=1)
     expected_tasks: int = Field(default=106, gt=1)
     expected_rollouts: int = Field(default=106, gt=1)
     expected_samples: int = Field(default=6104, gt=1)
@@ -111,12 +111,12 @@ class RidgeProbe(BaseModel):
     standardize: bool = True
     split_seed: int = 42
     validation_tasks: int = Field(default=48, gt=0)
-    validation_fraction: float = Field(default=0.2, gt=0, lt=1)
-    test_fraction: float = Field(default=0.2, gt=0, lt=1)
+    validation_fraction: float = Field(default=0.15, gt=0, lt=1)
+    test_fraction: float = Field(default=0.15, gt=0, lt=1)
     expected_tasks: int = Field(default=238, gt=1)
     expected_rollouts: int | None = Field(default=None, gt=1)
     expected_samples: int = Field(default=14384, gt=1)
-    split_strategy: Literal["repo_source_quota_v1", "inherit_task_split_v1", "event_random_v1", "task_random_v1"] = "repo_source_quota_v1"
+    split_strategy: Literal["repo_source_quota_v1", "inherit_task_split_v1", "event_random_v1", "task_random_v1"] = "event_random_v1"
     parent_experiment_id: str | None = None
     parent_receipt_sha256: str | None = None
     selection_metric: Literal["validation_pooled_r2"] = "validation_pooled_r2"
@@ -160,7 +160,7 @@ class RidgeProbe(BaseModel):
             raise ValueError("Unknown or duplicate submission target")
         if not self.standardize:
             raise ValueError("This pilot requires training-only feature standardization")
-        if self.split_strategy in {'repo_source_quota_v1', 'inherit_task_split_v1'} and self.validation_tasks >= self.expected_tasks:
+        if self.validation_tasks >= self.expected_tasks:
             raise ValueError("Validation must leave training tasks")
         if self.split_strategy in {"event_random_v1", "task_random_v1"} and self.validation_fraction + self.test_fraction >= 1:
             raise ValueError("Three-way split fractions must leave training data")

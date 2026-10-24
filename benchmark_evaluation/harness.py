@@ -13,15 +13,16 @@ from runtime.containers.factory import ContainerFactory, TaskContext
 
 
 FAILURE_TYPES = ("invalid_patch", "network_error", "timeout", "other_error")
+MAX_NETWORK_RETRIES = 2
+NETWORK_RETRY_DELAY_SECONDS = 1
 
 
 def classify_harness_failure(*, exception=None, evidence=""):
-    """Classify failed evaluation without changing legacy status semantics.
+    """Classify unsuccessful harness execution using exception and official logs.
 
-    SWE-bench wraps patch and test failures in ``EvaluationError`` and often
-    returns only ``completed=False``. The official log is therefore part of
-    the classification input; a missing log remains an explicitly unknown
-    ``other_error`` instead of being mislabeled as infrastructure failure.
+    Patch failures are completed negative outcomes; network failures are
+    retryable ConnectionError outcomes. Unknown execution failures stay
+    infra_error with an explicit other_error classification.
     """
     text = evidence or ""
     if exception is not None:
@@ -29,7 +30,7 @@ def classify_harness_failure(*, exception=None, evidence=""):
     lowered = text.lower()
     if any(marker in lowered for marker in (
         "patch apply failed", "only garbage was found in the patch input",
-        "failed to apply patch", "git apply", "patch failed",
+        "failed to apply patch", "patch failed", "missingpatch",
     )):
         failure_type = "invalid_patch"
     elif any(marker in lowered for marker in (
@@ -199,33 +200,58 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None):
                 "status": "infra_error",
                 "resolved": None,
             }
-            if not patch:
-                return rid, {**result, "reason": "MissingPatch",
-                             **classify_harness_failure(evidence="MissingPatch")}
-            try:
-                factory.deadline.check()
-                spec = official.make_test_spec(rows[iid], namespace="swebench")
-                prediction = {"instance_id": iid, "model_name_or_path": rid, "model_patch": patch}
-                timeout = rows[iid].get("evaluation_timeout_seconds", cfg["timeouts"]["evaluation_seconds"])
-                evaluation_task_id = "task-" + hash_json({"evaluation": eval_id, "rollout": rid})[:24]
-                graded = official.run_instance(
-                    spec,
-                    prediction,
-                    False,
-                    False,
-                    factory.client,
-                    evaluation_task_id,
-                    timeout,
-                )
-                if graded["completed"]:
-                    result.update(status="completed", resolved=bool(graded["resolved"]))
-                else:
-                    result.update(**classify_harness_failure(
-                        evidence=_evaluation_evidence(output, evaluation_task_id, rid, iid)))
-            except (Exception,) as exc:
-                # Keep the legacy infra_error status, but expose the actionable failure class.
-                result.update(classify_harness_failure(exception=exc))
-                result["error"] = repr(exc)
+            if not patch.strip():
+                return rid, {
+                    **result, "status": "completed", "resolved": False,
+                    "reason": "MissingPatch", **classify_harness_failure(evidence="MissingPatch"),
+                    "attempts": [],
+                }
+            prediction = {"instance_id": iid, "model_name_or_path": rid, "model_patch": patch}
+            timeout = rows[iid].get("evaluation_timeout_seconds", cfg["timeouts"]["evaluation_seconds"])
+            attempts = []
+            for attempt in range(MAX_NETWORK_RETRIES + 1):
+                identity = {"evaluation": eval_id, "rollout": rid}
+                if attempt:
+                    identity["attempt"] = attempt + 1
+                evaluation_task_id = "task-" + hash_json(identity)[:24]
+                started_at = now()
+                try:
+                    factory.deadline.check()
+                    # Spec construction can fetch metadata and must also be retried.
+                    spec = official.make_test_spec(rows[iid], namespace="swebench")
+                    graded = official.run_instance(
+                        spec, prediction, False, False, factory.client,
+                        evaluation_task_id, timeout,
+                    )
+                    if graded["completed"]:
+                        attempt_result = {"status": "completed", "resolved": bool(graded["resolved"])}
+                    else:
+                        attempt_result = classify_harness_failure(
+                            evidence=_evaluation_evidence(output, evaluation_task_id, rid, iid))
+                except Exception as exc:
+                    # Classify the exception separately: an old git-apply log must
+                    # not turn a later connection failure into a patch failure.
+                    attempt_result = classify_harness_failure(exception=exc)
+                    attempt_result["error"] = repr(exc)
+
+                failure_type = attempt_result.get("failure_type")
+                if failure_type == "invalid_patch":
+                    attempt_result.update(status="completed", resolved=False)
+                elif failure_type == "network_error":
+                    attempt_result.update(status="ConnectionError", resolved=None)
+                elif failure_type:
+                    attempt_result.update(status="infra_error", resolved=None)
+                attempts.append({
+                    "attempt": attempt + 1, "evaluation_task_id": evaluation_task_id,
+                    "started_at": started_at, "finished_at": now(), **attempt_result,
+                })
+                # Replace the final outcome so successful retries cannot retain
+                # stale network failure_type/error fields.
+                result = {"patch_sha256": result["patch_sha256"], **attempt_result}
+                if result["status"] != "ConnectionError" or attempt == MAX_NETWORK_RETRIES:
+                    break
+                time.sleep(NETWORK_RETRY_DELAY_SECONDS * (attempt + 1))
+            result["attempts"] = attempts
             return rid, result
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=cfg["execution"]["harness_workers"]) as pool:
@@ -240,6 +266,7 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None):
             "gold": gold,
             "requested": len(outcomes),
             "resolved": resolved,
+            "network_retries": sum(max(0, len(row.get("attempts", [])) - 1) for row in outcomes.values()),
             "resolve_rate": resolved / len(outcomes),
             "graded": sum(row["status"] == "completed" for row in outcomes.values()),
             "failure_counts": dict(Counter(row["failure_type"] for row in outcomes.values()

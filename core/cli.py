@@ -1,4 +1,4 @@
-"""Light CLI; heavy model, agent and Docker dependencies are lazy imports."""
+﻿"""Light CLI; heavy model, agent and Docker dependencies are lazy imports."""
 
 import argparse
 import json
@@ -23,6 +23,7 @@ def main(argv=None):
     q.add_argument("--tasks-file", type=Path)
     q.add_argument("--task-id", action="append", default=[])
     q.add_argument("--partition")
+    q.add_argument("--repeat-count", type=int, default=1)
     q = run_sub.add_parser("show")
     q.add_argument("run_id")
     q = run_sub.add_parser("status")
@@ -99,10 +100,10 @@ def main(argv=None):
     p = sub.add_parser("difficulty-split", help="Freeze a reusable dataset split")
     p.add_argument("dataset_id")
     p.add_argument("split_id")
-    p.add_argument("--strategy", choices=["event_random_v1", "task_random_v1", "repo_source_quota_v1", "inherit_task_split_v1"], default="task_random_v1")
+    p.add_argument("--strategy", choices=["event_random_v1", "task_random_v1", "repo_source_quota_v1", "inherit_task_split_v1"], default="event_random_v1")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--validation-fraction", type=float, default=0.2)
-    p.add_argument("--test-fraction", type=float, default=0.2)
+    p.add_argument("--validation-fraction", type=float, default=0.15)
+    p.add_argument("--test-fraction", type=float, default=0.15)
     p.add_argument("--validation-tasks", type=int, default=48)
     p.add_argument("--parent-attempt-id")
     p.add_argument("--parent-receipt-sha256")
@@ -125,6 +126,13 @@ def main(argv=None):
         action="store_true",
         help="Run the real tool/capture startup gate without admitting tasks",
     )
+    p = sub.add_parser("runs-migrate-to-repetition", help="One-time migration of saved runs to schema 2")
+    p.add_argument("--source-root", default="runs")
+    p.add_argument("--archive-root", default="archive/runs-schema1")
+    p.add_argument("--manifest", type=Path, required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("migration-verify", help="Verify the one-time runs migration")
+    p.add_argument("manifest", type=Path)
     p = sub.add_parser("prepare-evaluation")
     p.add_argument("run_id")
     p.add_argument("--source-run", required=True)
@@ -253,6 +261,18 @@ def main(argv=None):
     if a.command == "rollout" and a.resume and a.task_id:
         parser.error("resume uses the immutable task selection")
     explicit_run = a.analysis_run_id or getattr(a, "run_id", None)
+    if a.command in {"runs-migrate-to-repetition", "migration-verify"}:
+        from application.migration.runs_to_repetition import apply as apply_migration, inventory, verify as verify_migration
+
+        root = Path(a.config).resolve().parent
+        if a.command == "migration-verify":
+            result = verify_migration(root, a.manifest)
+        elif a.dry_run:
+            result = inventory(root, root / a.manifest)
+        else:
+            result = apply_migration(root, root / a.manifest, archive_root=a.archive_root)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     run_commands = {"rollout", "harness", "capture", "artifact", "report", "capture-recover", "online-index"}
     if a.command in {"enrich", "token-trace", "trajectory-token-audit", "hidden", "dataset-index", "token-join"}:
         candidate = Path(a.config).resolve().parent / "runs" / a.dataset_id / "plan.json"
@@ -332,7 +352,7 @@ def main(argv=None):
         if a.run_command == "create":
             result = {"run_id": a.run_id, "path": str(create_run(
                 cfg, a.run_id, operation=a.operation, tasks_file=a.tasks_file,
-                task_ids=a.task_id, partition=a.partition))}
+                task_ids=a.task_id, partition=a.partition, repeat_count=a.repeat_count))}
         elif a.run_command == "show":
             result = show_run(cfg["project_root"], a.run_id)
         elif a.run_command == "status":

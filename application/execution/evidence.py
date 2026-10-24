@@ -91,7 +91,7 @@ class RunEvidence:
             for field in ("trajectory", "patch"):
                 owned_path(self.root, row[field + "_path"])
             status, resolved = row["evaluation_status"], row["resolved"]
-            if status not in ("not_run", "running", "completed", "infra_error"):
+            if status not in ("not_run", "running", "completed", "infra_error", "ConnectionError"):
                 raise ValueError("Invalid evaluation status")
             if (status == "completed") != (type(resolved) is bool):
                 raise ValueError("Only completed evaluation has a boolean resolved outcome")

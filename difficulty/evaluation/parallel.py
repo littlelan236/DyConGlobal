@@ -125,6 +125,10 @@ def collect_parallel_scores(cfg, run_id, rollout_id, *, identity_mode=None):
         if (len(candidates) != decision["branch_count"]
                 or len({c["branch_id"] for c in candidates}) != len(candidates)):
             raise ValueError("Incomplete or duplicate decision candidates")
+        if decision.get("selection_mode") == "parallel_consensus":
+            from rollout.consensus import validate_consensus_evidence
+
+            validate_consensus_evidence(decision, frozen["parallel"].get("consensus"))
         for c in candidates:
             record = indexed.get((did, c["branch_id"]))
             if (record is None or record["rollout_id"] != rollout_id
@@ -165,6 +169,8 @@ def collect_parallel_scores(cfg, run_id, rollout_id, *, identity_mode=None):
                    finite_branches=len(values), missing_branches=len(candidates) - len(values),
                    eligible_branches=sum(c["status"] == "eligible" for c in candidates),
                    fallback_reason=decision.get("fallback_reason"))
+        if decision.get("selection_mode") == "parallel_consensus":
+            row["consensus"] = decision["consensus"]
         for c in candidates:
             value = c.get("score")
             branches.append({"step_id": step, "query_step_id": decision["step_id"],
@@ -176,6 +182,8 @@ def collect_parallel_scores(cfg, run_id, rollout_id, *, identity_mode=None):
                              "native_request_id": c.get("native_request_id"),
                              "close_sample_id": c.get("close_sample_id"),
                              "fallback_reason": decision.get("fallback_reason")})
+            if decision.get("selection_mode") == "parallel_consensus":
+                branches[-1].update({k: c.get(k) for k in ("retained", "estimator_rank", "exclusion_reason")})
             if identity_reader:
                 identity = {"action_hash": None, "action": None, "reasoning_hash": None,
                             "reasoning_evidence": identity_mode, "identity_status": "not_eligible_or_finite",

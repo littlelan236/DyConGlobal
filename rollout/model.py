@@ -8,7 +8,7 @@ from hidden.backends.vllm.online import build_capture_select
 from runtime.steering.easysteer.payload import steering_payload
 
 
-def model_config(cfg, capture_context=None):
+def model_config(cfg, capture_context=None, sample=None):
     s, g, a = cfg["serving"], cfg["generation"], cfg["agent"]
     extra_body = {
         "top_k": g["top_k"],
@@ -54,7 +54,7 @@ def model_config(cfg, capture_context=None):
     }
 
 
-def make_model(cfg, deadline, capture_context=None, runtime=None):
+def make_model(cfg, deadline, capture_context=None, runtime=None, sample=None):
     from uuid import uuid4
 
     from minisweagent.exceptions import FormatError
@@ -205,4 +205,4 @@ def make_model(cfg, deadline, capture_context=None, runtime=None):
                         check_capture(message)
                 raise
 
-    return RecordingModel(**model_config(cfg, capture_context))
+    return RecordingModel(**model_config(cfg, capture_context, sample))

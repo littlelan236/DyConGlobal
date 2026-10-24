@@ -1,48 +1,20 @@
 """Exact tool-action identities and explicit reasoning identity evidence."""
 
-import json
-
+from core.action_identity import ActionIdentityUnavailable, action_identity as _action_identity
 from core.io import hash_json, owned_path, read_json
 from enrichment.online_trace import reasoning_blocks
 from hidden.artifacts import read_request
 
 
-class IdentityUnavailable(ValueError):
+class IdentityUnavailable(ActionIdentityUnavailable):
     """A legacy candidate lacks required identity evidence (not a bad checksum)."""
 
 
-def _object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("Duplicate tool argument key")
-        result[key] = value
-    return result
-
-
 def action_identity(candidate):
-    """Ignore tool IDs/JSON key ordering; preserve call order and command bytes."""
-    choices = (candidate.get("response") or {}).get("choices") or []
-    message = (choices[0].get("message") or {}) if choices else {}
-    calls = message.get("tool_calls")
-    if not isinstance(calls, list) or not calls:
-        raise IdentityUnavailable("missing_tool_calls")
-    actions = []
-    for call in calls:
-        fn = call.get("function") or {}
-        if not isinstance(fn.get("name"), str) or not fn["name"]:
-            raise IdentityUnavailable("missing_tool_name")
-        arguments = fn.get("arguments")
-        try:
-            if isinstance(arguments, str):
-                arguments = json.loads(arguments, object_pairs_hook=_object)
-            if not isinstance(arguments, dict):
-                raise ValueError("Tool arguments must be a JSON object")
-            hash_json(arguments)  # Reject NaN/Infinity without rewriting strings.
-        except (ValueError, TypeError) as exc:
-            raise IdentityUnavailable("invalid_tool_arguments") from exc
-        actions.append({"name": fn["name"], "arguments": arguments})
-    return hash_json(actions), json.dumps(actions, sort_keys=True, ensure_ascii=False, allow_nan=False)
+    try:
+        return _action_identity(candidate)
+    except ActionIdentityUnavailable as exc:
+        raise IdentityUnavailable(str(exc)) from exc
 
 
 class CandidateIdentityReader:

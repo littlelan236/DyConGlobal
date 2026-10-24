@@ -223,7 +223,7 @@ return overrides
 
 现有 `benchmark_evaluation/metadata.py` 按 URL 缓存真实 requirements 内容，对 GitHub raw 请求使用有界重试和候选源，并保留真实 404/410 供官方路径 fallback 使用。
 
-修复方式是补全真实缓存、检查源路径与 commit、修复下载链路和重试策略。不得在下载异常后返回空 requirements 来继续跑，也不得缓存错误页面为有效依赖文本。requirements-cache 不能当成任意测试资源缓存。
+修复方式是补全真实缓存、检查源路径与 commit、修复下载链路和重试策略。harness 对 `network_error`（包括 requirements 元数据、Docker API 和 HTTP 连接错误）最多自动重试 2 次；耗尽后记录 `ConnectionError`，不能把它伪装成测试失败或成功。不得在下载异常后返回空 requirements 来继续跑，也不得缓存错误页面为有效依赖文本。requirements-cache 不能当成任意测试资源缓存。
 
 ## 8. 标准修复与验收流程
 
@@ -242,7 +242,7 @@ return overrides
 | 重复的原生库或镜像 ownership 问题 | 受维护的派生镜像与来源验证 |
 | harness 元数据、日志评分适配 | `benchmark_evaluation/` 中对应模块 |
 | 资源缓存挂载等当前缺失能力 | 扩展共享 schema/policy/factory，记录资源 hash |
-| 瞬时基础设施重试 | 已有统一基础设施重试，不另包一层随意重跑脚本 |
+| 瞬时 harness 基础设施重试 | 由 `benchmark_evaluation.harness` 对 `network_error` 有界重试；不另包一层随意重跑脚本 |
 
 环境修复不修改被测业务代码、gold patch、测试断言、评分清单或成功标签。需要改变测试环境契约时，明确标注变体和验证范围。
 
@@ -287,7 +287,7 @@ cd /home/wangtianyi/DyConGlobal
 ### 8.4 怎样才算修好
 
 1. 最小复现的故障点消失，且没有通过跳过测试、伪造响应或减小评分范围实现。
-2. 正式 gold `resolved=true`，所有官方必需 FAIL_TO_PASS/PASS_TO_PASS 符合要求；infra_error 和 skip 单独解释。
+2. 正式 gold `resolved=true`，所有官方必需 FAIL_TO_PASS/PASS_TO_PASS 符合要求；invalid patch 作为 completed/resolved=false，infra_error、ConnectionError 和 skip 单独解释。
 3. cold start 的 load/create/bootstrap/cleanup 证据完整，依赖和镜像身份可回溯。
 4. 复核少量同类已通过任务，确认共享策略没有回归；网络修复同时检查代理语义和本地 fixture。
 5. `catalog-check`、镜像来源/内容核验、run artifact 验证各自完成。catalog 通过不代表 NAS blob、环境和网络也通过。
@@ -297,7 +297,7 @@ gold 只是环境可用性证据，不能作为模型 rollout 的成功标签。
 
 ## 9. 自动等待、重测和发布工具的边界
 
-工程已有 pidfd 唤醒工具，例如 `runtime.scripts.wakeup_nonverified600_gold`：等待 audit 进程退出后，根据结果筛选失败项、复用配置和统一容器入口重测。它应用已有修复规则，**不会自动理解错误并发明新的依赖或网络修复**。未改变的确定性失败不应连续原样重跑；瞬时连接故障才适合有界重试。
+工程已有 pidfd 唤醒工具，例如 `runtime.scripts.wakeup_nonverified600_gold`：等待 audit 进程退出后，根据结果筛选失败项、复用配置和统一容器入口重测。它应用已有修复规则，**不会自动理解错误并发明新的依赖或网络修复**。未改变的确定性失败不应连续原样重跑；空 patch 和 garbage patch 直接记为 completed/resolved=false，瞬时连接故障由 harness 自动有界重试，耗尽后记为 ConnectionError。
 
 `runtime.scripts.finalize_rootless_gold_repair` 等收尾模块仍包含历史 cohort 路径假设，当前源码还有汇总输入与退出阶段不一致的待修点。`benchmark-pull` 的 cohort 复核也仍将冻结任务与当前 catalog 整行比较，合法的派生 image 替换可能触发不一致。这些工具**不能不看源码就当作任意新任务的通用修复流程**。
 

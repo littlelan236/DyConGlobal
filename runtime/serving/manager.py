@@ -15,6 +15,7 @@ import requests
 
 from core.io import hash_json, now, sha256, write_json
 from runtime.serving.capture import CaptureControlServer, OnlineCaptureController
+from runtime.serving.resources import reserve_serving_devices
 
 
 class ServingManager:
@@ -26,6 +27,8 @@ class ServingManager:
         self.capture_server = None
         self.capture_token_inventory = {}
         self.runtime = {}
+        self.device_reservation = None
+        self.device_inventory = None
 
     def build_args(self, serving_python, host, port):
         cfg, s = self.cfg, self.cfg["serving"]
@@ -104,6 +107,13 @@ class ServingManager:
         return args
 
     def __enter__(self):
+        try:
+            return self._enter()
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def _enter(self):
         cfg, s = self.cfg, self.cfg["serving"]
         if cfg.get("parallel", {}).get("enabled") and cfg["parallel"]["branch_count"] > 1:
             from runtime.serving.parallel import artifact_contract
@@ -280,6 +290,13 @@ class ServingManager:
                     self.capture_token_inventory.get("close_token_ids", [])
                 )
                 env["DYCON_CAPTURE_OPEN_IDS"] = json.dumps(self.capture_token_inventory["open_token_ids"])
+            self.device_reservation = reserve_serving_devices(
+                root, serving_python, s["gpus"]
+            )
+            self.device_inventory = self.device_reservation.__enter__()
+            if self.device_inventory["device_kind"] == "mig":
+                # The pinned NVML platform fingerprints the parent GPU memory.
+                env["VLLM_ENABLE_STARTUP_PLAN"] = "0"
             args = self.build_args(serving_python, endpoint.hostname, port)
             write_json(
                 self.output / "launch.json",
@@ -289,6 +306,7 @@ class ServingManager:
                     "config_source": cfg["config_source"],
                     "config_source_sha256": cfg.get("config_source_sha256"),
                     "serving_dtype": s.get("dtype", "float16"),
+                    "serving_devices": self.device_inventory,
                     "runtime_sha256": sha256(root / "vendor/easysteer-runtime.json"),
                     "capture": {
                         "enabled": bool(capture_cfg.get("enabled")),
@@ -355,3 +373,8 @@ class ServingManager:
             self.capture_controller = None
         if self.log is not None:
             self.log.close()
+            self.log = None
+        if self.device_reservation is not None:
+            self.device_reservation.__exit__(*exc)
+            self.device_reservation = None
+            self.device_inventory = None

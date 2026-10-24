@@ -14,6 +14,7 @@ from uuid import uuid4
 import requests
 
 from core.io import hash_json
+from rollout.consensus import select_consensus
 
 
 class ParallelSelectionError(RuntimeError):
@@ -87,6 +88,7 @@ class ParallelReasoningCoordinator:
             raise ParallelSelectionError("Parallel rollout requires a live capture controller")
         opts = self.options
         baseline = opts.get("mode", "parallel") == "parallel_baseline"
+        consensus = opts.get("mode") == "parallel_consensus" and self.diagnostic_mode is None
         random_selection = baseline and self.diagnostic_mode is None
         decision = "dec-" + uuid4().hex
         prefix = hash_json(messages)
@@ -198,6 +200,7 @@ class ParallelReasoningCoordinator:
                 records.append(row)
             fallback = None
             selection_error = None
+            consensus_meta = None
             selection_seed = None
             selection_ids = sorted(c.branch_id for c in formatted)
             if random_selection and score_error:
@@ -209,6 +212,18 @@ class ParallelReasoningCoordinator:
                     self.cfg["generation"]["seed"], capture["task_id"], capture["step_id"], prefix)
                 selected = random_branch_id(selection_seed, selection_ids)
                 winner = next(c for c in formatted if c.branch_id == selected)
+            elif consensus and eligible:
+                score_map = {c.branch_id: float(scores[c.branch_id]["score"]) for c in eligible}
+                winner, consensus_meta = select_consensus(
+                    eligible, score_map,
+                    opts.get("consensus", {}).get("retention_ratio", 0.5),
+                    opts.get("consensus", {}).get("min_retained_branches", 2),
+                    opts.get("consensus", {}).get("tie_policy", "estimator_score"),
+                )
+                if winner is None:
+                    selection_error = ParallelSelectionError("No exact-action consensus")
+                else:
+                    fallback = None
             elif eligible:
                 winner = min(eligible, key=lambda c: (scores[c.branch_id]["score"], c.branch_id))
             elif self.diagnostic_mode == "first_valid_unscored" and formatted:
@@ -263,6 +278,46 @@ class ParallelReasoningCoordinator:
                         "admission_ms": admission_ms,
                         "response_to_selection_ms": (time.monotonic() - wait_start) * 1000,
                         "total_cost": sum(c.cost for c in candidates)}
+            if consensus:
+                evidence["rollout_mode"] = "parallel_consensus"
+                evidence["selection_mode"] = "parallel_consensus"
+                evidence["tie_rule"] = "estimator_score"
+                if consensus_meta is None:
+                    consensus_meta = {
+                        "status": "no_eligible_branch",
+                        "retained_branch_ids": [],
+                        "retained_count": 0,
+                        "branch_metadata": [],
+                        "votes": [],
+                        "tie_break": None,
+                        "unavailable": [],
+                    }
+                metadata_by_branch = {
+                    item["branch_id"]: item
+                    for item in consensus_meta.get("branch_metadata", [])
+                }
+                for row in records:
+                    item = metadata_by_branch.get(row["branch_id"])
+                    if item:
+                        row.update({
+                            "estimator_rank": item.get("estimator_rank"),
+                            "retained": item.get("retained", False),
+                            "exclusion_reason": item.get("exclusion_reason"),
+                            "identity_status": item.get("identity_status"),
+                            "action_hash": item.get("action_hash"),
+                            "action": item.get("action"),
+                        })
+                evidence["consensus"] = consensus_meta
+                evidence["consensus_config"] = {
+                    "retention_ratio": opts.get("consensus", {}).get("retention_ratio", 0.5),
+                    "min_retained_branches": opts.get("consensus", {}).get(
+                        "min_retained_branches", 2
+                    ),
+                    "rule": opts.get("consensus", {}).get("rule", "exact_action"),
+                    "tie_policy": opts.get("consensus", {}).get(
+                        "tie_policy", "estimator_score"
+                    ),
+                }
             if baseline:
                 evidence["rollout_mode"] = "parallel_baseline"
             if random_selection:

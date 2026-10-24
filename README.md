@@ -1,5 +1,7 @@
 # DyConGlobal
 
+当前 active run 统一使用 schema-2。历史 runs 已通过一次性迁移转为 `repeat_count=1` 的 active run；原始 schema-1 目录保存在 `archive/runs-schema1/`，不再由生产入口读取。迁移凭证位于 `migration/runs-to-repetition-20261024.json`，切换标记位于 `migration/CUTOVER.json`。
+
 Coding-agent rollout、官方 SWE-bench harness、在线 hidden capture、离线 vLLM 重放及 action/difficulty 分析工程。远程工程位于 `/home/wangtianyi/DyConGlobal`，NAS 根目录由根 `config.yaml` 的 `paths.nas_root` 配置。
 
 ## 使用文档
@@ -20,6 +22,15 @@ cd /home/wangtianyi/DyConGlobal
 .venvs/runner/bin/dycon run start RUN_ID --detach
 .venvs/runner/bin/dycon run wait RUN_ID
 ```
+
+同一 task 的多次独立 rollout 在一个 run 内声明：
+
+```bash
+.venvs/runner/bin/dycon run create RUN_ID --operation rollout --repeat-count 5 \
+  --task-id INSTANCE_ID
+```
+
+`repeat-count` 是每个 task 的独立采样总数；同一 run 的 task×repetition 进入平坦队列，使用独立可复现 seed。基础设施重试不增加 repetition 数。
 
 后三条命令会执行真实 rollout，需要可用的 GPU、模型、镜像和配置；status/show 不启动 workload。`wait` 等待进程退出事件，不轮询运行状态。
 
@@ -50,3 +61,5 @@ runner、analysis、easysteer、latent-vllm 是四个独立环境，按任务使
 `baseline/` 已清空，历史产物在 `isolated/history-baseline-20261021/`；仅作历史归档；本次只将 `migration-closeonly331-20261021` 的登记信息转入其 run 级证据，旧快照不可伪装成新版可恢复运行状态。原件和转换审计位于工程外 `/home/wangtianyi/dycon-isolation-20261021/baseline-cleanup/`。
 
 本次精简前的全部 docs 原文、技术说明与实验/验收报告保存于 `/home/wangtianyi/dycon-isolation-20261021/docs-consolidation/`；日常只维护上面三份指南。历史指标仅说明当时的模型、精度、输入和运行范围，当前能力以源码和不可变 run 证据为准。
+
+Harness ????? `invalid_patch`?`infra_error` ? `ConnectionError`???????????????????? attempt ???Managed rollout ?????? GPU TP=4 ?? MIG UUID ?????? TP=1??? [?????????](docs/ENTRYPOINTS.md)?

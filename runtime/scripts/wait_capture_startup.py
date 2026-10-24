@@ -29,7 +29,7 @@ def evidence(root, run_id):
         and gate.get("capture_status") != "complete"
     ):
         raise ValueError("Production startup gate has not published capture artifacts")
-    for path in sorted((run / "tasks").glob("*/attempts/*/first-tool.json")):
+    for path in sorted((run / "rollout/tasks").glob("*/repetitions/*/attempts/*/first-tool.json")):
         tool = read_json(path)
         # Successful startup means a genuine shell observation, even when the
         # repository's first diagnostic command has a nonzero exit status.

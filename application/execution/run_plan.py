@@ -12,6 +12,7 @@ from pathlib import Path
 from catalog.store import Catalog
 from core.config import load_snapshot, snapshot
 from core.io import hash_json, identifier, now, read_json, write_json
+from rollout.sampling import load_work_items, make_work_items, write_work_items
 
 
 def _selection_from_tasks(catalog: Catalog, task_ids=(), partition=None):
@@ -27,10 +28,14 @@ def _selection_from_tasks(catalog: Catalog, task_ids=(), partition=None):
     }
 
 
-def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partition=None):
+def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partition=None, repeat_count=1):
     run_id = identifier(run_id)
     if operation not in {"rollout", "harness", "enrichment", "hidden", "analysis"}:
         raise ValueError(f"Unsupported operation: {operation}")
+    if type(repeat_count) is not int or repeat_count < 1:
+        raise ValueError("repeat_count must be a positive integer")
+    if operation != "rollout" and repeat_count != 1:
+        raise ValueError("repeat_count is only configurable for rollout runs")
     root = Path(cfg["project_root"])
     catalog = Catalog(root)
     if tasks_file:
@@ -64,7 +69,7 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
         yaml.safe_dump(effective_config, sort_keys=False, allow_unicode=True), encoding="utf-8"
     )
     tasks = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": run_id,
         "operation": operation,
         "selection_sha256": hash_json(selection),
@@ -76,9 +81,11 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
     tasks["tasks_sha256"] = hash_json(tasks["tasks"])
     write_json(run / "tasks.json", tasks)
     plan = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": run_id,
         "operation": operation,
+        "migration_state": "active",
+        "repeat_count": repeat_count,
         "config_hash": frozen["config_hash"],
         "selection_sha256": hash_json(selection),
         "tasks_sha256": tasks["tasks_sha256"],
@@ -92,6 +99,8 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
         "hidden/branch", "harness", "reports",
     ):
         (run / folder).mkdir(parents=True, exist_ok=True)
+    branch_count = cfg.get("parallel", {}).get("branch_count", 1) if operation == "rollout" else 1
+    write_work_items(run, make_work_items(selection, run_id, repeat_count, cfg["generation"]["seed"], branch_count))
     write_json(run / "status.json", {"stage": "planned", "run_id": run_id, "operation": operation})
     write_json(run / "progress.json", {})
     write_json(run / "artifacts.json", {"schema_version": 1, "run_id": run_id, "artifacts": []})
@@ -120,6 +129,8 @@ def load_plan(root, run_id):
     run_id = identifier(run_id)
     run = root / "runs" / run_id
     plan = read_json(run / "plan.json")
+    if plan.get("schema_version") != 2 or plan.get("migration_state", "active") != "active":
+        raise ValueError(f"Run is not an active schema-2 run: {run_id}")
     expected = plan.pop("plan_sha256", None)
     if expected != hash_json(plan):
         raise ValueError(f"Run plan was modified: {run_id}")
@@ -142,12 +153,23 @@ def load_plan(root, run_id):
         raise ValueError("Run tasks and frozen selection disagree")
     if tasks["selection_sha256"] != plan["selection_sha256"]:
         raise ValueError("Run tasks do not match selection")
-    return {"run": run, "plan": plan, "config": cfg, "tasks": tasks}
+    work_items = load_work_items(root, run_id, selection=cfg["selection"])
+    if work_items.get("items_sha256") != hash_json(work_items["items"]):
+        raise ValueError("Run work items were modified")
+    if work_items.get("repeat_count") != plan.get("repeat_count"):
+        raise ValueError("Run repeat count disagrees with work items")
+    expected = make_work_items(
+        cfg["selection"], run_id, plan["repeat_count"], cfg["generation"]["seed"],
+        cfg.get("parallel", {}).get("branch_count", 1),
+    )
+    if expected["items"] != work_items["items"]:
+        raise ValueError("Run work items disagree with frozen selection/config")
+    return {"run": run, "plan": plan, "config": cfg, "tasks": tasks, "work_items": work_items}
 
 
 def show_run(root, run_id):
     loaded = load_plan(root, run_id)
-    return {k: loaded[k] for k in ("plan", "tasks")}
+    return {k: loaded[k] for k in ("plan", "tasks", "work_items")}
 
 
 def list_runs(root):

@@ -32,14 +32,32 @@ cd /home/wangtianyi/DyConGlobal
 
 ## 3. 创建 run，启动 rollout
 
+active run 统一使用 schema-2。升级已有 runs 前先执行一次显式迁移：
+
 ```bash
-.venvs/runner/bin/dycon run create RUN_ID --operation rollout \
+.venvs/runner/bin/dycon runs-migrate-to-repetition \
+  --source-root runs --archive-root archive/runs-schema1 \
+  --manifest migration/runs-to-repetition-20261024.json --dry-run
+.venvs/runner/bin/dycon runs-migrate-to-repetition \
+  --source-root runs --archive-root archive/runs-schema1 \
+  --manifest migration/runs-to-repetition-20261024.json
+.venvs/runner/bin/dycon migration-verify migration/runs-to-repetition-20261024.json
+```
+
+迁移后的历史 rollout 以 `repeat_count=1` active run 保存；无 plan 的历史目录只归档为 artifact-only。生产入口不自动读取或迁移 schema-1。
+
+```bash
+.venvs/runner/bin/dycon run create RUN_ID --operation rollout --repeat-count 5 \
   --task-id pydata__xarray-4629 --task-id pylint-dev__pylint-7277
 .venvs/runner/bin/dycon run show RUN_ID
 .venvs/runner/bin/dycon run start RUN_ID
 ```
 
 baseline、steering、parallel 共用 rollout runner。创建 run 时配置 `parallel.enabled/branch_count/estimator_ref`、`steering.enabled/payload`、`capture.enabled/anchors/layers`，以及 GPU/TP/workers/显存比例。parallel 需要与模型、site 匹配的 predictor 和 close capture。steering 需要真实且 fingerprint 匹配的 payload；没有训练好的 payload 时不伪造 steering 验证。
+
+parallel_consensus 仍使用同一入口；新 run 创建时将 parallel.mode=parallel_consensus、branch_count=32、max_inflight_branches>=32、匹配最新 estimator，并按需设置 parallel.consensus.retention_ratio。它只执行 exact action 共识的代表分支；平票由 estimator 分数裁决，证据写入 decision receipt。
+
+`--repeat-count R` 表示每个 task 的独立 rollout 总数；每个 repetition 使用可复现且不同的 sample seed，基础设施重试不增加 repetition 数。一个 run 内所有 task×repetition 进入同一平坦队列，长尾 task 不阻塞后续 work item。
 
 `run start` 前台等待 supervisor 结束并返回退出证据。后台模式使用：
 
@@ -172,3 +190,23 @@ schema 1 scorer/predictor 的现有能力边界保持；MLP 通过 `difficulty-m
 ## Run 级轨迹选择
 
 Catalog 只维护 benchmark tasks；轨迹/评测写到 `runs/RUN_ID/evidence.json`。本次仅迁移 `migration-closeonly331-20261021`。新建数据集可用 `online-index SOURCE_RUN INDEX_ID --rollout-list FILE`，随后 `difficulty-dataset resolved DATASET_ID --source-run SOURCE_RUN --index-id INDEX_ID --rollout-list FILE`。列表中的轨迹必须属于给出的来源 run。
+
+## GPU MIG serving
+
+Managed rollout serving accepts either physical GPU indices or MIG instance UUIDs in serving.gpus. The number of entries must equal serving.tensor_parallel_size; one MIG instance therefore uses TP=1. The UUID must be discovered at launch time with nvidia-smi -L and frozen in the run resolved configuration. Example:
+
+    serving:
+      gpus: ["MIG-INSTANCE-UUID"]
+      tensor_parallel_size: 1
+
+Run creation and execution still use the normal dycon commands. The serving manager preserves the UUID in CUDA_VISIBLE_DEVICES, checks that the instance exists and is visible as one CUDA device, and records the device and measured memory in startup/launch.json. It takes a run-local device lock so two managed runs cannot claim the same configured device. Physical GPU configurations such as gpus: [0, 1, 2, 3] with TP=4 remain unchanged. Offline hidden replay keeps its separate integer-GPU contract in this release.
+
+### Harness ????
+
+`harness run` records a stable outcome for every selected rollout:
+
+- An empty or unappliable patch is `status=completed`, `resolved=false`, `failure_type=invalid_patch`.
+- A transient network/connection failure is retried by the unified harness at most two times. Each attempt has its own evaluation task ID and is retained in the result; after exhaustion the outcome is `status=ConnectionError`, `resolved=null`, `failure_type=network_error`.
+- Other execution failures remain `status=infra_error`, `resolved=null`, `failure_type=other_error` (or the more specific non-network classification).
+
+The summary reports `network_retries`; retrying infrastructure does not create a new rollout, repetition, or canonical trajectory.

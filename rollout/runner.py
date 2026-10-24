@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import os
 import traceback
 from pathlib import Path
 
 from catalog.store import Catalog
 from application.execution.evidence import RunEvidence
-from core.config import load_snapshot, snapshot
+from core.config import load_snapshot
 from core.io import identifier, now, read_json, sha256, update_status, write_json
 from core.locking import exclusive_run, file_lock
 from rollout.artifacts import import_rollout
+from application.execution.run_plan import create_run, load_plan
+from rollout.sampling import SampleContext, sample_from_item
 
 TERMINAL = {
     "Submitted",
@@ -36,7 +39,7 @@ INFRASTRUCTURE = {
 }
 
 
-def run_task(cfg, run_id, task_key, task, factory, runtime=None):
+def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample: SampleContext | None = None):
     runtime = runtime or {}
     os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
     from hidden.backends.vllm.online import CaptureClient, capture_request_metadata
@@ -46,8 +49,15 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None):
     from runtime.containers.rollout_adapter import RolloutEnvironment
 
     iid = identifier(task["instance_id"])
+    sample = sample or SampleContext(
+        run_id=run_id, task_key=task_key, instance_id=iid,
+        repetition_id="rep-000", repetition_index=0,
+        sample_key="legacy-sample-" + task_key[:24], sample_seed=cfg["generation"]["seed"],
+    )
+    local_cfg = copy.deepcopy(cfg)
+    local_cfg["generation"]["seed"] = sample.sample_seed
     root = Path(cfg["project_root"])
-    work = root / "runs" / run_id / "rollout/tasks" / iid
+    work = root / "runs" / run_id / "rollout/tasks" / iid / "repetitions" / sample.repetition_id
     with file_lock(work / "execution.lock", nonblocking=True):
         if (work / "result.json").exists():
             old = read_json(work / "result.json")
@@ -63,7 +73,7 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None):
         result = None
         for n in range(offset, cfg["execution"]["infrastructure_retry_limit"] + 1):
             factory.deadline.check()
-            attempt_id = f"attempt-{n:03d}"
+            attempt_id = f"{sample.repetition_id}-attempt-{n:03d}"
             out = attempts / attempt_id
             out.mkdir()
             path = out / "raw.traj.json"
@@ -92,7 +102,7 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None):
                     try:
                         inventory = runtime["capture_token_inventory"]
                         capture_context = capture_request_metadata(
-                            f"cap-{run_id}-{iid}-{attempt_id}",
+                            "cap-" + sample.sample_key + "-" + attempt_id,
                             iid,
                             run_id,
                             f"pending-{iid}-{attempt_id}",
@@ -116,7 +126,7 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None):
                         capture_status = "failed"
                         capture_failure(exc)
                 agent = DurableAgent(
-                    make_model(cfg, factory.deadline, capture_context, runtime),
+                    make_model(local_cfg, factory.deadline, capture_context, runtime),
                     env,
                     system_template=cfg["agent"]["system_template"],
                     instance_template=cfg["agent"]["instance_template"],
@@ -191,6 +201,7 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None):
                     "attempt_id": attempt_id,
                     "purposes": ["baseline"],
                     "model_fingerprint": cfg["model"]["fingerprint"],
+                    "sample": sample.as_dict(),
                     "run_local": True,
                 },
             )
@@ -217,6 +228,10 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None):
             path.unlink()  # canonical bytes now live under the run-local rollout tree
             result = {
                 "instance_id": iid,
+                "sample_key": sample.sample_key,
+                "repetition_id": sample.repetition_id,
+                "repetition_index": sample.repetition_index,
+                "sample_seed": sample.sample_seed,
                 "rollout_id": rid,
                 "attempt_id": attempt_id,
                 "exit_status": "CaptureError"
@@ -253,43 +268,42 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
 
     root = Path(cfg["project_root"])
     run_id = identifier(run_id)
-    if resume:
-        cfg = load_snapshot(root, run_id)
-        selection = cfg["selection"]
-    else:
-        selection = Catalog(root).select_tasks(
-            partition=cfg["benchmark"]["partition"], task_ids=task_ids
+    if not resume:
+        if (root / "runs" / run_id).exists():
+            raise FileExistsError(f"Run already exists: {run_id}")
+        create_run(
+            cfg, run_id, operation="rollout", task_ids=task_ids,
+            repeat_count=1,
         )
-        if not selection["task_keys"]:
-            raise ValueError("Baseline task scope is empty")
-        verify_model(cfg)
-        snapshot(cfg, run_id, selection)
-        cfg = load_snapshot(root, run_id)
+    loaded = load_plan(root, run_id)
+    cfg = loaded["config"]
+    selection = cfg["selection"]
+    work_items = loaded["work_items"]["items"]
     from core.config import assert_frozen
 
     assert_frozen(cfg)
     if resume and not check_only:
-        completed = {}
-        current = RunEvidence(root, run_id).read()
-        for key, task in selection["tasks"].items():
-            result_path = root / "runs" / run_id / "rollout/tasks" / task["instance_id"] / "result.json"
+        evidence = RunEvidence(root, run_id).read()
+        settled = {}
+        for item in work_items:
+            result_path = root / "runs" / run_id / "rollout/tasks" / item["instance_id"] / "repetitions" / item["repetition_id"] / "result.json"
             if not result_path.exists():
-                break
+                continue
             result = read_json(result_path)
-            if result["exit_status"] not in TERMINAL:
-                break
-            row = current["rollouts"][result["rollout_id"]]
-            if row["run_id"] != run_id or row["task_key"] != key:
-                raise ValueError("Completed result identity changed")
-            for kind in ("trajectory", "patch"):
-                if sha256(root / row[kind + "_path"]) != row[kind + "_sha256"]:
-                    raise ValueError("Completed canonical bytes changed")
-            completed[key] = result
-        else:
-            if completed:
-                write_json(root / "runs" / run_id / "progress.json", completed)
-                update_status(root / "runs" / run_id / "status.json", "complete", failed=[])
-                return completed
+            if result.get("sample_key") != item["sample_key"]:
+                raise ValueError("Completed sample identity changed")
+            if result.get("exit_status") in TERMINAL or result.get("exit_status") == "infrastructure_exhausted":
+                rid = result.get("rollout_id")
+                if rid and rid in evidence["rollouts"]:
+                    row = evidence["rollouts"][rid]
+                    for kind in ("trajectory", "patch"):
+                        if sha256(root / row[kind + "_path"]) != row[kind + "_sha256"]:
+                            raise ValueError("Completed canonical bytes changed")
+                settled[item["sample_key"]] = result
+        if len(settled) == len(work_items):
+            write_json(root / "runs" / run_id / "progress.json", {"schema_version": 2, "samples": settled})
+            update_status(root / "runs" / run_id / "status.json", "complete", failed=[])
+            return settled
 
     verify_model(cfg)
     run = root / "runs" / run_id
@@ -308,20 +322,45 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
             if check_only:
                 update_status(run / "status.json", "validated")
                 return {"startup": "passed"}
+            pending = iter(work_items)
+            running = {}
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=cfg["execution"]["rollout_workers"]
             ) as pool:
-                futures = {
-                    pool.submit(admitted_task, cfg, run_id, key, task, factory, runtime): key
-                    for key, task in selection["tasks"].items()
-                }
-                for future in concurrent.futures.as_completed(futures):
-                    key = futures[future]
-                    try:
-                        outcomes[key] = future.result()
-                    except Exception as exc:  # noqa: BLE001 -- retain cohort progress on worker errors
-                        outcomes[key] = {"exit_status": "WorkerFailure", "error": repr(exc)}
-                    write_json(run / "progress.json", outcomes)
+                def fill():
+                    while len(running) < cfg["execution"]["rollout_workers"]:
+                        try:
+                            item = next(pending)
+                        except StopIteration:
+                            return
+                        task = selection["tasks"][item["task_key"]]
+                        if item["sample_key"] in outcomes:
+                            continue
+                        future = pool.submit(
+                            admitted_task, cfg, run_id, item["task_key"], task, factory, runtime,
+                            sample_from_item({**item, "run_id": run_id}),
+                        )
+                        running[future] = item
+
+                fill()
+                while running:
+                    finished, _ = concurrent.futures.wait(
+                        running, return_when=concurrent.futures.FIRST_COMPLETED
+                    )
+                    for future in finished:
+                        item = running.pop(future)
+                        try:
+                            value = future.result()
+                        except Exception as exc:  # noqa: BLE001 -- retain cohort progress on worker errors
+                            value = {
+                                "sample_key": item["sample_key"],
+                                "repetition_id": item["repetition_id"],
+                                "exit_status": "WorkerFailure",
+                                "error": repr(exc),
+                            }
+                        outcomes[item["sample_key"]] = value
+                    write_json(run / "progress.json", {"schema_version": 2, "samples": outcomes})
+                    fill()
         if cfg["capture"]["enabled"] and cfg["capture"]["export"]["enabled"]:
             from enrichment.online_trace import finalize_token_events
 
@@ -342,7 +381,7 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
                         from runtime.serving.errors import CaptureError
 
                         raise CaptureError(str(exc)) from exc
-        failed = [k for k, v in outcomes.items() if v["exit_status"] not in TERMINAL]
+        failed = [k for k, v in outcomes.items() if v.get("exit_status") not in TERMINAL]
         update_status(run / "status.json", "failed" if failed else "complete", failed=failed)
         return outcomes
     except BaseException as exc:
@@ -352,7 +391,7 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
         factory.cleanup_owned(run_id)
 
 
-def admitted_task(cfg, run_id, key, task, factory, runtime):
+def admitted_task(cfg, run_id, key, task, factory, runtime, sample=None):
     controller = runtime.get("capture_controller")
     if controller and controller.spool:
         options = cfg["capture"]["export"]
@@ -361,4 +400,4 @@ def admitted_task(cfg, run_id, key, task, factory, runtime):
             options["spool_low_watermark"],
             options["upload_max_elapsed_seconds"],
         )
-    return run_task(cfg, run_id, key, task, factory, runtime)
+    return run_task(cfg, run_id, key, task, factory, runtime, sample=sample)

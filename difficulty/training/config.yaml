@@ -6,8 +6,8 @@ mlp_probe:
   split_receipt_sha256: 447398a53bf8f63feb24e80d6413270b096578a191c99896b78594efdf9abb17
   split_strategy: event_random_v1
   split_seed: 42
-  validation_fraction: 0.2
-  test_fraction: 0.2
+  validation_fraction: 0.15
+  test_fraction: 0.15
   expected_tasks: 106
   expected_rollouts: 106
   expected_samples: 6104
