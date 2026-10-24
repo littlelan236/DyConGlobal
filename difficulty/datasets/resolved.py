@@ -69,7 +69,8 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
                 reasoning_totals[rid] = reasoning_totals.get(rid, 0) + sum(
                     max(0, int(block['end']) - int(block['start'])) for block in blocks
                 )
-                complete_reasoning.setdefault(rid, set()).add(request.get('message_index'))
+                if request.get('is_action_response') is True:
+                    complete_reasoning.setdefault(rid, set()).add(request.get('message_index'))
     destination = root / 'difficulty/datasets' / dataset_id
     with file_lock(root / 'state' / f'resolved-selection-{dataset_id}.lock', nonblocking=True):
         if destination.exists():
