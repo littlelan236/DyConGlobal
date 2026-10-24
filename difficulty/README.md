@@ -158,3 +158,8 @@ hidden `[samples, selected_layers, hidden_size]` 展平为 `[samples, selected_l
 ## 来源运行与轨迹选择
 
 新建 online index / resolved dataset 必须先确定来源 run，再以 `--rollout-id` 或 `--rollout-list` 筛选该 run 内轨迹；不再查询 Catalog 的 rollout 列表。共享实现是 `difficulty.datasets.selection.select_run(root, source_run, rollout_ids, rollout_list)`。跨 run 数据通过独立冻结数据集后 compose。已有 receipt 绑定的数据集继续独立验证，不依赖实时 Catalog 或其他 run 的评测状态。命令示例见 `docs/ENTRYPOINTS.md`。
+
+
+## Trajectory fraction labels
+
+Create a new resolved dataset with `--label-normalization trajectory_fraction` to derive causal, per-trajectory labels without rewriting raw labels. For a trajectory with `T` assistant steps and current close step `s`, the step target is `(T-s)/T`; the reasoning target is `remaining_reasoning_tokens_after / sum(finalized_reasoning_block_lengths)`. Fraction targets are `submission_remaining_steps_fraction` and `submission_remaining_reasoning_tokens_fraction`; train them through the existing Ridge, MLP, or Ridge+MLP commands. Existing datasets and checkpoints remain immutable.

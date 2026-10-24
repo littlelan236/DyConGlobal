@@ -7,6 +7,7 @@ import numpy as np
 
 from core.io import hash_json, owned_path, read_json, sha256
 from difficulty.models.ridge_grid import load_model
+from difficulty.probe_config import target_transform
 
 RIDGE_MODEL_KEYS = ('coef', 'intercept', 'feature_mean', 'feature_scale')
 
@@ -33,7 +34,7 @@ def read_publication(path, *, target, site, width, fingerprint, live=True):
     model = load_model(model_path)
     with np.load(model_path, allow_pickle=False) as archive:
         expected = {'target': target, 'layer': site, 'model_kind': 'ridge',
-                    'target_transform': 'log1p', 'model_fingerprint': fingerprint,
+                    'target_transform': target_transform(target, ridge=True), 'model_fingerprint': fingerprint,
                     'input_width': width}
         if len(model['coef']) != width or any(
                 key not in archive or archive[key].item() != value for key, value in expected.items()):

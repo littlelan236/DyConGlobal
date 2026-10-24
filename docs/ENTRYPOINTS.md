@@ -625,3 +625,8 @@ Run creation and execution still use the normal dycon commands. The serving mana
 - Other execution failures remain `status=infra_error`, `resolved=null`, `failure_type=other_error` (or the more specific non-network classification).
 
 The summary reports `network_retries`; retrying infrastructure does not create a new rollout, repetition, or canonical trajectory.
+
+
+### Trajectory normalization
+
+Use `dycon difficulty-dataset resolved NEW_DATASET --source-run RUN --index-id INDEX --label-normalization trajectory_fraction`. Train fraction targets through the existing `difficulty-ridge`, `difficulty-mlp`, and `difficulty-ridge-mlp` commands using `submission_remaining_steps_fraction` and `submission_remaining_reasoning_tokens_fraction`. Raw labels and existing checkpoints remain unchanged.

@@ -33,6 +33,8 @@ def load_selection(cfg, settings):
             raise ValueError(f"Frozen selection file changed: {name}")
     verify_receipt(cfg["project_root"], source, expected_sha256=settings.dataset_receipt_sha256)
     selection = read_json(source / "rollouts.json")
+    dataset_meta = read_json(source / "dataset.json") if (source / "dataset.json").is_file() else {}
+    fraction_labels = dataset_meta.get('label_normalization') == 'trajectory_fraction'
     samples = [json.loads(line) for line in (source / "samples.jsonl").read_text().splitlines() if line]
     rollouts = selection["rollouts"]
     task_commits = defaultdict(set)
@@ -102,6 +104,19 @@ def load_selection(cfg, settings):
                 raise ValueError("Missing/nonfinite/negative submission label")
         if sample["remaining_steps_to_submission"] != row["canonical_valid_assistant_steps"] - step:
             raise ValueError("Step label does not match canonical step count")
+        if fraction_labels:
+            for key in ("remaining_steps_fraction", "remaining_reasoning_tokens_fraction"):
+                value = sample.get(key)
+                if type(value) not in (int, float) or not np.isfinite(value) or not 0 <= value <= 1:
+                    raise ValueError("Missing/nonfinite/out-of-range normalized submission label")
+            expected = (row["canonical_valid_assistant_steps"] - step) / row["canonical_valid_assistant_steps"]
+            if not np.isclose(sample["remaining_steps_fraction"], expected):
+                raise ValueError("Normalized step label does not match canonical step count")
+            total = row.get('total_reasoning_tokens')
+            if type(total) is not int or total <= 0 or not np.isclose(
+                    sample['remaining_reasoning_tokens_fraction'],
+                    sample['remaining_reasoning_tokens_to_submission'] / total):
+                raise ValueError('Normalized reasoning label does not match trajectory denominator')
         identity = (sample["rollout_id"], step)
         if identity in seen:
             raise ValueError("Multiple close samples for the same action")

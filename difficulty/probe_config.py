@@ -12,11 +12,31 @@ DEFAULT_TARGETS = (
 TARGETS = DEFAULT_TARGETS + (
     "submission_remaining_steps_log1p",
     "submission_remaining_reasoning_tokens_linear",
+    "submission_remaining_steps_fraction",
+    "submission_remaining_reasoning_tokens_fraction",
 )
-LABELS = {target: ('remaining_steps_to_submission' if 'steps' in target
-                   else 'remaining_reasoning_tokens_to_submission') for target in TARGETS}
-# MLP supports each step/reasoning target in either transformed space.
-MLP_TARGETS = TARGETS
+LABELS = {
+    'submission_remaining_steps_linear': 'remaining_steps_to_submission',
+    'submission_remaining_steps_log1p': 'remaining_steps_to_submission',
+    'submission_remaining_reasoning_tokens_linear': 'remaining_reasoning_tokens_to_submission',
+    'submission_remaining_reasoning_tokens_log1p': 'remaining_reasoning_tokens_to_submission',
+    'submission_remaining_steps_fraction': 'remaining_steps_fraction',
+    'submission_remaining_reasoning_tokens_fraction': 'remaining_reasoning_tokens_fraction',
+}
+
+
+def target_transform(target, *, ridge=False):
+    if target.endswith('_log1p'):
+        return 'log1p'
+    if target.endswith('_fraction'):
+        return 'identity'
+    return 'identity' if ridge else 'linear'
+
+MLP_TARGETS = DEFAULT_TARGETS + (
+    'submission_remaining_steps_log1p',
+    'submission_remaining_reasoning_tokens_linear',
+)
+MLP_ALLOWED_TARGETS = TARGETS
 MLP_DEFAULT_TARGETS = (
     'submission_remaining_steps_log1p',
     'submission_remaining_reasoning_tokens_log1p',
@@ -77,8 +97,8 @@ class MLPProbe(BaseModel):
             if digest is not None and not re.fullmatch('[0-9a-f]{64}', digest):
                 raise ValueError('Invalid frozen receipt SHA-256')
         if not self.targets or len(self.targets) != len(set(self.targets)) or any(
-                target not in MLP_TARGETS for target in self.targets):
-            raise ValueError('MLP targets must be unique members of the four submission targets')
+                target not in MLP_ALLOWED_TARGETS for target in self.targets):
+            raise ValueError('MLP targets must be unique supported submission targets')
         if self.validation_fraction + self.test_fraction >= 1:
             raise ValueError('MLP split fractions must leave training samples')
         if not re.fullmatch(r'cpu|auto|cuda(?::[0-9]+)?', self.device):
@@ -95,7 +115,7 @@ class RidgeMLPProbe(MLPProbe):
     def valid_publications(self):
         if set(self.ridge_publications) != set(self.targets) or any(
                 not path.strip() for path in self.ridge_publications.values()):
-            raise ValueError('Ridge+MLP requires a publication manifest for each log1p target')
+            raise ValueError('Ridge+MLP requires a publication manifest for each target')
         return self
 
 

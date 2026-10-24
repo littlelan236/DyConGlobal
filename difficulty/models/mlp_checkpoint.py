@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from core.io import identifier, owned_path, read_json, sha256, write_json
-from difficulty.probe_config import MLP_TARGETS
+from difficulty.probe_config import MLP_ALLOWED_TARGETS, target_transform
 
 MODEL_KIND = 'ffn_mlp'
 ARCHITECTURE_ID = 'layernorm-ffn-2block-v1'
@@ -34,9 +34,11 @@ def _validate(metadata, state, expected=None):
     if (metadata.get('schema_version') != 1 or architecture_id is None
             or metadata.get('architecture_id') != architecture_id
             or metadata.get('feature_schema') != FEATURE_SCHEMA
-            or metadata.get('target') not in MLP_TARGETS
-            or metadata.get('target_transform') != (
-                'log1p' if metadata.get('target', '').endswith('_log1p') else 'linear')
+            or metadata.get('target') not in MLP_ALLOWED_TARGETS
+            or metadata.get('target_transform') not in {
+                target_transform(metadata.get('target', '')),
+                'linear' if metadata.get('target', '').endswith('_fraction') else target_transform(metadata.get('target', '')),
+            }
             or metadata.get('fit_scope') != 'train'
             or metadata.get('normalization') != 'layernorm'
             or metadata.get('endpoint') != 'submission'):
@@ -165,7 +167,7 @@ def verify_attempt_models(directory, attempt, receipt):
     contract = attempt['model_contract']
     selected = read_json(directory / 'selected.json')
     targets = contract['targets']
-    if (not targets or len(targets) != len(set(targets)) or not set(targets) <= set(MLP_TARGETS)
+    if (not targets or len(targets) != len(set(targets)) or not set(targets) <= set(MLP_ALLOWED_TARGETS)
             or selected.get('selection_metric') != 'validation_mse'
             or selected.get('selection_split') != 'validation'
             or set(selected['targets']) != set(targets)):
@@ -200,8 +202,7 @@ def verify_attempt_models(directory, attempt, receipt):
                 raise ValueError('MLP training config snapshot disagrees with attempt')
         expected = {key: attempt[key] for key in IDENTITY_KEYS}
         expected.update(model_kind=contract['model_kind'], architecture_id=contract['architecture_id'], feature_schema=FEATURE_SCHEMA,
-                        target=target, target_transform=(
-                            'log1p' if target.endswith('_log1p') else 'linear'), fit_scope='train',
+                        target=target, target_transform=target_transform(target), fit_scope='train',
                         architecture=contract['architecture'], input_spec=contract['input_spec'],
                         best_epoch=winner['best_epoch'], epochs_trained=winner['epochs_trained'])
         if ridge_plus_mlp:

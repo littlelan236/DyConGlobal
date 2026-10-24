@@ -17,7 +17,7 @@ from difficulty.evaluation.metrics import regression_metrics
 from difficulty.models.estimators import FFNMLEstimator, FrozenRidgePlusFFNEstimator, inverse_target, resolve_device, transform_target
 from difficulty.models.mlp_checkpoint import (ARCHITECTURE_ID, FEATURE_SCHEMA, MODEL_KIND,
     RIDGE_MLP_ARCHITECTURE, RIDGE_MLP_KIND, save_checkpoint)
-from difficulty.probe_config import LABELS, MLPProbe, RidgeMLPProbe
+from difficulty.probe_config import LABELS, MLPProbe, RidgeMLPProbe, target_transform
 from difficulty.receipts import verify_receipt
 from difficulty.training.artifacts import finish_attempt
 from difficulty.training.splits import create_split, load_split
@@ -168,7 +168,7 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
         'model_contract': {'model_kind': kind, 'architecture_id': architecture_id,
                            'feature_schema': FEATURE_SCHEMA, 'input_spec': spec, 'architecture': architecture,
                            'targets': settings.targets, 'target_transforms': {
-                               target: ('log1p' if target.endswith('_log1p') else 'linear')
+                               target: (target_transform(target))
                                for target in settings.targets}},
         'config': cfg, 'settings': settings.model_dump(), 'input': evidence, 'code': before_code,
         'environment': environment, 'actual_device': actual_device,
@@ -268,7 +268,7 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
             metadata.update(schema_version=1, model_kind=kind, architecture_id=architecture_id,
                             feature_schema=FEATURE_SCHEMA, input_spec=spec, architecture=architecture,
                             target=target, target_label=LABELS[target], target_transform=(
-                                'log1p' if target.endswith('_log1p') else 'linear'), endpoint='submission',
+                                target_transform(target)), endpoint='submission',
                             normalization='layernorm', fit_scope='train', seed=settings.seed,
                             best_epoch=model.best_epoch_, epochs_trained=model.epochs_trained_,
                             scheduler=settings.scheduler.model_dump(),

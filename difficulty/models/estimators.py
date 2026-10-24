@@ -4,7 +4,7 @@ from typing import Literal
 
 import numpy as np
 
-TargetName = Literal["remaining_reasoning_tokens_log1p", "remaining_steps_log1p", "remaining_steps_linear"]
+TargetName = Literal["remaining_reasoning_tokens_log1p", "remaining_steps_log1p", "remaining_steps_linear", "submission_remaining_steps_fraction", "submission_remaining_reasoning_tokens_fraction"]
 
 
 def flatten_features(x):

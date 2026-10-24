@@ -15,7 +15,7 @@ from core.locking import exclusive_artifact
 from difficulty.datasets.submission import load_selection, prepare_cache
 from difficulty.models.estimators import inverse_target, transform_target
 from difficulty.models.ridge_grid import RidgeGrid, load_model, predict_model, save_model
-from difficulty.probe_config import LABELS, RidgeProbe
+from difficulty.probe_config import LABELS, RidgeProbe, target_transform
 from difficulty.training.artifacts import finish_attempt
 from difficulty.training.splits import create_split, load_split
 
@@ -225,7 +225,7 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None)
                   "model_contract": {"model_kind": "ridge", "architecture_id": "linear-ridge-v1",
                       "feature_schema": "public-hidden-last-token-v1", "input_width": 4096,
                       "layer_policy": settings.layers, "targets": settings.targets,
-                      "target_transforms": {target: "log1p" if target.endswith("_log1p") else "identity"
+                      "target_transforms": {target: target_transform(target, ridge=True)
                                             for target in settings.targets}},
                   "mode": mode, "created_at": now(), "fit_scope": "train",
                   "config": cfg, "settings": settings.model_dump(), "input": evidence,
@@ -281,7 +281,7 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None)
                                   "public_sites": [layer], "native_site": layer if layer < 31 else 32,
                                   "feature_transform": "single-site-vector", "dtype": "float32", "width": 4096}
                     save_checkpoint(output / relative, model, {"target": target, "target_transform":
-                               "log1p" if target.endswith("_log1p") else "identity",
+                               target_transform(target, ridge=True),
                                "model_kind": "ridge", "architecture_id": "linear-ridge-v1",
                                "feature_schema": "public-hidden-last-token-v1",
                                "input_spec_json": json.dumps(input_spec, sort_keys=True),
@@ -330,7 +330,7 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None)
                           "native_site": winner["layer"] if winner["layer"] < 31 else 32,
                           "feature_transform": "single-site-vector", "dtype": "float32", "width": 4096}
             save_checkpoint(output / refit_relative, refit_model, {"target": target, "target_transform":
-                       "log1p" if target.endswith("_log1p") else "identity",
+                       target_transform(target, ridge=True),
                        "model_kind": "ridge", "architecture_id": "linear-ridge-v1",
                        "feature_schema": "public-hidden-last-token-v1",
                        "input_spec_json": json.dumps(input_spec, sort_keys=True),

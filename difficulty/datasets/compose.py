@@ -19,6 +19,7 @@ def compose_datasets(root, dataset_id, source_dataset_ids):
     sources, rollouts, samples = [], [], []
     rollout_ids, sample_ids = set(), set()
     eligibilities = set()
+    label_modes = set()
     for source_id in source_dataset_ids:
         source = root / "difficulty/datasets" / source_id
         receipt_path = source / "receipt.json"
@@ -30,6 +31,8 @@ def compose_datasets(root, dataset_id, source_dataset_ids):
             raise ValueError(f"Source is not a training dataset: {source_id}")
         source_rollouts = read_json(rollout_path).get("rollouts", [])
         source_samples = [json.loads(line) for line in sample_path.read_text(encoding="utf-8").splitlines() if line]
+        metadata = read_json(source / 'dataset.json') if (source / 'dataset.json').is_file() else {}
+        label_modes.add(metadata.get('label_normalization', 'raw'))
         if not source_rollouts or not source_samples:
             raise ValueError(f"Source dataset is empty: {source_id}")
         if {row["rollout_id"] for row in source_samples} != {row["rollout_id"] for row in source_rollouts}:
@@ -58,6 +61,8 @@ def compose_datasets(root, dataset_id, source_dataset_ids):
                             run_ids))})
     if len({row["sample_id"] for row in samples}) != len(samples):
         raise ValueError("Duplicate sample ID")
+    if len(label_modes) != 1:
+        raise ValueError('Cannot compose datasets with different label normalization modes')
     fingerprints = {row['model_fingerprint'] for row in rollouts if row.get('model_fingerprint')}
     if len(fingerprints) > 1:
         raise ValueError('Cannot compose incompatible hidden model fingerprints')
@@ -91,6 +96,10 @@ def compose_datasets(root, dataset_id, source_dataset_ids):
             "sample_order_sha256": hash_json([row["sample_id"] for row in samples]),
             "feature_schema": "public-hidden-last-token-v1", "source_datasets": sources,
             "label_fields": ["remaining_steps_to_submission", "remaining_reasoning_tokens_to_submission"],
+            "label_normalization": next(iter(label_modes)),
+            **({'normalized_label_fields': ['remaining_steps_fraction',
+                                             'remaining_reasoning_tokens_fraction']}
+               if next(iter(label_modes)) == 'trajectory_fraction' else {}),
         })
         files = {path.name: sha256(path) for path in sorted(destination.iterdir()) if path.is_file()}
         receipt = {"schema_version": 1, "state": "complete", "eligibility":

@@ -97,6 +97,7 @@ def main(argv=None):
     q.add_argument("--index-id", required=True)
     q.add_argument("--rollout-id", action="append", default=[])
     q.add_argument("--rollout-list", type=Path)
+    q.add_argument("--label-normalization", choices=["raw", "trajectory_fraction"], default="raw")
     p = sub.add_parser("difficulty-split", help="Freeze a reusable dataset split")
     p.add_argument("dataset_id")
     p.add_argument("split_id")
@@ -406,7 +407,8 @@ def main(argv=None):
             result = compose_datasets(cfg["project_root"], a.dataset_id, a.source_dataset)
         else:
             from difficulty.datasets.resolved import build_resolved_selection
-            result = build_resolved_selection(cfg["project_root"], a.source_run, a.index_id, a.dataset_id, a.rollout_id, a.rollout_list)
+            result = build_resolved_selection(cfg["project_root"], a.source_run, a.index_id, a.dataset_id,
+                                              a.rollout_id, a.rollout_list, a.label_normalization)
     elif a.command == "difficulty-split":
         from difficulty.training.splits import create_split
         result = create_split(cfg["project_root"], a.dataset_id, a.split_id,

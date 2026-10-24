@@ -18,9 +18,26 @@ from core.locking import file_lock
 from difficulty.datasets.paths import dataset_directory
 
 
-def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids=(), rollout_list=None):
+def trajectory_fraction_labels(*, total_steps, step, remaining_reasoning_tokens, total_reasoning_tokens):
+    """Return causal remaining-work fractions for one close sample."""
+    if type(total_steps) is not int or total_steps <= 0 or not 0 <= step < total_steps:
+        raise ValueError('Invalid canonical step denominator')
+    if type(total_reasoning_tokens) is not int or total_reasoning_tokens <= 0:
+        raise ValueError('Reasoning denominator must be positive')
+    if type(remaining_reasoning_tokens) not in (int, float) or not 0 <= remaining_reasoning_tokens <= total_reasoning_tokens:
+        raise ValueError('Invalid remaining reasoning label')
+    return {
+        'remaining_steps_fraction': (total_steps - step) / total_steps,
+        'remaining_reasoning_tokens_fraction': remaining_reasoning_tokens / total_reasoning_tokens,
+    }
+
+
+def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids=(), rollout_list=None,
+                             label_normalization='raw'):
     root = Path(root).resolve()
     source_run, dataset_id = map(identifier, (source_run, dataset_id))
+    if label_normalization not in {'raw', 'trajectory_fraction'}:
+        raise ValueError('Unknown label normalization')
     run = root / 'runs' / source_run
     index_path = dataset_directory({'project_root': str(root)}, index_id) / 'index.json'
     trace = run / 'enrichment/online'
@@ -42,6 +59,17 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
               and r['resolved'] is True and not r['provenance'].get('quarantined')}
     if not chosen:
         raise ValueError('No resolved trajectories in the specified producer run')
+    reasoning_totals = {}
+    complete_reasoning = {}
+    if label_normalization == 'trajectory_fraction':
+        for request in requests.values():
+            rid = request.get('rollout_id')
+            if rid in chosen:
+                blocks = request.get('blocks', [])
+                reasoning_totals[rid] = reasoning_totals.get(rid, 0) + sum(
+                    max(0, int(block['end']) - int(block['start'])) for block in blocks
+                )
+                complete_reasoning.setdefault(rid, set()).add(request.get('message_index'))
     destination = root / 'difficulty/datasets' / dataset_id
     with file_lock(root / 'state' / f'resolved-selection-{dataset_id}.lock', nonblocking=True):
         if destination.exists():
@@ -76,6 +104,8 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
                 'canonical_exit_status': 'Submitted', 'canonical_valid_assistant_steps': len(steps),
                 'source_kind': 'online_close', 'hidden_root': index['hidden_root'],
                 'source_files': {str(report): evaluation['report_sha256']}}
+            if label_normalization == 'trajectory_fraction':
+                rollouts[rid]['total_reasoning_tokens'] = reasoning_totals.get(rid, 0)
         for event in index['samples']:
             rid = event['rollout_id']
             if rid not in catalog['rollouts']:
@@ -104,13 +134,26 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
                 raise ValueError('Remaining-step label differs from canonical action suffix')
             if event['anchor'] != 'think_close' or event['alignment_status'] != 'exact':
                 raise ValueError('Requires exact action-close hidden evidence')
-            samples.append({**event, 'repo': row['repo'], 'instance_id': row['instance_id'],
+            sample = {**event, 'repo': row['repo'], 'instance_id': row['instance_id'],
                 'source_kind': row['source_kind'], 'task_group': row['repo'] + '::' + row['instance_id'],
                 'agent_step': step, 'occurrence': 0, 'endpoint': 'submission',
                 'submission_status': 'submitted', 'both_targets_available': True,
                 'hidden_root': index['hidden_root'], 'hidden_sha256': event['sha256'],
                 'remaining_steps_to_submission': event['labels']['remaining_steps'],
-                'remaining_reasoning_tokens_to_submission': event['labels']['remaining_reasoning_tokens']})
+                'remaining_reasoning_tokens_to_submission': event['labels']['remaining_reasoning_tokens']}
+            if label_normalization == 'trajectory_fraction':
+                total = reasoning_totals.get(rid, 0)
+                if total <= 0 or complete_reasoning.get(rid, set()) != set(
+                        steps_by_id[rid]):
+                    excluded.append({'sample_id': event['sample_id'],
+                                     'reason': 'incomplete_reasoning_denominator' if total > 0
+                                     else 'zero_reasoning_denominator'})
+                    continue
+                sample.update(trajectory_fraction_labels(
+                    total_steps=len(steps), step=step,
+                    remaining_reasoning_tokens=event['labels']['remaining_reasoning_tokens'],
+                    total_reasoning_tokens=total))
+            samples.append(sample)
         used = {s['rollout_id'] for s in samples}
         omitted = sorted(set(chosen) - used)
         selected = [row for rid, row in sorted(rollouts.items()) if rid in used]
@@ -131,12 +174,19 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
             'rollouts': len(selected), 'tasks': len({r['task_key'] for r in selected}),
             'samples': len(samples), 'excluded': dict(Counter(s['reason'] for s in excluded))}
         write_json(destination / 'summary.json', summary)
-        write_json(destination / 'dataset.json', {
+        dataset_meta = {
             'schema_version': 1, 'dataset_id': dataset_id, 'kind': 'submission_training_selection',
             'source_run_ids': [source_run], 'eligibility': 'resolved_only',
             'feature_schema': 'public-hidden-last-token-v1', 'anchor': 'think_close',
             'label_fields': ['remaining_steps_to_submission', 'remaining_reasoning_tokens_to_submission'],
-        })
+        }
+        if label_normalization == 'trajectory_fraction':
+            dataset_meta.update(label_normalization='trajectory_fraction',
+                                label_denominators={'steps': 'canonical_valid_assistant_steps',
+                                                    'reasoning_tokens': 'sum(finalized_reasoning_block_lengths)'},
+                                normalized_label_fields=['remaining_steps_fraction',
+                                                         'remaining_reasoning_tokens_fraction'])
+        write_json(destination / 'dataset.json', dataset_meta)
         write_json(destination / 'receipt.json', {'schema_version': 1, 'state': 'complete',
             'eligibility': 'resolved_only', 'source_run_id': source_run,
             'created_at': now(), 'files': {p.name: sha256(p) for p in sorted(destination.iterdir())
@@ -153,8 +203,10 @@ def main():
     p.add_argument('--dataset-id', required=True)
     p.add_argument('--rollout-id', action='append', default=[])
     p.add_argument('--rollout-list', type=Path)
+    p.add_argument('--label-normalization', choices=['raw', 'trajectory_fraction'], default='raw')
     a = p.parse_args()
-    print(json.dumps(build_resolved_selection(a.root, a.source_run, a.index_id, a.dataset_id, a.rollout_id, a.rollout_list), indent=2))
+    print(json.dumps(build_resolved_selection(a.root, a.source_run, a.index_id, a.dataset_id,
+                                              a.rollout_id, a.rollout_list, a.label_normalization), indent=2))
 
 
 if __name__ == '__main__':
