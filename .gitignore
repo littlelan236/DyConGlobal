@@ -37,6 +37,7 @@ Thumbs.db
 desktop.ini
 
 # Run-local products, machine state, external assets and isolated history
+# Includes config-revisions and rollout/operator-retries audit evidence.
 /runs/**
 /state/**
 /isolated/
@@ -51,7 +52,7 @@ desktop.ini
 /.migration/
 /.cache/
 /tmp/
-/temp/**
+/temp/
 /capture/**
 /online/**
 
@@ -143,6 +144,9 @@ desktop.ini
 *.sqlite-wal
 *.sqlite3-shm
 *.sqlite3-wal
+*.sqlite-journal
+*.sqlite3-journal
+*.db-journal
 *.db-shm
 *.db-wal
 

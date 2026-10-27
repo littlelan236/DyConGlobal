@@ -76,7 +76,10 @@ class DyConCapturePlugin:
 
         capacity = max(128, self.parallel_options.get("max_inflight_branches", 16) * 4)
         self.wait_lane = ExecutionLane("dycon-admission", 16, capacity)
-        self.receipt_lane = ExecutionLane("dycon-receipt", 4, capacity)
+        self.receipt_workers = int(os.environ.get("DYCON_CAPTURE_RECEIPT_WORKERS", "4"))
+        if not 1 <= self.receipt_workers <= 128:
+            raise ValueError("Capture receipt workers must be in [1, 128]")
+        self.receipt_lane = ExecutionLane("dycon-receipt", self.receipt_workers, max(capacity, self.receipt_workers))
         self.publish_lane = ExecutionLane("dycon-publish", 1, 4)
         self.control_lane = ExecutionLane("dycon-control", 2, capacity)
         if self.export_options.get("enabled", True) and self.export_options.get("spool_root"):
@@ -275,6 +278,8 @@ class DyConCapturePlugin:
                 "layers": self.layers,
                 "stream": STREAM,
                 "rows_published": self.rows_published,
+                "control_seconds": self.control_seconds,
+                "receipt_workers": self.receipt_workers,
                 "filtered_events": self.filtered_events,
                 "execution_lanes": {"wait": self.wait_lane.status(), "receipt": self.receipt_lane.status(),
                                     "publish": self.publish_lane.status(), "control": self.control_lane.status()},

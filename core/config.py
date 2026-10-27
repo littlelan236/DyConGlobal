@@ -257,6 +257,7 @@ class Capture(Strict):
     control_host: str = "127.0.0.1"
     control_port: int = Field(default=0, ge=0, le=65535)
     control_seconds: int = Field(default=30, gt=0)
+    receipt_workers: int = Field(default=4, ge=1, le=128)
     finalize_seconds: int = Field(default=120, gt=0)
     export: CaptureExport = Field(default_factory=CaptureExport)
 

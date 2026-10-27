@@ -273,6 +273,7 @@ class ServingManager:
                 env["DYCON_CAPTURE_FAILURE_POLICY"] = capture_cfg["failure_policy"]
                 env["DYCON_CAPTURE_FLUSH_SECONDS"] = str(capture_cfg["export"]["flush_interval_ms"] / 1000)
                 env["DYCON_CAPTURE_CONTROL_SECONDS"] = str(capture_cfg["control_seconds"])
+                env["DYCON_CAPTURE_RECEIPT_WORKERS"] = str(capture_cfg.get("receipt_workers", 4))
                 env["DYCON_CAPTURE_PROJECT"] = str(root)
                 env["DYCON_CAPTURE_EXPORT_OPTIONS"] = json.dumps(capture_cfg["export"])
                 env["DYCON_CAPTURE_RESERVE_BYTES"] = str(cfg["images"]["reserve_bytes"])
@@ -313,6 +314,8 @@ class ServingManager:
                         "control_url": self.capture_server.base_url if self.capture_server else None,
                         "graph_mode": capture_cfg.get("graph_mode", "FULL"),
                         "cache_policy": capture_cfg.get("prefix_cache_policy", "safe_boundary"),
+                        "control_seconds": capture_cfg.get("control_seconds", 30),
+                        "receipt_workers": capture_cfg.get("receipt_workers", 4),
                         "token_inventory": self.capture_token_inventory,
                     },
                 },

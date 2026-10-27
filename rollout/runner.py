@@ -384,6 +384,8 @@ def _retry_cursor(cfg, history):
             retry_kind = 'resample'
         elif kind == 'infrastructure_retry':
             retry_kind = 'infrastructure'
+        elif kind == 'operator_retry':
+            retry_kind = 'operator'
     return round_id, retry_kind
 
 
@@ -429,12 +431,16 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
         boundary = _boundary(run, factory)
         if boundary:
             return {**sample.as_dict(), 'exit_status': boundary, 'disposition': 'pending'}
+        from application.execution.failed_retry import retry_index, superseded
+        operator_retries = runtime.get('operator_retries')
+        if operator_retries is None:
+            operator_retries = retry_index(run)
         result_path = work / 'result.json'
         if result_path.exists():
             old = read_json(result_path)
             if old.get('sample_key') != sample.sample_key:
                 raise ValueError('Completed sample identity changed')
-            if sample_settled(cfg, old):
+            if sample_settled(cfg, old) and not superseded(operator_retries, sample.sample_key, old):
                 if sample_accepted(cfg, old):
                     verify_final(cfg['project_root'], run_id, sample.as_dict(), old, RunEvidence(cfg['project_root'], run_id).read())
                 return old
@@ -467,6 +473,9 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
                     raise ValueError('Reserved attempt seed changed')
             outcome_path = out / 'attempt.json'
             result = read_json(outcome_path) if outcome_path.exists() else None
+            if result is not None and superseded(operator_retries, sample.sample_key, result):
+                history.append({**result, 'disposition': 'operator_retry'})
+                continue
             needs_recovery = result is None or result.get('disposition') == 'blocked'
             if context and needs_recovery:
                 recovered = _recover_attempt(cfg, run_id, task, sample, context, out, runtime)
@@ -560,6 +569,8 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
     CURRENT.get().start()
     if counts_recorded(run) or enabled(cfg):
         rebuild_counts(run, loaded['work_items'])
+    from application.execution.failed_retry import retry_index, superseded
+    operator_retries = retry_index(run)
     settled = {}
     evidence = RunEvidence(root, run_id).read()
     if resume and not check_only:
@@ -570,7 +581,7 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
             result = read_json(result_path)
             if result.get('sample_key') != item['sample_key']:
                 raise ValueError('Completed sample identity changed')
-            if sample_settled(cfg, result):
+            if sample_settled(cfg, result) and not superseded(operator_retries, item['sample_key'], result):
                 if sample_accepted(cfg, result):
                     verify_final(root, run_id, item, result, evidence)
                 settled[item['sample_key']] = result
@@ -638,12 +649,15 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
             if check_only:
                 update_status(run / "status.json", "validated")
                 return {"startup": "passed"}
-            pending = deque(item for item in work_items if item['sample_key'] not in settled)
+            # Explicit failed-task reruns go first, ahead of untouched pending tasks.
+            pending = deque(sorted((item for item in work_items if item['sample_key'] not in settled),
+                                   key=lambda item: item['sample_key'] not in operator_retries))
             queued_at = {item['sample_key']: time.monotonic() for item in pending}
             running = {}
             tracker = Progress(run, cfg, work_items, settled)
             runtime['progress_tracker'] = tracker
             runtime['work_items'] = loaded['work_items']
+            runtime['operator_retries'] = operator_retries
             for item in pending:
                 tracker.phases[item['sample_key']] = 'ready'
             tracker._write()

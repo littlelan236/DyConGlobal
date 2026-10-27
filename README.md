@@ -12,6 +12,8 @@ Coding-agent rollout、官方 SWE-bench harness、在线 hidden capture、离线
 | [任务入口与接口约定](docs/ENTRYPOINTS.md) | 全部 CLI、输入格式、环境、token/site/label 契约及能力边界 |
 | [容器环境修复](docs/container-environment-repair-cn.md) | Docker/NAS 镜像、依赖、线程、网络、harness 环境问题的定位与验收 |
 
+指定失败任务的审计重跑使用 `dycon run retry-failed`；流程与证据布局见 [capture 控制修订与失败重跑](docs/CAPTURE-CONTROL-RETRY-CN.md)。已有 run 的参数调整仅走正式离线修订入口，保留变更前快照和 receipt。
+
 从项目根目录用相应 venv 中的 `dycon`，等价于该解释器的 `python -m core.cli`。已有统一入口时不得另建 launcher、直接启动内部 worker，或重写任务选择、模型请求和产物登记逻辑。
 
 ```bash

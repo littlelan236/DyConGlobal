@@ -106,6 +106,10 @@ cd /home/wangtianyi/DyConGlobal
 
 | 恢复 | `run resume RUN_ID [--detach]` | 使用原 selection/config；完成的 terminal task 复用原结果；未完成 task 可能开启新 attempt |
 
+| 指定失败重跑 | `run retry-failed RUN_ID --request-id REQUEST_ID --exit-status STATUS [--task-id INSTANCE_ID] --reason TEXT` | 离线登记匹配的 failed/blocked 样本及审计副本，随后 resume 完整原队列 |
+
+| Capture 控制修订 | `run revise-capture-control RUN_ID --revision-id REVISION_ID --control-seconds SECONDS --receipt-workers N --reason TEXT` | 审计修订 capture 控制预算和 receipt 并发，保留前后快照与 hash 绑定 |
+
 | 状态 | `run status RUN_ID`、`harness status RUN_ID`、`capture status RUN_ID` | 只读投影和各阶段证据；rollout complete 不等于 harness resolved 或 capture complete |
 
 | 协调检查 | `run reconcile RUN_ID` | 当前主要校验 plan/config/tasks 一致性，不能替代所有环境/依赖/GPU 验收 |
@@ -169,6 +173,22 @@ runs/RUN_ID/
 工程外原件/迁移报告：`/home/wangtianyi/dycon-isolation-20261021/baseline-cleanup/`。旧 receipt、权重和 NAS tensor 不改写；转换产生新 ID/receipt，禁止旧路径 alias/fallback。当前 Ridge 配置使用转换后的 `submission-shortest375-20261019-relocated-20261021`。训练输入是显式共享 dataset，训练输出在 `difficulty/checkpoints/ATTEMPT_ID/`；已发布 predictor 仍在 `runtime/parallel-artifacts/PREDICTOR_ID/`。
 
 
+
+### 2.1 显式失败重跑与 capture 控制修订（2026-10-27）
+
+正式入口为 `run retry-failed RUN_ID --request-id REQUEST_ID --exit-status STATUS [--task-id INSTANCE_ID] --reason TEXT`。普通 resume 保留终态失败；这个入口离线登记主动重跑请求，随后由 resume 执行，区别于 LimitsExceeded 自动换 seed 重采样。
+
+仅匹配当前 result.json 的 exit_status 且 disposition 为 failed/blocked 的样本，拒绝已 accepted 的结果。--exit-status 可重复，多个状态取并集；--task-id 可重复，提供时再与 task 范围取交集。不提供按错误文字过滤的参数。不传 task ID 时选择全 run 中匹配状态的样本；多 repetition 按 task×repetition 处理，返回 sample_count。
+
+已有 execution 必须真实退出并完成 cleanup；入口持有目标 run 的运行锁和 supervisor 锁，并检查进程身份、exit/termination 回执。retry-failed 不要求停止其他 run。请求在 `runs/RUN_ID/rollout/operator-retries/REQUEST_ID/request.json`，旧 cursor/attempt 副本在同目录 `before/SAMPLE_KEY/`，事件在 `events/operator-retry-REQUEST_ID.json`；内容绑定 reason、selectors、previous_execution、config/selection hash、样本、原 outcome hash 和 request_sha256。
+
+runner 跳过请求绑定的旧失败 attempt，新 physical attempt 沿用 seed_round/effective_seed，记录 retry_kind=operator；旧 trajectory、patch、capture、agent outcome 保留，新结果结算后更新当前 result cursor。同 request ID、选择条件和 reason 在满足离线检查后幂等；不同参数/原因拒绝，旧请求不持续授权新失败主动重跑。既有 LimitsExceeded/基础设施自动重试策略独立生效。
+
+显式重跑样本优先调度，原有 Pending/Running/中断样本继续按完整冻结 work-items 恢复，selection、task 清单和 repeat_count 不缩减。CaptureError/pending_recovery 若需重新生成，应另行显式选择；Submitted/capture partial 不会仅因 partial 被重跑。
+
+可选资源入口 `run revise-capture-control RUN_ID --revision-id REVISION_ID --control-seconds SECONDS --receipt-workers N --reason TEXT` 只调整 capture.control_seconds 和 capture.receipt_workers，保留 config-revisions 下 before/after/receipt 并重新绑定 config/plan hash。默认兼容值为30秒/4线程，receipt_workers 范围1–128；120秒/16线程是显式设置示例。它不改变模型、generation/seed、GPU/TP、任务或存储预算。当前实现仍有项目级 capture producer 停止检查，可能需要协调停止其他 capture run，不能按 retry-failed 的目标 run 停止范围理解。
+
+命令示例、取消返回码处理和审计检查见 [capture 控制修订与失败重跑](CAPTURE-CONTROL-RETRY-CN.md)。普通 resume 不接收 --set 临时覆盖。
 
 ## 3. 全部业务命令
 

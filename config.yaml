@@ -331,6 +331,8 @@ capture:
   failure_policy: record_and_continue
   control_host: 127.0.0.1
   control_port: 0
+  control_seconds: 120
+  receipt_workers: 16
   export:
     enabled: true
     root: hidden/online

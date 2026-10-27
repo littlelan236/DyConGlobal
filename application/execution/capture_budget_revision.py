@@ -7,7 +7,7 @@ import json
 import yaml
 
 from application.execution.run_plan import load_plan
-from core.config import CaptureExport
+from core.config import Capture, CaptureExport
 from core.io import hash_json, identifier, now, read_json, sha256, write_json
 from core.locking import file_lock
 from core.processes import matches
@@ -16,13 +16,21 @@ from hidden.relocate_spool import assert_no_writers
 FIELDS = ('spool_max_bytes', 'spool_high_watermark', 'spool_low_watermark')
 
 
-def revise_capture_budget(root, run_id, *, revision_id, max_bytes, high, low, reason):
+def revise_capture_budget(root, run_id, *, revision_id, max_bytes=None, high=None, low=None, reason,
+                          control_seconds=None, receipt_workers=None):
     root = Path(root).resolve()
     run_id, revision_id = identifier(run_id), identifier(revision_id)
     if not reason or not reason.strip():
         raise ValueError('Explicit authorization/reason is required')
     run = root / 'runs' / run_id
-    values = dict(zip(FIELDS, (max_bytes, high, low)))
+    control = control_seconds is not None or receipt_workers is not None
+    if control:
+        if control_seconds is None or receipt_workers is None or any(v is not None for v in (max_bytes, high, low)):
+            raise ValueError("Specify control seconds and receipt workers together, without budget values")
+        values = {"control_seconds": control_seconds, "receipt_workers": receipt_workers}
+    else:
+        values = dict(zip(FIELDS, (max_bytes, high, low)))
+    field_prefix = "capture." if control else "capture.export."
     out = run / 'config-revisions' / revision_id
     with ExitStack() as locks:
         for path in [root / 'state/run-locks' / (run_id + '.lock'),
@@ -56,8 +64,12 @@ def revise_capture_budget(root, run_id, *, revision_id, max_bytes, high, low, re
             raise RuntimeError('Incomplete revision audit exists; inspect before recovery')
         old = copy.deepcopy(loaded['config'])
         candidate = copy.deepcopy(old)
-        candidate['capture']['export'].update(values)
-        CaptureExport.model_validate(candidate['capture']['export'])
+        if control:
+            candidate['capture'].update(values)
+            Capture.model_validate(candidate['capture'])
+        else:
+            candidate['capture']['export'].update(values)
+            CaptureExport.model_validate(candidate['capture']['export'])
         candidate['config_hash'] = hash_json({k: v for k, v in candidate.items()
                                             if k not in {'config_hash', 'selection', 'selection_sha256'}})
         plan = copy.deepcopy(loaded['plan'])
@@ -65,7 +77,10 @@ def revise_capture_budget(root, run_id, *, revision_id, max_bytes, high, low, re
                     previous_plan_sha256=loaded['plan']['plan_sha256'])
         plan['plan_sha256'] = hash_json({k: v for k, v in plan.items() if k != 'plan_sha256'})
         human = yaml.safe_load((run / 'config.yaml').read_text())
-        human['capture']['export'].update(values)
+        if control:
+            human['capture'].update(values)
+        else:
+            human['capture']['export'].update(values)
         files = ['resolved-config.json', 'plan.json', 'config.yaml']
         originals = {name: (run / name).read_bytes() for name in files}
         protected = {name: sha256(run / name) for name in
@@ -87,7 +102,7 @@ def revise_capture_budget(root, run_id, *, revision_id, max_bytes, high, low, re
                 temp.write_bytes(value)
                 temp.replace(run / name)
             verified = load_plan(root, run_id)
-            assert verified['config']['capture']['export'] == candidate['capture']['export']
+            assert verified['config']['capture'] == candidate['capture']
             assert all(sha256(run / name) == digest for name, digest in protected.items())
         except BaseException:
             for name, value in originals.items():
@@ -96,7 +111,7 @@ def revise_capture_budget(root, run_id, *, revision_id, max_bytes, high, low, re
             raise
         receipt = {'schema_version': 1, 'run_id': run_id, 'revision_id': revision_id,
                    'reason': reason, 'previous_execution': execution, 'values': values,
-                   'changed_config_fields': ['capture.export.' + name for name in FIELDS],
+                   'changed_config_fields': [field_prefix + name for name in values],
                    'old_config_hash': old['config_hash'], 'new_config_hash': candidate['config_hash'],
                    'old_plan_sha256': loaded['plan']['plan_sha256'], 'new_plan_sha256': plan['plan_sha256'],
                    'before_files': {name: sha256(out / 'before' / name) for name in files},
@@ -104,6 +119,12 @@ def revise_capture_budget(root, run_id, *, revision_id, max_bytes, high, low, re
                    'protected_files_unchanged': protected, 'completed_at': now()}
         write_json(out / 'receipt.json', receipt)
         write_json(run / 'events' / ('config-revision-' + revision_id + '.json'),
-                   {'event': 'run.capture_budget_revised', **receipt})
+                   {'event': 'run.capture_control_revised' if control else 'run.capture_budget_revised', **receipt})
         write_json(out / 'progress.json', {'phase': 'complete', 'completed_at': now()})
         return receipt
+
+
+def revise_capture_control(root, run_id, *, revision_id, control_seconds, receipt_workers, reason):
+    """Use the same offline locking/audit mechanism for capture control resources."""
+    return revise_capture_budget(root, run_id, revision_id=revision_id, reason=reason,
+                                 control_seconds=control_seconds, receipt_workers=receipt_workers)

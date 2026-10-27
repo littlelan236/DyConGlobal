@@ -50,6 +50,18 @@ def main(argv=None):
     q.add_argument("--high", type=float, required=True)
     q.add_argument("--low", type=float, required=True)
     q.add_argument("--reason", required=True)
+    q = run_sub.add_parser("revise-capture-control", help="Audit offline capture control timeout/concurrency revision")
+    q.add_argument("run_id")
+    q.add_argument("--revision-id", required=True)
+    q.add_argument("--control-seconds", type=int, required=True)
+    q.add_argument("--receipt-workers", type=int, required=True)
+    q.add_argument("--reason", required=True)
+    q = run_sub.add_parser("retry-failed", help="Authorize one fresh physical attempt for selected failures")
+    q.add_argument("run_id")
+    q.add_argument("--request-id", required=True)
+    q.add_argument("--exit-status", action="append", required=True)
+    q.add_argument("--task-id", action="append", default=[])
+    q.add_argument("--reason", required=True)
     run_sub.add_parser("list")
     harness = sub.add_parser("harness", help="Prepare, run and inspect run-local harness results")
     harness_sub = harness.add_subparsers(dest="harness_command", required=True)
@@ -518,6 +530,14 @@ def main(argv=None):
             from application.execution.capture_budget_revision import revise_capture_budget
             result = revise_capture_budget(cfg["project_root"], a.run_id, revision_id=a.revision_id,
                                            max_bytes=a.max_bytes, high=a.high, low=a.low, reason=a.reason)
+        elif a.run_command == "revise-capture-control":
+            from application.execution.capture_budget_revision import revise_capture_control
+            result = revise_capture_control(cfg["project_root"], a.run_id, revision_id=a.revision_id,
+                control_seconds=a.control_seconds, receipt_workers=a.receipt_workers, reason=a.reason)
+        elif a.run_command == "retry-failed":
+            from application.execution.failed_retry import request_failed_retry
+            result = request_failed_retry(cfg["project_root"], a.run_id, request_id=a.request_id,
+                exit_statuses=a.exit_status, task_ids=a.task_id, reason=a.reason)
         elif a.run_command == "show":
             result = show_run(cfg["project_root"], a.run_id)
         elif a.run_command == "status":

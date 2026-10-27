@@ -81,6 +81,27 @@ wait 使用进程退出事件，不循环读取 progress。新建 run 时可在�
 
 配置/tasks/plan 在 `runs/RUN_ID/`，任务尝试在 `rollout/tasks/`，canonical trajectory/patch 在 `rollout/trajectories/`、`rollout/patches/`；执行证据在 `execution/attempts/`，日志在 `logs/`。resume 使用原快照，沿已有 task/attempt 结果恢复，不重新选题；不能保证从工具命令或模型请求中间精确继续。
 
+### 4.1 指定失败任务重跑（带审计记录）
+
+普通 resume 保留终态失败。先停止目标 run、核验实际退出和 cleanup，再登记重跑请求：
+
+```bash
+.venvs/runner/bin/dycon run cancel RUN_ID --reason 'explicitly authorized failed-task retry'
+.venvs/runner/bin/dycon run wait RUN_ID
+.venvs/runner/bin/dycon run status RUN_ID
+# 确认 cancellation.termination.cleanup_complete=true 后再继续。
+.venvs/runner/bin/dycon run retry-failed RUN_ID --request-id retry-valueerror-001 --exit-status ValueError --reason 'explicitly authorized ValueError retry'
+# 可选：明确要求重新生成 CaptureError/blocked 时，另行登记并限定 task ID。
+.venvs/runner/bin/dycon run retry-failed RUN_ID --request-id retry-capture-001 --exit-status CaptureError --task-id INSTANCE_ID --reason 'explicitly authorized pending-recovery task regeneration'
+.venvs/runner/bin/dycon run resume RUN_ID --detach
+```
+
+cancel 后 wait 的非零返回值可能是真实 TERM/KILL 退出码，不代表可忽略清理失败；核验实际 exit/cleanup 后才能继续。CaptureError 命令为可选操作。--exit-status 和 --task-id 都可重复；ValueError 是状态筛选，不会只筛 capture_control_unavailable 错误文字。
+
+核对返回的 sample_count/items，零匹配不会新增重跑样本。resume 先调度显式请求，再继续原有未完成样本，完整 task/work-items 清单和已成功结果保留；待采集恢复的 blocked 样本若要重新生成，须明确登记。
+
+请求和旧 cursor/attempt 副本位于 `runs/RUN_ID/rollout/operator-retries/REQUEST_ID/`。每一轮新的主动重跑使用新的 request ID，旧 ID 只幂等返回原请求。可选的120秒/16线程控制修订、seed 与审计细节见 [维护说明](CAPTURE-CONTROL-RETRY-CN.md)。
+
 ## 5. 官方 harness 评分
 
 ```bash
