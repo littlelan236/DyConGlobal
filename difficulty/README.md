@@ -163,3 +163,10 @@ hidden `[samples, selected_layers, hidden_size]` 展平为 `[samples, selected_l
 ## Trajectory fraction labels
 
 Create a new resolved dataset with `--label-normalization trajectory_fraction` to derive causal, per-trajectory labels without rewriting raw labels. For a trajectory with `T` assistant steps and current close step `s`, the step target is `(T-s)/T`; the reasoning target is `remaining_reasoning_tokens_after / sum(finalized_reasoning_block_lengths)`. Fraction targets are `submission_remaining_steps_fraction` and `submission_remaining_reasoning_tokens_fraction`; train them through the existing Ridge, MLP, or Ridge+MLP commands. Existing datasets and checkpoints remain immutable.
+
+
+## Configurable training and TensorBoard
+
+Edit standalone `difficulty/training/config.yaml`, then run `source difficulty/scripts/train.sh` (or pass a YAML path). The source wrapper delegates to `dycon difficulty-train` in the analysis environment and preserves the caller shell via a subshell. Schema 2 selects dataset/split/targets, Ridge, MLP or Ridge+MLP, input site, MLP hidden dimensions/activation/normalization/dropout, optimizer, scheduler and device. Ridge remains closed-form; Ridge+MLP requires one verified published Ridge manifest per target. Every run creates a new immutable attempt.
+
+TensorBoard binds to remote loopback port 6006 by default. On the local PC run `ssh -N -L 16006:127.0.0.1:6006 wangtianyi@10.249.187.9`, then open `http://localhost:16006`. MLP events expose evaluation-mode train/validation MSE per epoch and separate optimization loss; Ridge events use candidate-trial steps. Events are included in the attempt receipt. Check or stop the managed service with `dycon difficulty-tensorboard ATTEMPT_ID --action status|stop`.

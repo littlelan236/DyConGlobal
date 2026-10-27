@@ -16,6 +16,7 @@ from difficulty.datasets.selection import select_run
 from core.io import identifier, now, owned_path, read_json, sha256, write_json
 from core.locking import file_lock
 from difficulty.datasets.paths import dataset_directory
+from enrichment.online_trace import publication_directory
 
 
 def trajectory_fraction_labels(*, total_steps, step, remaining_reasoning_tokens, total_reasoning_tokens):
@@ -40,8 +41,10 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
         raise ValueError('Unknown label normalization')
     run = root / 'runs' / source_run
     index_path = dataset_directory({'project_root': str(root)}, index_id) / 'index.json'
-    trace = run / 'enrichment/online'
     index = read_json(index_path)
+    trace = publication_directory(root, source_run, index.get('publication_id'))
+    if owned_path(root, index.get('label_root', str(trace.relative_to(root)))) != trace:
+        raise ValueError('Online index label root differs from its named publication')
     if index['schema_version'] != 3 or index['dataset_id'] != source_run:
         raise ValueError('Requires a source-run schema 3 online index')
     if sha256(trace / 'receipt.json') != index['source_receipt_sha256']:

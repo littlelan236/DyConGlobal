@@ -5,8 +5,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from catalog.store import Task
 from application.execution.evidence import RunEvidence
+from catalog.store import Task
 from core.io import hash_json, identifier, owned_path, read_json, sha256
 from core.locking import file_lock
 
@@ -88,6 +88,11 @@ def import_rollout(root, spec):
             row["provenance"].update({"sample_key": sample.get("sample_key"),
                                       "repetition_id": sample.get("repetition_id"),
                                       "sample_seed": sample.get("sample_seed")})
+        execution = spec.get("attempt_context")
+        if execution:
+            for key in ("effective_seed", "seed_round", "seed_policy"):
+                row[key] = execution[key]
+            row["provenance"]["attempt_context"] = execution
         run_catalog.register_rollout(rid, row, task)
     return rid
 

@@ -11,8 +11,8 @@ import traceback
 from pathlib import Path
 
 from benchmark_evaluation.harness import install_harness_adapter
-from core.io import hash_json, now, read_json, write_json
-from runtime.containers.factory import ContainerFactory
+from core.io import hash_json, now, read_json, sha256, write_json
+from runtime.containers.factory import ContainerFactory, TaskContext
 
 
 def load_cfg(root: Path, instances: Path, output: Path, nas_root: str = "/VM") -> dict:
@@ -44,7 +44,11 @@ def audit(
     cold_start: bool = False,
     cfg: dict | None = None,
     nas_root: str = "/VM",
+    bootstrap_only: bool = False,
+    repeat_count: int = 1,
 ) -> dict:
+    if repeat_count < 1 or (repeat_count != 1 and not bootstrap_only):
+        raise ValueError("repeat_count must be positive and is supported only for bootstrap-only audits")
     out = root / "state/gold-image-audit" / audit_id
     out.mkdir(parents=True, exist_ok=False)
     instances = read_json(instances_path)
@@ -53,6 +57,7 @@ def audit(
         instances = [x for x in instances if x["instance_id"] in wanted]
     if not instances or not all(x.get("nas_image") for x in instances):
         raise ValueError("Expected instances with NAS image references")
+    write_json(out / "instances.json", instances)
     cfg = load_cfg(root, instances_path, out, nas_root=nas_root) if cfg is None else copy.deepcopy(cfg)
     if cfg.get("project_root", str(root)) != str(root):
         raise ValueError("Config snapshot belongs to another project")
@@ -94,7 +99,7 @@ def audit(
     output = out / "harness"
     output.mkdir()
     factory.lock_images(instances)
-    official = install_harness_adapter(cfg, factory, instances, output)
+    official = None if bootstrap_only else install_harness_adapter(cfg, factory, instances, output)
     started = time.perf_counter()
 
     def worker(row):
@@ -114,6 +119,31 @@ def audit(
                           source_image_id=repair_proofs[iid]["source_image_id"])
         stage = "make_test_spec"
         try:
+            if bootstrap_only:
+                stage = "bootstrap"
+                probes = []
+                for repetition in range(repeat_count):
+                    attempt = f"bootstrap-{repetition:03d}"
+                    context = TaskContext(out.name, iid, attempt, "environment-check", task_out / attempt)
+                    container = factory.create(row, context)
+                    try:
+                        container.start()
+                        probe = read_json(context.output_dir / "environment.json")
+                        probes.append({"attempt_id": attempt, "policy_hash": probe["policy_hash"],
+                                       "packages_hash": probe["packages_hash"], "python": probe["python"],
+                                       "constraints": probe["constraints"],
+                                       "receipt": str(context.output_dir / "bootstrap-receipt.json"),
+                                       "receipt_sha256": sha256(context.output_dir / "bootstrap-receipt.json")})
+                    finally:
+                        factory.close(container)
+                stable = len({(p["policy_hash"], p["packages_hash"]) for p in probes}) == 1
+                result.update(status="completed" if stable else "environment_drift", resolved=None,
+                              completed=stable, environment_verified=stable, probes=probes,
+                              repeat_count=repeat_count, total_seconds=time.perf_counter() - t0)
+                if cold_start:
+                    result["image_absent_after"] = not factory.image_manager._exists(result["image_id"])
+                write_json(task_out / "result.json", result)
+                return result
             spec = official.make_test_spec(row, namespace="swebench")
             t1 = time.perf_counter()
             prediction = {
@@ -172,7 +202,8 @@ def audit(
         try:
             factory.cleanup_owned(out.name)
         finally:
-            official.dycon_restore()
+            if official is not None:
+                official.dycon_restore()
             factory.client.close()
     elapsed = time.perf_counter() - started
     timing = collect_timing(cfg, out, results, elapsed)
@@ -193,6 +224,8 @@ def audit(
         write_json(output / "tasks" / result["instance_id"] / "result.json", result)
     summary = {
         "audit_id": audit_id,
+        "mode": "bootstrap_only" if bootstrap_only else "gold",
+        "repeat_count": repeat_count,
         "started_at": preflight["started_at"],
         "finished_at": now(),
         "tasks": len(instances),
@@ -238,27 +271,28 @@ def main():
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--only-file", type=Path)
     p.add_argument("--cold-start", action="store_true")
+    p.add_argument("--bootstrap-only", action="store_true", help="Verify shared container bootstrap without gold tests or a model")
+    p.add_argument("--repeat-count", type=int, default=1, help="Independent container starts per task in bootstrap-only mode")
     p.add_argument("--nas-root", default="/VM")
     p.add_argument("--config-snapshot", type=Path)
     a = p.parse_args()
     if a.workers < 1 or a.workers > 4:
         raise ValueError("workers must be 1..4")
-    print(
-        json.dumps(
-            audit(
-                a.root.resolve(),
-                a.instances.resolve(),
-                a.audit_id,
-                a.workers,
-                a.only_file.resolve() if a.only_file else None,
-                a.cold_start,
-                read_json(a.config_snapshot) if a.config_snapshot else None,
-                nas_root=a.nas_root,
-            ),
-            ensure_ascii=False,
-            indent=2,
-        )
+    result = audit(
+        a.root.resolve(),
+        a.instances.resolve(),
+        a.audit_id,
+        a.workers,
+        a.only_file.resolve() if a.only_file else None,
+        a.cold_start,
+        read_json(a.config_snapshot) if a.config_snapshot else None,
+        nas_root=a.nas_root,
+        bootstrap_only=a.bootstrap_only,
+        repeat_count=a.repeat_count,
     )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if a.bootstrap_only and result["infra_error"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

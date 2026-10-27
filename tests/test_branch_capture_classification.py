@@ -51,7 +51,7 @@ def test_live_finalize_no_close_rejected_branch_is_complete(tmp_path):
             c.record_output({"request_id": f"r{branch}", "prompt_token_ids": [10], "output_token_ids": output})
             candidates.append({"branch_id": branch, "api_attempt_id": str(branch), "response": {}, "score": None})
         c.record("r0", {"layer_0": np.ones(2)}, anchor="think_close", position=2, absolute_position=2, token_id=11)
-        c.record_decision({"session_id": "s", "decision_id": "d", "branch_count": 2,
+        c.record_decision({"session_id": "s", "decision_id": "d", "branch_count": 2, "step_id": 0,
                            "selected_branch_id": 0, "candidates": candidates})
         path = tmp_path / "trajectory.json"
         write_json(path, {"messages": [{"role": "assistant", "extra": {"response": {

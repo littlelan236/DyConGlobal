@@ -9,8 +9,13 @@ class RolloutEnvironment:
     def __init__(self, factory: ContainerFactory, instance: dict, context: TaskContext):
         self.factory, self.context = factory, context
         cfg = factory.cfg
+        try:
+            spec = factory.spec(instance)
+        except ValueError as exc:
+            from runtime.containers.dependencies import setup_error
+            raise setup_error(cfg, context, str(exc), stage='preflight') from exc
         self.config = DockerEnvironmentConfig(
-            image=factory.spec(instance)["image_id"],
+            image=spec["image_id"],
             cwd=cfg["environment"]["cwd"],
             env=factory.policy_for(instance).variables(),
             timeout=cfg["timeouts"]["tool_command_seconds"],

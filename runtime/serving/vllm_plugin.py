@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hmac
 import logging
 import os
 import tempfile
+import time
 from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
@@ -25,6 +27,8 @@ STREAM = "tact_states"
 LOG = logging.getLogger("dycon.capture")
 REQUEST_CONTEXT = ContextVar("dycon_capture_request", default=None)
 LOOP_CONTEXT = ContextVar("dycon_reasoning_loop_request", default=None)
+NATIVE_CONTEXT = ContextVar("dycon_native_request", default=None)
+CONTROL_DEADLINE = ContextVar("dycon_control_deadline", default=None)
 
 
 class DyConCapturePlugin:
@@ -50,6 +54,7 @@ class DyConCapturePlugin:
         self.behavior_failures = []
         self.execution_intervals = {}
         self.request_metadata = {}
+        self.failed_capture_decisions = set()
         self.request_prompt_lengths = {}
         self.request_last_position = {}
         self.request_close_seen = set()
@@ -61,6 +66,19 @@ class DyConCapturePlugin:
         self.budget = None
         self.parallel_options = json.loads(os.environ.get("DYCON_PARALLEL_OPTIONS", "{}"))
         self.scoring = None
+        self.cancelled_run = False
+        self.cancelled_decisions = set()
+        self.native_requests = {}
+        self.cancel_token = os.environ.get("DYCON_CANCEL_TOKEN", "")
+        self.owner_run = os.environ.get("DYCON_CANCEL_OWNER_RUN")
+        self.owner_attempt = os.environ.get("DYCON_EXECUTION_ATTEMPT")
+        from runtime.serving.execution import ExecutionLane
+
+        capacity = max(128, self.parallel_options.get("max_inflight_branches", 16) * 4)
+        self.wait_lane = ExecutionLane("dycon-admission", 16, capacity)
+        self.receipt_lane = ExecutionLane("dycon-receipt", 4, capacity)
+        self.publish_lane = ExecutionLane("dycon-publish", 1, 4)
+        self.control_lane = ExecutionLane("dycon-control", 2, capacity)
         if self.export_options.get("enabled", True) and self.export_options.get("spool_root"):
             from core.disk_budget import DiskBudget
 
@@ -71,6 +89,58 @@ class DyConCapturePlugin:
                 self.export_options["spool_max_bytes"],
                 int(os.environ.get("DYCON_CAPTURE_RESERVE_BYTES", "0")),
             )
+
+    def _check_cancelled(self, metadata):
+        if self.cancelled_run or (metadata and metadata.get("decision_id") in self.cancelled_decisions):
+            from core.cancellation import Cancelled
+            raise Cancelled("Native request cancelled")
+
+    async def cancel_native(self, decision_id=None):
+        if decision_id is None:
+            self.cancelled_run = True
+        else:
+            self.cancelled_decisions.add(decision_id)
+        if self.scoring is not None and hasattr(self.scoring, "cancel"):
+            await self.control_lane.run(self.scoring.cancel, decision_id)
+        requested, errors, aborts = [], [], []
+        async def abort_one(native_id):
+            try:
+                async with asyncio.timeout(min(3.0, self.control_seconds)):
+                    await self.engine.abort(native_id, internal=True)
+                requested.append(native_id)
+            except Exception as exc:
+                errors.append({"native_request_id": native_id, "error": repr(exc)})
+        for native_id, state in list(self.native_requests.items()):
+            if decision_id is not None and state["metadata"].get("decision_id") != decision_id:
+                continue
+            state["cancel_requested"] = True
+            if state["phase"] in {"submitting", "running"}:
+                aborts.append(abort_one(native_id))
+        await asyncio.gather(*aborts)
+        return {"cancel_requested": True, "abort_requested_ids": requested,
+                "pending_native_ids": [key for key, state in self.native_requests.items()
+                                       if state.get("cancel_requested")], "errors": errors,
+                "abort_completed": not any(state.get("cancel_requested") for state in self.native_requests.values())}
+
+    async def _receipt_post(self, route, value, metadata):
+        deadline = CONTROL_DEADLINE.set(time.monotonic() + self.control_seconds)
+        try:
+            async with asyncio.timeout(self.control_seconds):
+                return await self.receipt_lane.run(self._safe_post, route, value, metadata)
+        except TimeoutError:
+            # Match _safe_post: retain native completion even for block_rollout;
+            # the model wrapper raises CaptureError outside API retry handling.
+            from core.io import hash_json, write_json
+            key = (metadata.get('session_id'), metadata.get('decision_id'))
+            if key[1] is not None:
+                self.failed_capture_decisions.add(key)
+            failure = {**{k: metadata[k] for k in ('session_id', 'decision_id', 'branch_id', 'api_attempt_id', 'step_id') if k in metadata},
+                       'reason': route + ': capture control total deadline exceeded', 'payload': value}
+            self.failures.append(failure)
+            await self.control_lane.run(write_json, self.staging.parent / 'failures' / (hash_json(failure) + '.json'), failure)
+            return None
+        finally:
+            CONTROL_DEADLINE.reset(deadline)
 
     def attach_router(self, app):
         @app.middleware("http")
@@ -91,6 +161,20 @@ class DyConCapturePlugin:
             finally:
                 REQUEST_CONTEXT.reset(context)
 
+        def authorized(request, value):
+            return (bool(self.cancel_token) and
+                    hmac.compare_digest(request.headers.get("X-DyCon-Cancel-Token", ""), self.cancel_token) and
+                    value.get("run_id") == self.owner_run and
+                    value.get("execution_attempt_id") == self.owner_attempt)
+
+        @app.post("/dycon/capture/engine/cancel")
+        async def cancel_engine(request: Request):
+            from starlette.responses import JSONResponse
+            value = await request.json()
+            if not authorized(request, value):
+                return JSONResponse({"error": "cancel_scope_or_token_mismatch"}, status_code=403)
+            return await self.cancel_native(value.get("decision_id"))
+
         @app.post("/dycon/parallel/{action}")
         async def parallel(action: str, request: Request):
             from starlette.responses import JSONResponse
@@ -99,18 +183,34 @@ class DyConCapturePlugin:
                 return JSONResponse({"error": "parallel_scoring_not_enabled"}, status_code=503)
             value = await request.json()
             try:
+                if action == "cancel":
+                    if not authorized(request, value):
+                        return JSONResponse({"error": "cancel_scope_or_token_mismatch"}, status_code=403)
+                    return await self.cancel_native(value["decision_id"])
+                if action == "status":
+                    return await self.control_lane.run(self.scoring.status)
                 if action == "reserve":
-                    return await asyncio.to_thread(self.scoring.reserve, value["decision_id"], value["branches"])
+                    return await self.wait_lane.run(self.scoring.reserve, value["decision_id"], value["branches"],
+                                                   value.get("decision_deadline_unix"))
+                if action == "branch-acquire":
+                    return await self.wait_lane.run(self.scoring.acquire_branch, value["decision_id"], value["branch_id"])
+                if action == "branch-release":
+                    return await self.control_lane.run(self.scoring.release_branch, value, value.get("native_request_id"), value.get("reason", "client_release"))
                 if action == "results":
                     # A completed generate can reach this endpoint before the
                     # periodic drain loop has published its close row. Drain
                     # once synchronously so scoring observes the native event
                     # without increasing the model request or GPU wait.
                     await self.drain_once()
-                    return await asyncio.to_thread(self.scoring.results, value["decision_id"], value["timeout"])
+                    return await self.wait_lane.run(self.scoring.results, value["decision_id"], value["timeout"])
                 if action == "release":
-                    return self.scoring.release(value["decision_id"])
+                    return await self.control_lane.run(self.scoring.release, value["decision_id"])
                 return JSONResponse({"error": "unknown_parallel_action"}, status_code=404)
+            except asyncio.CancelledError:
+                # Disconnect cannot strand a synchronous acquire after its HTTP waiter vanishes.
+                if value.get("decision_id"):
+                    await asyncio.shield(self.cancel_native(value["decision_id"]))
+                raise
             except (ValueError, KeyError, RuntimeError) as exc:
                 return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -176,6 +276,10 @@ class DyConCapturePlugin:
                 "stream": STREAM,
                 "rows_published": self.rows_published,
                 "filtered_events": self.filtered_events,
+                "execution_lanes": {"wait": self.wait_lane.status(), "receipt": self.receipt_lane.status(),
+                                    "publish": self.publish_lane.status(), "control": self.control_lane.status()},
+                "native_lifecycle": {key: state["phase"] for key, state in self.native_requests.items()},
+                "cancelling": self.cancelled_run,
                 "failures": self.failures,
                 "workers": self.worker_statuses,
             }
@@ -239,7 +343,7 @@ class DyConCapturePlugin:
             newline_token_ids=sorted(self.newline_ids),
             close_token_ids=sorted(self.close_ids),
         )
-        await asyncio.to_thread(self._post, "/dycon/capture/session/start", {"metadata": metadata})
+        await self.receipt_lane.run(self._post, "/dycon/capture/session/start", {"metadata": metadata})
         token = REQUEST_CONTEXT.set(metadata)
         try:
             # Token 0 is valid for the supported causal tokenizers; warmup must
@@ -256,27 +360,55 @@ class DyConCapturePlugin:
             await self.drain_once()
         finally:
             REQUEST_CONTEXT.reset(token)
-        await asyncio.to_thread(self._post, "/dycon/capture/session/engine-warmup/stop", {})
+        await self.receipt_lane.run(self._post, "/dycon/capture/session/engine-warmup/stop", {})
 
     def _post(self, route, value):
         import requests
 
+        timeout = self.control_seconds
+        total_deadline = CONTROL_DEADLINE.get()
+        if total_deadline is not None:
+            timeout = min(timeout, total_deadline - time.monotonic())
+            if timeout <= 0:
+                raise TimeoutError("Capture control total deadline exceeded")
+        deadline = (value.get("metadata") or value).get("decision_deadline_unix")
+        if deadline is not None:
+            timeout = min(timeout, deadline - time.time())
+            if timeout <= 0:
+                raise TimeoutError("Capture decision deadline exceeded")
         response = requests.post(
-            self.control_url.rstrip("/") + route, json=value, timeout=self.control_seconds
+            self.control_url.rstrip("/") + route, json=value, timeout=timeout
         )
         if not response.ok:
             raise RuntimeError(f"capture control {route}: {response.status_code}: {response.text[:500]}")
         return response.json()
 
     def _safe_post(self, route, value, metadata):
+        import requests
+
+        key = (metadata.get("session_id"), metadata.get("decision_id"))
         try:
-            return self._post(route, value)
+            if key[1] is not None and key in self.failed_capture_decisions:
+                raise RuntimeError("Capture decision already unavailable")
+            # Only these endpoints have an idempotent identity/content contract.
+            attempts = 2 if route.endswith(("/request/bind", "/request/output")) else 1
+            for attempt in range(attempts):
+                try:
+                    return self._post(route, value)
+                except (requests.ConnectionError, requests.Timeout):
+                    if attempt + 1 == attempts:
+                        raise
         except Exception as exc:
-            failure = {"session_id": metadata.get("session_id"), "reason": f"{route}: {exc!r}"}
+            if key[1] is not None:
+                self.failed_capture_decisions.add(key)
+            failure = {"session_id": metadata.get("session_id"), "reason": f"{route}: {exc!r}",
+                       **{k: metadata[k] for k in ("decision_id", "branch_id", "api_attempt_id", "step_id")
+                          if k in metadata}}
             self.failures.append(failure)
             from core.io import hash_json, write_json
 
-            write_json(self.staging.parent / "failures" / (hash_json(failure) + ".json"), failure)
+            write_json(self.staging.parent / "failures" / (hash_json({**failure, "payload": value}) + ".json"),
+                       {**failure, "payload": value})
             try:
                 self._post("/dycon/capture/failure", failure)
             except Exception:
@@ -320,6 +452,8 @@ class DyConCapturePlugin:
         @wraps(original_add)
         async def add(request, *args, **kwargs):
             metadata = REQUEST_CONTEXT.get()
+            self._check_cancelled(metadata)
+            native_state = NATIVE_CONTEXT.get()
             loop_state = LOOP_CONTEXT.get()
             if loop_state is not None:
                 loop_state["native_request_id"] = request.request_id
@@ -327,6 +461,8 @@ class DyConCapturePlugin:
                 loop_state["reasoning_active"] = bool(ids and (
                     ids[-1] in self.open_ids or (len(ids) >= 2 and ids[-2] in self.open_ids)))
             if metadata is not None:
+                self.native_requests[request.request_id] = {
+                    "metadata": dict(metadata), "phase": "binding", "cancel_requested": False}
                 self.request_metadata[request.request_id] = dict(metadata)
                 self.request_prompt_lengths[request.request_id] = len(request.prompt_token_ids or [])
                 from core.io import hash_json
@@ -334,19 +470,32 @@ class DyConCapturePlugin:
                 binding = dict(metadata)
                 binding["prompt_token_ids"] = list(request.prompt_token_ids or [])
                 binding["request_sha256"] = hash_json(binding["prompt_token_ids"])
-                await asyncio.to_thread(
-                    self._safe_post,
+                self.request_metadata[request.request_id] = binding
+                if native_state is None:
+                    raise RuntimeError("Native capture admission has no request-local context")
+                native_state.update(native_request_id=request.request_id, binding=binding)
+                await self._receipt_post(
                     "/dycon/capture/request/bind",
                     {"request_id": request.request_id, "metadata": binding},
                     binding,
                 )
-            return await original_add(request, *args, **kwargs)
+                self._check_cancelled(metadata)
+                self.native_requests[request.request_id]["phase"] = "submitting"
+            result = await original_add(request, *args, **kwargs)
+            if metadata is not None:
+                state = self.native_requests[request.request_id]
+                state["phase"] = "running"
+                if state["cancel_requested"] or self.cancelled_run or metadata.get("decision_id") in self.cancelled_decisions:
+                    # Cancellation may have traversed the registry before engine add completed.
+                    await self.engine.abort(request.request_id, internal=True)
+            return result
 
         @wraps(original_generate)
         async def generate(*args, **kwargs):
             metadata = REQUEST_CONTEXT.get()
             final = None
             generated = []
+            branch_released = False
             params = args[1] if len(args) > 1 else kwargs["sampling_params"]
             if metadata is not None and metadata.get("decision_id") and params.n != 1:
                 raise ValueError("Parallel transport requires native n=1 for exact capture identity")
@@ -369,7 +518,42 @@ class DyConCapturePlugin:
                 else:
                     kwargs = {**kwargs, "sampling_params": params}
             context = LOOP_CONTEXT.set(state if guarded else None)
+            native_state = {} if metadata is not None else None
+            native_context = NATIVE_CONTEXT.set(native_state)
             stream = original_generate(*args, **kwargs)
+            output_published = False
+            async def publish_output():
+                nonlocal branch_released, output_published
+                if output_published or metadata is None or final is None:
+                    return
+                if not native_state or not native_state.get("native_request_id"):
+                    raise RuntimeError("Native output has no request-local admission identity")
+                native_id = native_state["native_request_id"]
+                loop = state.get("reasoning_loop")
+                if loop is not None:
+                    loop.update(final_output_tokens=len(generated),
+                                abort_completed=final.outputs[0].finish_reason == "abort")
+                    if loop["abort_completed"] and self.scoring is not None:
+                        self.scoring.mark_terminated(metadata, state["native_request_id"], loop)
+                await self._receipt_post(
+                    "/dycon/capture/request/output",
+                    {
+                        "metadata": native_state["binding"],
+                        "request_id": native_id,
+                        "external_response_id": final.request_id,
+                        "prompt_token_ids": list(final.prompt_token_ids or []),
+                        "output_token_ids": generated,
+                        "finish_reason": final.outputs[0].finish_reason,
+                        "num_cached_tokens": getattr(final, "num_cached_tokens", 0) or 0,
+                        **({"reasoning_loop": loop} if loop is not None else {}),
+                    },
+                    metadata,
+                )
+                if self.scoring is not None and hasattr(self.scoring, "release_branch") and metadata.get("decision_id"):
+                    self.scoring.release_branch(metadata, native_id, "native_output")
+                    branch_released = True
+                output_published = True
+
             try:
                 delta = getattr(params.output_kind, "name", "") == "DELTA"
                 async for output in stream:
@@ -379,8 +563,12 @@ class DyConCapturePlugin:
                     generated.extend(new_ids)
                     # Finished/closed requests win races with a new abort.
                     if (detector is not None and not state.get("reasoning_loop")
-                            and state.get("reasoning_active") and not output.finished):
-                        if any(token in self.close_ids for token in new_ids):
+                            and (state.get("reasoning_active") or options.get("include_post_close", False))
+                            and not output.finished):
+                        if not state.get("reasoning_active") and options.get("include_post_close", False):
+                            detector.phase = "post_close"
+                        if (not options.get("include_post_close", False)
+                                and any(token in self.close_ids for token in new_ids)):
                             detector.closed = True
                         hit = detector.feed(new_ids)
                         if hit is not None:
@@ -393,33 +581,22 @@ class DyConCapturePlugin:
                                 "abort_requested": True,
                             }
                             await self.engine.abort(native_id, internal=True)
+                    if output.finished:
+                        await publish_output()
                     yield output
-                if metadata is not None and final is not None:
-                    loop = state.get("reasoning_loop")
-                    if loop is not None:
-                        loop.update(final_output_tokens=len(generated),
-                                    abort_completed=final.outputs[0].finish_reason == "abort")
-                        if loop["abort_completed"] and self.scoring is not None:
-                            self.scoring.mark_terminated(metadata, state["native_request_id"], loop)
-                    await asyncio.to_thread(
-                        self._safe_post,
-                        "/dycon/capture/request/output",
-                        {
-                            "metadata": metadata,
-                            "request_id": final.request_id,
-                            "prompt_token_ids": list(final.prompt_token_ids or []),
-                            "output_token_ids": generated,
-                            "finish_reason": final.outputs[0].finish_reason,
-                            "num_cached_tokens": getattr(final, "num_cached_tokens", 0) or 0,
-                            **({"reasoning_loop": loop} if loop is not None else {}),
-                        },
-                        metadata,
-                    )
+                await publish_output()
             finally:
                 try:
                     await stream.aclose()
                 finally:
+                    if self.scoring is not None and hasattr(self.scoring, "release_branch") and metadata and metadata.get("decision_id") and not branch_released:
+                        native_id = (native_state or {}).get("native_request_id")
+                        if native_id is not None:
+                            self.scoring.release_branch(metadata, native_id, "stream_exit")
+                    if native_state is not None and native_state.get("native_request_id"):
+                        self.native_requests.pop(native_state["native_request_id"], None)
                     LOOP_CONTEXT.reset(context)
+                    NATIVE_CONTEXT.reset(native_context)
 
         self.engine.input_processor.process_inputs = process
         self.engine._add_request = add
@@ -434,7 +611,7 @@ class DyConCapturePlugin:
                     self.execution_intervals.setdefault(request_id, []).extend(rows)
             self.worker_statuses = await self.engine.collective_rpc("capture_status", args=(STREAM,))
             if raw and any(raw) and self.export_options.get("enabled", True):
-                await asyncio.to_thread(self._publish, raw)
+                await self.publish_lane.run(self._publish, raw)
 
     async def _drain_loop(self):
         while True:
@@ -553,14 +730,19 @@ class DyConCapturePlugin:
         return accepted
 
     async def shutdown(self):
-        if self.scoring is not None:
-            self.scoring.close()
-        if self.task is not None:
-            self.task.cancel()
-            await self.task
-        if self.engine is not None:
-            await self.drain_once()
-            await self.engine.collective_rpc("stop_capture", args=(STREAM,), kwargs={})
+        try:
+            if self.scoring is not None:
+                self.scoring.close()  # Wake synchronous admission/result waiters first.
+            if self.task is not None:
+                self.task.cancel()
+                await self.task
+            if self.engine is not None:
+                async with asyncio.timeout(self.control_seconds):
+                    await self.drain_once()
+                    await self.engine.collective_rpc("stop_capture", args=(STREAM,), kwargs={})
+        finally:
+            for lane in (self.wait_lane, self.receipt_lane, self.publish_lane, self.control_lane):
+                lane.close()
 
 
 def plugin():

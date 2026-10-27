@@ -1,5 +1,6 @@
 """End-to-end action artifact contracts, cross-run identity and numeric chart semantics."""
 
+import copy
 import json
 from pathlib import Path
 
@@ -115,7 +116,14 @@ def test_run_config_freezes_classifier_cwd_and_no_command_execution(cfg):
     root = Path(cfg["project_root"])
     marker = root / "must-not-be-created"
     source(cfg, "one", commands=(f"touch {marker}",))
-    write_json(root / "runs/one/resolved-config.json", {"environment": {"cwd": "/producer-cwd"}})
+    # A legacy producer fixture still needs a valid immutable config identity.
+    frozen = copy.deepcopy(cfg)
+    frozen["environment"]["cwd"] = "/producer-cwd"
+    frozen["execution"]["limits_retry"]["enabled"] = False
+    frozen.pop("config_hash")
+    frozen["config_hash"] = hash_json(frozen)
+    frozen.update(selection={}, selection_sha256=hash_json({}))
+    write_json(root / "runs/one/resolved-config.json", frozen)
     out = Path(classify_trajectories({**cfg, "run_id": "unrelated"}, "cwd", run_id="one"))
     assert read_json(out / "selection.json")["sources"][0]["classifier_cwd"] == "/producer-cwd"
     assert check_analysis(cfg, "cwd")["verified"]

@@ -48,6 +48,8 @@ def environment_overrides(cfg: dict, instance: dict) -> dict:
         "psf__requests-3362",
         "psf__requests-3738",
         "mwaskom__seaborn-2457",
+        # The original mandatory HTTPS imread smoke test fetches a real image.
+        "matplotlib__matplotlib-23111",
         "scikit-learn__scikit-learn-13620",
         "sphinx-doc__sphinx-11266",
         "sphinx-doc__sphinx-8509",
@@ -69,6 +71,10 @@ def environment_overrides(cfg: dict, instance: dict) -> dict:
             "NO_PROXY": "*",
             "no_proxy": "*",
         }
+        if iid in {"psf__requests-3362", "psf__requests-3738"}:
+            # These suites test proxy discovery itself. A wildcard bypass hides
+            # proxy variables set by the original tests and changes their result.
+            overrides["variables"].update(NO_PROXY="", no_proxy="")
     if iid in {
         "scikit-learn__scikit-learn-13933",
         "scikit-learn__scikit-learn-14309",

@@ -120,7 +120,12 @@ class RunEvidence:
         missing = set(requested) - set(data["rollouts"])
         if missing:
             raise ValueError(f"Unknown rollout IDs in run {self.run_id}: {sorted(missing)}")
-        ids = requested or sorted(data["rollouts"])
+        if requested:
+            ids = requested
+        else:
+            from rollout.retry import default_final_ids
+            final_ids = default_final_ids(self.root, self.run_id, data)
+            ids = sorted(data["rollouts"]) if final_ids is None else final_ids
         rows = {}
         for rid in ids:
             row = data["rollouts"][rid]
@@ -132,6 +137,10 @@ class RunEvidence:
                     raise ValueError(f"Excluded/quarantined rollout or partition mismatch: {rid}")
                 continue
             rows[rid] = copy.deepcopy(row)
+            if requested and row.get("sample_key"):
+                result_path = self.path.parent / "rollout/tasks" / task["instance_id"] / "repetitions" / row["repetition_id"] / "result.json"
+                final = read_json(result_path) if result_path.exists() else {}
+                rows[rid]["selection_role"] = "accepted_final" if final.get("rollout_id") == rid and final.get("disposition", "accepted") == "accepted" else "explicit_intermediate"
         return {"source_run_id": self.run_id, "evidence_revision": data["revision"],
                 "evidence_sha256": hash_json(data), "rollout_ids": sorted(rows), "rollouts": rows,
                 "tasks": {r["task_key"]: copy.deepcopy(data["tasks"][r["task_key"]]) for r in rows.values()}}
@@ -145,8 +154,11 @@ class RunEvidence:
         for evaluation in data["evaluations"].values():
             if sha256(owned_path(self.root, evaluation["report_path"])) != evaluation["report_sha256"]:
                 raise ValueError("Changed evaluation report")
+        from rollout.retry import verify_counts
+        stage_path = self.path.parent / "status.json"
+        counts = verify_counts(self.path.parent) if stage_path.exists() and read_json(stage_path).get("stage") in {"complete", "failed", "cancelled"} else {"checked_at_finish": False}
         return {"run_id": self.run_id, "rollouts": len(data["rollouts"]),
-                "evaluations": len(data["evaluations"]), "verified": True}
+                "evaluations": len(data["evaluations"]), "verified": True, "rollout_counts": counts}
 
 
 

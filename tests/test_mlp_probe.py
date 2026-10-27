@@ -81,3 +81,49 @@ def test_mlp_cuda_device_is_explicit_when_available():
     model.fit(x, y)
     assert model.device_ == "cuda:0"
     assert np.isfinite(model.predict(x)).all()
+
+
+def test_configurable_network_optimizer_and_checkpoint_roundtrip(tmp_path):
+    pytest.importorskip('torch')
+    from difficulty.models.mlp_checkpoint import FLEX_ARCHITECTURE
+
+    rng = np.random.default_rng(22)
+    x = rng.normal(size=(20, 5)).astype(np.float32)
+    y = (x[:, 0] * 0.25).astype(np.float32)
+    history = []
+    model = FFNMLEstimator(
+        hidden_dim=8, hidden_dims=[8, 4, 3], activation='relu', normalization='none',
+        epochs=2, batch_size=5, optimizer={
+            'kind': 'sgd', 'learning_rate': 0.01, 'weight_decay': 0.0, 'momentum': 0.8
+        },
+    )
+    model.fit(x[:15], y[:15], validation_data=(x[15:], y[15:]), epoch_callback=history.append)
+    assert len(history) == 2
+    metadata = _metadata(model, 'submission_remaining_steps_fraction')
+    metadata.update(
+        architecture_id=FLEX_ARCHITECTURE, normalization='none', target_transform='identity',
+        input_spec={
+            'public_sites': [2], 'width': 5,
+            'feature_transform': 'single-site-vector', 'dtype': 'float32',
+        },
+        architecture={
+            'input_width': 5, 'hidden_dim': 8, 'hidden_dims': [8, 4, 3], 'dropout': 0.0,
+            'layernorm_eps': 1e-5, 'activation': 'relu', 'normalization': 'none', 'dtype': 'float32',
+        },
+    )
+    path = tmp_path / 'flexible.npz'
+    save_checkpoint(path, model, metadata)
+    loaded = load_checkpoint(path)
+    assert np.allclose(model.predict(x), loaded.predict(x), atol=1e-6)
+
+
+def test_training_config_rejects_optimizer_for_closed_form_ridge():
+    from difficulty.training.config import TrainingConfig
+
+    raw = {
+        'schema_version': 2, 'data': {'dataset_id': 'dataset',
+            'targets': ['submission_remaining_steps_fraction']},
+        'model': {'kind': 'ridge'}, 'training': {'epochs': 2},
+    }
+    with pytest.raises(ValueError, match='Closed-form Ridge'):
+        TrainingConfig.model_validate(raw)

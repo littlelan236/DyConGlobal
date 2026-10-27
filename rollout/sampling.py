@@ -7,7 +7,6 @@ from pathlib import Path
 
 from core.io import hash_json, identifier, read_json, write_json
 
-
 WORK_ITEMS_SCHEMA = 1
 SEED_POLICY = "repetition_offset_v1"
 
@@ -120,3 +119,40 @@ def sample_from_item(item: dict) -> SampleContext:
         sample_seed=item["sample_seed"],
         seed_policy=item.get("seed_policy", SEED_POLICY),
     )
+
+
+@dataclass(frozen=True)
+class AttemptContext:
+    run_id: str
+    task_key: str
+    sample_key: str
+    repetition_id: str
+    attempt_id: str
+    seed_round: int
+    effective_seed: int
+    sample_seed: int
+    seed_policy: str
+
+    def as_dict(self):
+        from dataclasses import asdict
+        return asdict(self)
+
+
+def effective_seed(sample, manifest, seed_round, actual_branches=1):
+    """Match the installed vLLM OpenAI chat API signed-int64 seed contract."""
+    if type(seed_round) is not int or seed_round < 0:
+        raise ValueError('Invalid seed round')
+    stride = manifest['seed_policy']['branch_stride']
+    if not 1 <= actual_branches <= stride:
+        raise ValueError('Frozen branch stride cannot cover active branches')
+    seed = sample.sample_seed + seed_round * manifest['repeat_count'] * stride
+    if not -(2**63) <= seed <= seed + actual_branches - 1 <= 2**63 - 1:
+        raise ValueError('seed_space_exhausted: vLLM seed must fit signed int64')
+    return seed
+
+
+def execution_seed(value):
+    """Actual execution seed, with an explicit legacy fallback."""
+    if isinstance(value, dict):
+        return value.get('effective_seed', value.get('sample_seed'))
+    return getattr(value, 'effective_seed', value.sample_seed)

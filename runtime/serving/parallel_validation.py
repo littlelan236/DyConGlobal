@@ -22,11 +22,20 @@ from runtime.serving.parallel import artifact_contract
 
 def validate_selection(summary, generation_seed):
     """Audit a frozen winner after decoding and online scoring have finished."""
+    from rollout.loop_escape import validate_loop_escape_evidence
+
+    validate_loop_escape_evidence(summary)
     candidates = summary["candidates"]
     mode = summary["selection_mode"]
     selected = summary["selected_branch_id"]
     if mode == "minimum_score":
-        expected = min(candidates, key=lambda c: (c["score"], c["branch_id"]))["branch_id"]
+        pool = [c for c in candidates if c.get("status") == "eligible"]
+        if summary.get("fallback_reason") == "no_eligible_scored_branch":
+            pool = [c for c in candidates if c.get("loop_escape", {}).get("output_available")
+                    and not c.get("loop_escape", {}).get("excluded")]
+            expected = min(pool, key=lambda c: c["branch_id"])["branch_id"]
+        else:
+            expected = min(pool, key=lambda c: (c["score"], c["branch_id"]))["branch_id"]
     elif mode == "parallel_consensus":
         from rollout.consensus import validate_consensus_evidence
 
@@ -162,13 +171,24 @@ def validate_parallel_queries(cfg, run_id, factory, runtime):
     # Exercise the configured task/branch concurrency through the same model
     # wrapper, admission controller and concurrent publication/finalization.
     branches = cfg["parallel"]["branch_count"]
-    groups = min(cfg["execution"]["rollout_workers"],
-                 cfg["parallel"]["max_inflight_branches"] // branches)
-    with ThreadPoolExecutor(max_workers=groups) as pool:
-        futures = [pool.submit(run_case, repetitions + index, "parallel_overlap", False, None, branches)
-                   for index in range(groups)]
-        for future in futures:
-            future.result()
+    # Deliberately oversubscribe native capacity: admission, not the test,
+    # must queue the excess work. The old cap hid 4x32 / capacity64 deadlocks.
+    groups = cfg["execution"]["rollout_workers"]
+    overlap_rounds = max(1, repetitions)
+    for round_index in range(overlap_rounds):
+        with ThreadPoolExecutor(max_workers=groups) as pool:
+            futures = [pool.submit(run_case, repetitions + round_index * groups + index,
+                                   "parallel_overlap", False, None, branches) for index in range(groups)]
+            for future in futures:
+                future.result()
+    capacity_response = requests.post(
+        cfg["serving"]["base_url"].removesuffix("/v1").rstrip("/") + "/dycon/parallel/status",
+        json={}, timeout=cfg["timeouts"]["metadata_request_seconds"])
+    capacity_response.raise_for_status()
+    capacity_stats = capacity_response.json()
+    if (cfg["parallel"].get("dynamic_branch_admission") and groups * branches > cfg["parallel"]["max_inflight_branches"]
+            and capacity_stats["saturated_waiting_peak"] <= 0):
+        raise ValueError("Configured overlap never observed active capacity with queued branches")
     grouped = defaultdict(list)
     for case in cases:
         grouped[case["mode"]].append(case)
@@ -183,14 +203,15 @@ def validate_parallel_queries(cfg, run_id, factory, runtime):
         r["query_started_monotonic"] for r in overlap)
     audits = [case["selection_audit"] for case in cases if case["selection_audit"] is not None]
     report = {"passed": True, "cases": cases, "metrics": metrics, "reasoning_loop_abort": loop_check,
+              "capacity_stats": capacity_stats,
               "selection_audit": {"rollout_mode": cfg["parallel"].get("mode", "parallel"),
                                   "scored_decisions": len(audits),
                                   "selected_branch_counts": dict(Counter(str(a["selected_branch_id"]) for a in audits)),
                                   "selected_minimum_score_count": sum(bool(a["selected_minimum_score"]) for a in audits)},
-              "overlap": {"groups": groups, "branches_per_group": branches,
+              "overlap": {"groups": groups, "rounds": overlap_rounds, "branches_per_group": branches,
                           "query_window_ms": window * 1000,
                           "completion_tokens_per_wall_second": sum(r["completion_tokens"] for r in overlap) / window},
-              "scope": "small natural-query diagnostic; shared GPUs, variable lengths, no success-rate claim"}
+               "scope": "configured full-worker multi-round diagnostic; shared GPUs, no success-rate claim"}
     write_json(out / "report.json", report)
     return {"passed": True, "metrics": metrics, "report": str(out / "report.json")}
 

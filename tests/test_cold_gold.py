@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from test_images import Client, store
 
@@ -20,6 +22,9 @@ def test_cold_mode_rejects_cached_images_without_deleting_unowned_images(cfg):
 
 
 def test_dependency_repairs_use_shared_bootstrap_for_all_callers(cfg):
+    wheels = Path(cfg["project_root"]) / "runtime/cache/gold-wheels"
+    wheels.mkdir(parents=True)
+    (wheels / "appdirs-1.4.4-py2.py3-none-any.whl").write_bytes(b"fixture")
     factory = ContainerFactory(cfg, client=object())
     row = {"instance_id": "pylint-dev__pylint-4661", "repo": "pylint-dev/pylint"}
     policy = factory.policy_for(row)

@@ -21,6 +21,15 @@ class Strict(BaseModel):
 class Environment(Strict):
     docker_host: str
     docker_executable: str
+    docker_data_root: str | None = None
+
+    @model_validator(mode="after")
+    def validate_docker_data_root(self):
+        if self.docker_data_root is not None:
+            path = Path(self.docker_data_root)
+            if not path.is_absolute() or path == Path("/") or ".." in path.parts:
+                raise ValueError("environment.docker_data_root must be an absolute non-root path")
+        return self
     wheelhouse: str | None
     cwd: str
     user: str
@@ -109,7 +118,30 @@ class Images(Strict):
     cleanup: bool
 
 
+class LimitsRetry(Strict):
+    enabled: bool = False
+    retry_statuses: list[Literal["LimitsExceeded", "reasoning_loop"]] = Field(
+        default_factory=lambda: ["LimitsExceeded", "reasoning_loop"])
+    seed_policy: Literal["repetition_round_offset_v1"] = "repetition_round_offset_v1"
+
+    @model_validator(mode="after")
+    def exact_statuses(self):
+        if len(self.retry_statuses) != 2 or set(self.retry_statuses) != {"LimitsExceeded", "reasoning_loop"}:
+            raise ValueError("limits_retry.retry_statuses must contain exactly LimitsExceeded and reasoning_loop")
+        return self
+
+
+class Cancellation(Strict):
+    control_request_seconds: float = Field(default=3.0, gt=0, le=30)
+    cooperative_grace_seconds: float = Field(default=10.0, gt=0, le=300)
+    term_grace_seconds: float = Field(default=30.0, gt=0, le=300)
+    kill_verify_seconds: float = Field(default=5.0, gt=0, le=60)
+    cleanup_seconds: float = Field(default=15.0, gt=0, le=300)
+
+
 class Execution(Strict):
+    cancellation: Cancellation = Field(default_factory=Cancellation)
+    limits_retry: LimitsRetry = Field(default_factory=LimitsRetry)
     rollout_workers: int = Field(gt=0)
     harness_workers: int = Field(gt=0)
     infrastructure_retry_limit: int = Field(ge=0)
@@ -195,8 +227,8 @@ class CaptureExport(Strict):
             path = Path(getattr(self, name))
             if path.is_absolute() or ".." in path.parts:
                 raise ValueError(f"capture.export.{name} must be project relative")
-        if self.spool_low_watermark >= self.spool_high_watermark:
-            raise ValueError("spool watermarks require low < high")
+        if self.spool_low_watermark > self.spool_high_watermark:
+            raise ValueError("spool watermarks require low <= high")
         if 2 * self.shard_max_bytes >= self.spool_max_bytes:
             raise ValueError("spool must accommodate raw and sealed shard simultaneously")
         return self
@@ -250,11 +282,16 @@ class Action(Strict):
 
 class ParallelReasoningLoop(Strict):
     enabled: bool = False
+    include_post_close: bool = False
     min_generated_tokens: int = Field(default=2048, ge=1, le=81920)
     repeat_count: int = Field(default=8, ge=2, le=32)
     max_period_tokens: int = Field(default=2048, ge=1, le=8192)
     min_repeated_tokens: int = Field(default=1024, ge=1, le=65536)
     check_interval_tokens: int = Field(default=64, ge=1, le=1024)
+
+
+class ParallelLoopEscape(Strict):
+    enabled: bool = False
 
 
 class ParallelConsensus(Strict):
@@ -274,6 +311,7 @@ class Parallel(Strict):
     every_k_steps: int | None = Field(default=None, gt=0)
     estimator_ref: str | None = None
     max_inflight_branches: int = Field(default=16, gt=0)
+    dynamic_branch_admission: bool = False
     admission_timeout_seconds: int = Field(default=1800, gt=0, le=28800)
     score_timeout_ms: int = Field(default=200, ge=1, le=30000)
     decision_ttl_seconds: int = Field(default=28860, gt=0)
@@ -283,6 +321,7 @@ class Parallel(Strict):
     validation_repetitions: int = Field(default=0, ge=0, le=10)
     consensus: ParallelConsensus | None = None
     reasoning_loop: ParallelReasoningLoop = Field(default_factory=ParallelReasoningLoop)
+    loop_escape: ParallelLoopEscape = Field(default_factory=ParallelLoopEscape)
 
     @model_validator(mode="after")
     def validate_policy(self):
@@ -317,6 +356,28 @@ class Parallel(Strict):
         return self
 
 
+class SkillsBenchImages(Strict):
+    source_root: str
+    revision: str
+    store: str
+    workers: int = Field(gt=0, le=16)
+    build_seconds: int = Field(gt=0)
+    reserve_bytes: int = Field(ge=0)
+    host_proxy: str | None
+    build_proxy: str
+    manage_build_proxy: bool = False
+    task_compatibility: dict[str, dict] = Field(default_factory=dict)
+    verified_wheels: dict[str, list[dict]] = Field(default_factory=dict)
+    source_overrides: dict[str, dict] = Field(default_factory=dict)
+    python_read_seconds: int = Field(default=60, gt=0)
+    python_index: str
+    ubuntu_mirror: str
+    debian_mirror: str
+    mirror_no_proxy: str
+    docker_context: str
+    builder_name: str
+
+
 class Config(Strict):
     schema_version: Literal[1]
     paths: Paths
@@ -327,6 +388,7 @@ class Config(Strict):
     agent: Agent
     environment: Environment
     images: Images
+    skillsbench_images: SkillsBenchImages | None = None
     execution: Execution
     timeouts: Timeouts
     enrichment: Enrichment
@@ -411,6 +473,15 @@ def resolve(path, overrides=()):
             raise ValueError(f"Unknown config field: {dotted}")
         target[keys[-1]] = yaml.safe_load(value)
     cfg = Config.model_validate(raw).model_dump()
+    if "skillsbench_images" not in raw:
+        cfg.pop("skillsbench_images", None)
+    if "cancellation" not in raw["execution"]:
+        cfg["execution"].pop("cancellation", None)
+    if "limits_retry" not in raw["execution"]:
+        cfg["execution"].pop("limits_retry", None)
+    # Adding host storage configuration must not alter legacy config identities.
+    if "docker_data_root" not in raw["environment"]:
+        cfg["environment"].pop("docker_data_root", None)
     # Adding optional loop protection must not change legacy config identities.
     for field in ("loop_repeat_limit", "loop_max_period"):
         if field not in raw["agent"]:
@@ -422,6 +493,10 @@ def resolve(path, overrides=()):
         cfg.pop("parallel")
     elif "reasoning_loop" not in raw["parallel"]:
         cfg["parallel"].pop("reasoning_loop")
+    if "include_post_close" not in raw.get("parallel", {}).get("reasoning_loop", {}):
+        cfg.get("parallel", {}).get("reasoning_loop", {}).pop("include_post_close", None)
+    if "loop_escape" not in raw.get("parallel", {}):
+        cfg.get("parallel", {}).pop("loop_escape", None)
     if "mode" not in raw.get("parallel", {}):
         cfg.get("parallel", {}).pop("mode", None)
     if cfg.get("parallel", {}).get("consensus") is None:

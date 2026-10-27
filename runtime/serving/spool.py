@@ -150,6 +150,8 @@ class CaptureSpool:
         self.base = self.project / options["spool_root"]
         local_filesystem(self.base)
         self.root = self.base / run_id
+        if self.root.is_symlink() and (self.project / "runs" / run_id / "hidden/capture-archives").is_dir():
+            raise ValueError("Capture spool is archived or redirected; restore locally before capture")
         self.root.mkdir(parents=True, exist_ok=True)
         self.nas = Path(nas_root) / options["root"] / run_id
         self.budget = DiskBudget(project, self.base, options["spool_max_bytes"], reserve)
@@ -286,6 +288,18 @@ class CaptureSpool:
                         continue
                     if isinstance(value, list) or value.get("session_id", session) == session:
                         files[str(path.relative_to(self.root))] = sha256(path)
+            session_path = self.root / "sessions" / session / "session.json"
+            if session_path.exists():
+                session_info = read_json(session_path)
+                config_ref = session_info.get("capture_config_ref", "capture-config.json")
+                config_path = owned_path(self.root, config_ref)
+                if config_path.exists():
+                    expected_config = session_info.get("capture_config_sha256")
+                    if expected_config and hash_json(read_json(config_path)) != expected_config:
+                        raise ValueError("Session capture configuration hash mismatch")
+                    files[config_ref] = sha256(config_path)
+                elif config_ref != "capture-config.json":
+                    raise FileNotFoundError(config_path)
             for name in ("inventory.json", "capture-config.json"):
                 if (self.root / name).exists():
                     files[name] = sha256(self.root / name)

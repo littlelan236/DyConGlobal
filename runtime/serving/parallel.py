@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from core.io import hash_json, owned_path, read_json, sha256
+from core.cancellation import Cancelled
 
 
 def artifact_contract(path, expected_sha=None, model_fingerprint=None):
@@ -52,8 +53,9 @@ def artifact_contract(path, expected_sha=None, model_fingerprint=None):
 class ScoringBroker:
     """One bounded CPU worker; a stuck predictor cannot accumulate more work.
 
-    Decisions reserve all their slots atomically before generation. Discarded
-    results cannot recreate a released decision. Expiry bounds abandoned groups.
+    Decisions retain their complete branch evidence, while dynamic admission
+    can acquire and release native branch slots independently. Expiry bounds
+    abandoned groups.
     """
 
     def __init__(self, cfg, model_fingerprint, num_layers):
@@ -74,6 +76,10 @@ class ScoringBroker:
         self.jobs = queue.Queue(maxsize=cfg["max_inflight_branches"])
         self.outstanding = 0
         self.closed = False
+        self.cancelled = {}
+        self.run_cancelled = False
+        self.peak_active = 0
+        self.saturated_waiting_peak = 0
         threading.Thread(target=self._run, name="dycon-score", daemon=True).start()
 
     def _run(self):
@@ -86,8 +92,39 @@ class ScoringBroker:
             finally:
                 self.jobs.task_done()
 
-    def reserve(self, decision_id, branches):
+    def status(self):
         with self.condition:
+            active = sum(len(group['active']) for group in self.groups.values())
+            pending = sum(len(group.get('pending', ())) for group in self.groups.values())
+            self.peak_active = max(self.peak_active, active)
+            if active >= self.cfg['max_inflight_branches']:
+                self.saturated_waiting_peak = max(self.saturated_waiting_peak, pending)
+            return {'active': active, 'pending': pending, 'decisions': len(self.groups),
+                    'capacity': self.cfg['max_inflight_branches'], 'peak_active': self.peak_active,
+                    'saturated_waiting_peak': self.saturated_waiting_peak, 'cancelled': self.run_cancelled}
+
+    def check_cancelled(self, decision_id):
+        if self.run_cancelled or decision_id in self.cancelled:
+            raise Cancelled("Parallel decision cancelled")
+
+    def cancel(self, decision_id=None):
+        with self.condition:
+            if decision_id is None:
+                self.run_cancelled = True
+            decisions = list(self.groups) if decision_id is None else [decision_id]
+            for key in decisions:
+                self.cancelled[key] = time.monotonic() + self.cfg.get('decision_ttl_seconds', 28860)
+                group = self.groups.get(key)
+                if group is not None:
+                    group['cancelled'] = True
+                    # Active native work retains its lease until stream terminal.
+                    group.get('pending', set()).clear()
+            self.condition.notify_all()
+            return {'cancel_requested': True, 'decision_ids': decisions}
+
+    def reserve(self, decision_id, branches, decision_deadline_unix=None):
+        with self.condition:
+            self.check_cancelled(decision_id)
             if self.closed:
                 raise RuntimeError("Scoring broker closed")
             if not isinstance(decision_id, str) or not decision_id:
@@ -95,42 +132,120 @@ class ScoringBroker:
             if any(type(b) is not int or b < 0 for b in branches):
                 raise ValueError("Invalid branch identity")
             now = time.monotonic()
+            self.cancelled = {key: expiry for key, expiry in self.cancelled.items() if expiry > now or key in self.groups}
             for key in list(self.groups):
                 if self.groups[key]["expires"] < now:
                     del self.groups[key]
+            def active_branches():
+                return sum(len(group["active"]) for group in self.groups.values())
             if (len(branches) != len(set(branches)) or not branches
                     or len(branches) > self.cfg["branch_count"]):
                 raise ValueError("Invalid scoring group")
             if decision_id in self.groups:
                 raise ValueError("Decision already reserved")
-            if not self.condition.wait_for(lambda: sum(len(g["branches"]) for g in self.groups.values())
-                                           + len(branches) <= self.cfg["max_inflight_branches"],
-                                           self.cfg.get("admission_timeout_seconds", 1800)):
+            ttl = self.cfg.get("decision_ttl_seconds", 28860)
+            if decision_deadline_unix is not None:
+                if type(decision_deadline_unix) not in {int, float} or not np.isfinite(decision_deadline_unix):
+                    raise ValueError("Invalid parallel decision deadline")
+                ttl = min(ttl, decision_deadline_unix - time.time())
+                if ttl <= 0:
+                    raise ValueError("Parallel decision deadline exceeded")
+            dynamic = bool(self.cfg.get("dynamic_branch_admission", False))
+            if not dynamic and not self.condition.wait_for(
+                lambda: self.closed or self.run_cancelled or decision_id in self.cancelled or active_branches() + len(branches) <= self.cfg["max_inflight_branches"],
+                min(self.cfg.get("admission_timeout_seconds", 1800), ttl),
+            ):
                 raise RuntimeError("Parallel scoring capacity exhausted")
-            self.groups[decision_id] = {"branches": set(branches), "results": {},
-                                       "expires": time.monotonic() + self.cfg.get("decision_ttl_seconds", 28860)}
+            self.check_cancelled(decision_id)
+            if self.closed:
+                raise RuntimeError("Scoring broker closed")
+            if time.monotonic() >= now + ttl:
+                raise ValueError("Parallel decision deadline exceeded")
+            self.groups[decision_id] = {
+                "branches": set(branches),
+                "pending": set(branches) if dynamic else set(),
+                "active": set() if dynamic else set(branches),
+                "results": {},
+                "expires": now + ttl,
+            }
             return {"reserved": True}
 
     def mark_terminated(self, metadata, request_id, evidence):
         decision, branch = metadata["decision_id"], metadata["branch_id"]
         with self.condition:
             group = self.groups.get(decision)
-            if self.closed or group is None or branch not in group["branches"]:
+            if self.closed or group is None or group["expires"] <= time.monotonic() or branch not in group["branches"]:
                 return
             group["results"][branch] = {
                 "branch_id": branch, "native_request_id": request_id,
                 "api_attempt_id": metadata["api_attempt_id"], "status": "failed",
                 "reason": "reasoning_loop", "reasoning_loop": dict(evidence),
             }
+            group["active"].discard(branch)
             self.condition.notify_all()
+
+    def acquire_branch(self, decision_id, branch_id):
+        """Wait for one branch slot without reserving the other branch slots."""
+        with self.condition:
+            self.check_cancelled(decision_id)
+            initial = self.groups.get(decision_id)
+            if initial is None:
+                raise RuntimeError("Unknown parallel decision branch")
+            remaining = initial["expires"] - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("Parallel decision deadline exceeded")
+            def ready():
+                self.status()
+                group = self.groups.get(decision_id)
+                return self.closed or self.run_cancelled or decision_id in self.cancelled or group is None or branch_id not in group.get("pending", set()) or sum(len(g["active"]) for g in self.groups.values()) < self.cfg["max_inflight_branches"]
+            if not self.condition.wait_for(ready, min(self.cfg.get("admission_timeout_seconds", 1800), remaining)):
+                raise RuntimeError("Parallel scoring capacity exhausted")
+            self.check_cancelled(decision_id)
+            group = self.groups.get(decision_id)
+            if self.closed or group is None or branch_id not in group["branches"]:
+                raise RuntimeError("Unknown parallel decision branch")
+            if group["expires"] <= time.monotonic():
+                raise RuntimeError("Parallel decision deadline exceeded")
+            if branch_id in group["active"]:
+                return {"acquired": True, "already_acquired": True}
+            if branch_id not in group.get("pending", set()):
+                if branch_id in group.get("results", {}):
+                    return {"acquired": False, "already_released": True}
+                raise RuntimeError("Parallel branch is not pending")
+            group["pending"].remove(branch_id)
+            group["active"].add(branch_id)
+            self.status()
+            self.condition.notify_all()
+            return {"acquired": True, "active_branches": sum(len(g["active"]) for g in self.groups.values())}
+
+    def release_branch(self, metadata, request_id=None, reason="native_output"):
+        """Release one vLLM sequence slot while retaining decision evidence."""
+        decision, branch = metadata.get("decision_id"), metadata.get("branch_id")
+        with self.condition:
+            group = self.groups.get(decision)
+            if self.closed or group is None or branch not in group["branches"]:
+                return {"released": False, "reason": "unknown_branch"}
+            if branch in group.get("pending", set()):
+                group["pending"].remove(branch)
+            elif branch in group["active"]:
+                group["active"].remove(branch)
+            else:
+                return {"released": False, "reason": "already_released"}
+            group.setdefault("release_reasons", {})[str(branch)] = reason
+            if request_id is not None:
+                group.setdefault("native_request_ids", {})[str(branch)] = request_id
+            self.condition.notify_all()
+            return {"released": True, "active_branches": sum(len(g["active"]) for g in self.groups.values())}
 
     def submit(self, metadata, request_id, position, token_id, arrays):
         decision, branch = metadata.get("decision_id"), metadata.get("branch_id")
         with self.condition:
             group = self.groups.get(decision)
-            if self.closed or group is None or branch not in group["branches"] or branch in group["results"]:
+            if (self.closed or self.run_cancelled or decision in self.cancelled or group is None or group["expires"] <= time.monotonic()
+                    or branch not in group["branches"] or branch in group["results"]):
                 return
             identity = {"branch_id": branch, "native_request_id": request_id,
+                        **{k: metadata[k] for k in ("session_id", "decision_id", "api_attempt_id", "step_id", "request_sha256") if k in metadata},
                         "absolute_position": position, "token_id": token_id,
                         "sample_id": hash_json({"session": metadata["session_id"], "request": request_id,
                                                 "anchor": "think_close", "position": position})[:32]}
@@ -160,7 +275,7 @@ class ScoringBroker:
         def predict():
             start = time.monotonic()
             with self.condition:
-                if self.groups.get(decision) is not reserved_group or self.closed:
+                if self.groups.get(decision) is not reserved_group or self.closed or self.run_cancelled or decision in self.cancelled:
                     self.outstanding -= 1
                     return
             try:
@@ -174,7 +289,7 @@ class ScoringBroker:
             result["queue_ms"] = (start - queued_at) * 1000
             with self.condition:
                 group = self.groups.get(decision)
-                if group is reserved_group and group["results"].get(branch) is pending:
+                if group is reserved_group and not group.get("cancelled") and group["results"].get(branch) is pending:
                     group["results"][branch] = result
                 self.outstanding -= 1
                 self.condition.notify_all()
@@ -185,12 +300,21 @@ class ScoringBroker:
         if not 0 <= timeout <= 30:
             raise ValueError("Invalid score wait timeout")
         with self.condition:
+            self.check_cancelled(decision_id)
             if decision_id not in self.groups:
                 raise KeyError("Unknown scoring decision")
             group = self.groups[decision_id]
-            self.condition.wait_for(lambda: all(
+            remaining = group["expires"] - time.monotonic()
+            if remaining <= 0:
+                raise ValueError("Parallel decision deadline exceeded")
+            self.condition.wait_for(lambda: self.closed or self.run_cancelled or decision_id in self.cancelled or self.groups.get(decision_id) is not group or all(
                 group["results"].get(b, {}).get("status") in {"scored", "failed", "unscored"}
-                for b in group["branches"]), timeout)
+                for b in group["branches"]), min(timeout, remaining))
+            self.check_cancelled(decision_id)
+            if self.closed or self.groups.get(decision_id) is not group:
+                raise RuntimeError("Scoring decision released")
+            if group["expires"] <= time.monotonic():
+                raise ValueError("Parallel decision deadline exceeded")
             return {"results": [dict(group["results"].get(b, {"branch_id": b, "status": "missing"}))
                                 for b in sorted(group["branches"])],
                     "estimator_sha256": self.cfg["estimator_sha256"],
@@ -198,9 +322,9 @@ class ScoringBroker:
 
     def release(self, decision_id):
         with self.condition:
-            self.groups.pop(decision_id, None)
+            group = self.groups.pop(decision_id, None)
             self.condition.notify_all()
-            return {"released": True}
+            return {"released": group is not None}
 
     def close(self):
         with self.condition:

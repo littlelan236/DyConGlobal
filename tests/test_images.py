@@ -51,6 +51,7 @@ def test_preexisting_image_is_never_enrolled_or_removed(cfg):
 
 
 def test_four_independent_loads_overlap(cfg, monkeypatch):
+    cfg["images"]["load_workers"] = 4  # This contract explicitly requires four slots.
     client = Client(cfg["project_root"])
     manager = ImageLeaseManager(cfg, client)
     lock = threading.Lock()

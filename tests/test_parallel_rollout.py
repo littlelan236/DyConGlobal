@@ -434,7 +434,7 @@ def test_missing_rejected_close_reports_partial_without_breaking_winner(tmp_path
             c.record_output({"request_id": f"r{b}", "prompt_token_ids": [10, 198], "output_token_ids": [20, 11, 30]})
             candidates.append({"branch_id": b, "api_attempt_id": str(b), "response": {}, "score": None})
         c.record("r0", {"layer_0": np.ones(2)}, anchor="think_close", position=3, token_id=11, absolute_position=3)
-        c.record_decision({"session_id": "s", "decision_id": "d", "branch_count": 2,
+        c.record_decision({"session_id": "s", "decision_id": "d", "branch_count": 2, "step_id": 0,
                            "selected_branch_id": 0, "candidates": candidates})
         path = tmp_path / "trajectory.json"
         write_json(path, {"messages": [{"role": "assistant", "extra": {"response": {

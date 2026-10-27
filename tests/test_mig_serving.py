@@ -63,3 +63,35 @@ def test_reservation_releases_all_device_locks(tmp_path, monkeypatch):
         pass
     with reserve_serving_devices(tmp_path, "python", [device]):
         pass
+
+
+def test_physical_gpu_sharing_ignores_existing_device_locks(tmp_path, monkeypatch):
+    from contextlib import ExitStack
+    from hashlib import sha256
+    from core.locking import file_lock
+    import runtime.serving.resources as resources
+
+    monkeypatch.setattr(resources, "inspect_devices", lambda python, devices: {
+        "device_kind": "physical", "device_memory": [{"process_count": 1}],
+    })
+    with ExitStack() as stack:
+        for device in ("2", "3"):
+            digest = sha256(device.encode()).hexdigest()[:24]
+            stack.enter_context(file_lock(tmp_path / "state" / f"serving-gpu-{digest}.lock", nonblocking=True))
+        with reserve_serving_devices(tmp_path, "python", [2, 3]) as info:
+            assert info["lock_paths"] == []
+            with reserve_serving_devices(tmp_path, "python", [2, 3]):
+                pass
+
+
+def test_mig_still_rejects_overlapping_reservations(tmp_path, monkeypatch):
+    import runtime.serving.resources as resources
+
+    device = "MIG-2f2fe213-508a-57bb-b2c7-52f4ae0c1021"
+    monkeypatch.setattr(resources, "inspect_devices", lambda python, devices: {
+        "device_kind": "mig", "device_memory": [{"process_count": 0}],
+    })
+    with reserve_serving_devices(tmp_path, "python", [device]):
+        with pytest.raises(BlockingIOError):
+            with reserve_serving_devices(tmp_path, "python", [device]):
+                pass

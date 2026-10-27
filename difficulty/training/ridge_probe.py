@@ -94,7 +94,8 @@ def code_evidence(root):
              "difficulty/receipts.py", "difficulty/datasets/paths.py",
              "difficulty/models/estimators.py", "difficulty/models/ridge_grid.py",
              "difficulty/training/ridge_probe.py", "difficulty/training/artifacts.py"]
-    return {name: sha256(root / name) for name in names}
+    names += ['difficulty/training/config.py', 'difficulty/training/entrypoint.py', 'difficulty/training/visualization.py']
+    return {name: sha256(root / name) for name in names if (root / name).exists()}
 
 
 def draw_plots(output, settings, trials, champions):
@@ -149,26 +150,30 @@ def draw_plots(output, settings, trials, champions):
 
 
 @exclusive_artifact("difficulty-ridge", "experiment_id")
-def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None):
+def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
+              settings_override=None, training_config_path=None, training_config_raw=None, visualization=None):
     assert_frozen(cfg)
     if mode not in {"fit", "dry-run", "check-data"}:
         raise ValueError("Unknown probe mode")
-    settings_raw = cfg["difficulty"].get("ridge_probe")
-    if settings_raw is None:
-        raise ValueError("Configure difficulty.ridge_probe in the unique config.yaml")
-    settings_raw = dict(settings_raw)
-    if dataset_id is not None:
-        from core.io import identifier
-        source = Path(cfg['project_root']) / 'difficulty/datasets' / identifier(dataset_id)
-        rows = read_json(source / 'rollouts.json')['rollouts']
-        n_samples = sum(bool(line.strip()) for line in (source / 'samples.jsonl').read_text().splitlines())
-        settings_raw.update(dataset_id=dataset_id, dataset_receipt_sha256=sha256(source / 'receipt.json'),
-                            expected_tasks=len({(row['repo'], row['instance_id']) for row in rows}),
-                            expected_rollouts=len(rows), expected_samples=n_samples)
-        if split_id is not None:
-            frozen_split = read_json(source / 'splits' / identifier(split_id) / 'split.json')
-            settings_raw.update(split_strategy=frozen_split['strategy'], split_seed=frozen_split['seed'])
-    settings = RidgeProbe.model_validate(settings_raw)
+    if settings_override is not None:
+        settings = settings_override
+    else:
+        settings_raw = cfg["difficulty"].get("ridge_probe")
+        if settings_raw is None:
+            raise ValueError("Configure difficulty.ridge_probe in the unique config.yaml")
+        settings_raw = dict(settings_raw)
+        if dataset_id is not None:
+            from core.io import identifier
+            source = Path(cfg['project_root']) / 'difficulty/datasets' / identifier(dataset_id)
+            rows = read_json(source / 'rollouts.json')['rollouts']
+            n_samples = sum(bool(line.strip()) for line in (source / 'samples.jsonl').read_text().splitlines())
+            settings_raw.update(dataset_id=dataset_id, dataset_receipt_sha256=sha256(source / 'receipt.json'),
+                                expected_tasks=len({(row['repo'], row['instance_id']) for row in rows}),
+                                expected_rollouts=len(rows), expected_samples=n_samples)
+            if split_id is not None:
+                frozen_split = read_json(source / 'splits' / identifier(split_id) / 'split.json')
+                settings_raw.update(split_strategy=frozen_split['strategy'], split_seed=frozen_split['seed'])
+        settings = RidgeProbe.model_validate(settings_raw)
     split_id = split_id or settings.split_id
     explicit_split = split_id is not None
     if split_id is None:
@@ -234,7 +239,13 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None)
                   "r2_interpretation": ("validation selects layer/alpha; independent test is reported after refit"
                                          if threeway
                                          else "selection validation score, not independent test R^2")}
+    if settings_override is not None:
+        experiment.update(training_config=training_config_raw,
+                          training_config_path=str(training_config_path),
+                          training_config_sha256=sha256(training_config_path), training_config_frozen=True)
     output.mkdir(parents=True)
+    if settings_override is not None:
+        write_json(output / 'training-config.json', training_config_raw)
     write_json(output / "experiment.json", experiment)
     write_json(output / "attempt.json", experiment)
     if mode == "dry-run":
@@ -255,6 +266,8 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None)
     raw = np.column_stack([[s[LABELS[target]] for s in samples] for target in settings.targets])
     y = np.column_stack([transform_target(raw[:, i], target) for i, target in enumerate(settings.targets)])
     yt, yv = y[indices["train"]], y[indices["validation"]]
+    if visualization is not None:
+        visualization.start(output)
     trials = []
     for layer in settings.layers:
         matrix = np.load(cache / f"layer-{layer:02d}.f32.npy", mmap_mode="r", allow_pickle=False)
@@ -296,6 +309,12 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None)
                                "fit_scope": "train", "loss": "sum_squared_error; intercept_unpenalized"})
                     trial.update(model=relative, model_sha256=sha256(output / relative))
                 trials.append(trial)
+                if visualization is not None and trial['status'] == 'complete':
+                    visualization.write(target, (len(trials)-1)//len(settings.targets)+1, {
+                        'loss/train': trial['train']['rmse'] ** 2,
+                        'loss/val': trial['validation']['rmse'] ** 2,
+                        'trial/layer': layer, 'trial/alpha': alpha,
+                        'trial/validation_r2': trial['validation']['r2']})
         write_jsonl(output / "trials.jsonl", trials)
         print(f"ridge grid: layer {layer}, {len(trials)} candidates recorded", flush=True)
         del grid, xt, xv, zt, zv
@@ -406,6 +425,8 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None)
         report_lines.extend(f"| {target} | {t['layer']} | {t['alpha']:g} | {t['train']['r2']} | {t['validation']['r2']} |"
                             for target, t in winners.items())
     (output / "report.md").write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+    if visualization is not None:
+        visualization.close_writers()
     finish(output, experiment, root, before_code)
     return {"path": str(output), "mode": mode, "models": expected, "selected": winners}
 

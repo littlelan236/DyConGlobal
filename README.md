@@ -63,3 +63,12 @@ runner、analysis、easysteer、latent-vllm 是四个独立环境，按任务使
 本次精简前的全部 docs 原文、技术说明与实验/验收报告保存于 `/home/wangtianyi/dycon-isolation-20261021/docs-consolidation/`；日常只维护上面三份指南。历史指标仅说明当时的模型、精度、输入和运行范围，当前能力以源码和不可变 run 证据为准。
 
 Harness ????? `invalid_patch`?`infra_error` ? `ConnectionError`???????????????????? attempt ???Managed rollout ?????? GPU TP=4 ?? MIG UUID ?????? TP=1??? [?????????](docs/ENTRYPOINTS.md)?
+
+## Rollout seed retry
+
+New runs freeze `execution.limits_retry` from the root config. Whole-trajectory
+`LimitsExceeded` and `reasoning_loop` outcomes retain their evidence and requeue the
+same sample with a deterministic new seed. Infrastructure retries keep their seed
+and cumulative budget. Existing run snapshots and completed samples are unchanged.
+See [the rollout retry guide](docs/MINIMUM-RUN-CN.md)
+for capture recovery, counters, final selection, cancellation, and sampling caveats.

@@ -11,6 +11,7 @@ from hidden.backends.vllm.online import (
 from runtime.serving.capture import (
     AnchorError,
     CaptureControlServer,
+    CaptureRequest,
     OnlineCaptureController,
     validate_anchor,
 )
@@ -263,3 +264,16 @@ def test_http_staging_binds_explicit_native_request(tmp_path):
         assert not list((controller.export_root / "staging").glob("*.npz"))
     finally:
         server.close()
+
+
+def test_capture_request_accepts_parallel_consensus_32_branch_identity():
+    metadata = capture_request_metadata(
+        "s", "task", "run", "rollout", 0, ["think_close"], close_token_ids=[248069]
+    )
+    metadata.update(
+        decision_id="dec-32", branch_id=31, branch_count=32,
+        parent_prefix_sha256="a" * 64, api_attempt_id="attempt-32",
+    )
+    request = CaptureRequest.from_mapping(metadata)
+    assert request.branch_id == 31
+    assert request.branch_count == 32

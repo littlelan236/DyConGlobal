@@ -16,14 +16,14 @@ from difficulty.datasets.submission import load_selection, prepare_cache
 from difficulty.evaluation.metrics import regression_metrics
 from difficulty.models.estimators import FFNMLEstimator, FrozenRidgePlusFFNEstimator, inverse_target, resolve_device, transform_target
 from difficulty.models.mlp_checkpoint import (ARCHITECTURE_ID, FEATURE_SCHEMA, MODEL_KIND,
-    RIDGE_MLP_ARCHITECTURE, RIDGE_MLP_KIND, save_checkpoint)
+    RIDGE_MLP_ARCHITECTURE, RIDGE_MLP_KIND, FLEX_ARCHITECTURE, FLEX_RIDGE_ARCHITECTURE, save_checkpoint)
 from difficulty.probe_config import LABELS, MLPProbe, RidgeMLPProbe, target_transform
 from difficulty.receipts import verify_receipt
 from difficulty.training.artifacts import finish_attempt
 from difficulty.training.splits import create_split, load_split
 
 
-def code_evidence(root):
+def code_evidence(root, *, frozen_training=False):
     names = ['core/config.py', 'core/cli.py', 'core/io.py', 'core/locking.py',
              'difficulty/probe_config.py', 'difficulty/receipts.py', 'difficulty/artifacts.py',
              'difficulty/datasets/submission.py', 'difficulty/training/split.py',
@@ -34,7 +34,10 @@ def code_evidence(root):
              'runtime/serving/parallel.py', 'runtime/serving/ridge_provider.py',
              'difficulty/models/estimators.py',
              'difficulty/models/mlp_checkpoint.py', 'difficulty/evaluation/metrics.py']
-    return {name: sha256(root / name) for name in names}
+    names += ['difficulty/training/config.py', 'difficulty/training/entrypoint.py', 'difficulty/training/visualization.py']
+    if frozen_training:
+        names.remove('difficulty/training/config.yaml')
+    return {name: sha256(root / name) for name in names if (root / name).exists()}
 
 
 def _report(y, prediction):
@@ -62,7 +65,8 @@ def _loss_plot(path, history, target):
 
 
 @exclusive_artifact('difficulty-mlp', 'attempt_id')
-def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, kind=MODEL_KIND):
+def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, kind=MODEL_KIND,
+              settings_override=None, training_config_path=None, training_config_raw=None, visualization=None):
     assert_frozen(cfg)
     if mode not in {'dry-run', 'check-data', 'fit'}:
         raise ValueError('Unknown MLP mode')
@@ -71,30 +75,50 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
     ridge_plus_mlp = kind == RIDGE_MLP_KIND
     architecture_id = RIDGE_MLP_ARCHITECTURE if ridge_plus_mlp else ARCHITECTURE_ID
     root = Path(cfg['project_root'])
-    training_config_path = root / 'difficulty/training/config.yaml'
-    if not training_config_path.is_file():
-        raise FileNotFoundError(training_config_path)
-    training_config_raw = yaml.safe_load(training_config_path.read_text(encoding='utf-8')) or {}
-    raw_settings = dict(training_config_raw.get('mlp_probe') or {})
-    if not raw_settings:
-        raise ValueError('Training config must define mlp_probe')
-    if ridge_plus_mlp:
-        overrides = training_config_raw.get('ridge_mlp_probe')
-        if not overrides:
-            raise ValueError('Training config must define ridge_mlp_probe')
-        raw_settings.update(overrides)
-    training_config_sha256 = sha256(training_config_path)
-    if dataset_id is not None:
-        dataset_id = identifier(dataset_id)
-        source = root / 'difficulty/datasets' / dataset_id
-        rows = read_json(source / 'rollouts.json')['rollouts']
-        raw_settings.update(dataset_id=dataset_id, dataset_receipt_sha256=sha256(source / 'receipt.json'),
-                            expected_tasks=len({(r['repo'], r['instance_id']) for r in rows}),
-                            expected_rollouts=len(rows),
-                            expected_samples=sum(bool(s.strip()) for s in (source / 'samples.jsonl').read_text().splitlines()))
-    if split_id is not None:
-        raw_settings['split_id'] = identifier(split_id)
-    settings = (RidgeMLPProbe if ridge_plus_mlp else MLPProbe).model_validate(raw_settings)
+    supplied_settings = settings_override is not None
+    if supplied_settings:
+        training_config_path = Path(training_config_path)
+        training_config_raw = dict(training_config_raw)
+        settings = settings_override
+        training_config_sha256 = sha256(training_config_path)
+    else:
+        training_config_path = Path(training_config_path or root / 'difficulty/training/config.yaml')
+        if not training_config_path.is_file():
+            raise FileNotFoundError(training_config_path)
+        training_config_raw = yaml.safe_load(training_config_path.read_text(encoding='utf-8')) or {}
+        if training_config_raw.get('schema_version') == 2:
+            from difficulty.training.config import TrainingConfig, resolve_settings
+            import copy
+            adapted = copy.deepcopy(training_config_raw)
+            adapted['model']['kind'] = kind
+            if dataset_id is not None:
+                adapted['data']['dataset_id'] = dataset_id
+                adapted['data']['expected_receipt_sha256'] = None
+            if split_id is not None:
+                adapted['data']['split'] = {'id': split_id}
+            settings_override = resolve_settings(root, TrainingConfig.model_validate(adapted))
+            raw_settings = settings_override.model_dump()
+        else:
+            raw_settings = dict(training_config_raw.get('mlp_probe') or {})
+            if not raw_settings:
+                raise ValueError('Training config must define mlp_probe')
+            if ridge_plus_mlp:
+                overrides = training_config_raw.get('ridge_mlp_probe')
+                if not overrides:
+                    raise ValueError('Training config must define ridge_mlp_probe')
+                raw_settings.update(overrides)
+        training_config_sha256 = sha256(training_config_path)
+        if dataset_id is not None:
+            dataset_id = identifier(dataset_id)
+            source = root / 'difficulty/datasets' / dataset_id
+            rows = read_json(source / 'rollouts.json')['rollouts']
+            raw_settings.update(dataset_id=dataset_id, dataset_receipt_sha256=sha256(source / 'receipt.json'),
+                                expected_tasks=len({(r['repo'], r['instance_id']) for r in rows}),
+                                expected_rollouts=len(rows),
+                                expected_samples=sum(bool(s.strip()) for s in (source / 'samples.jsonl').read_text().splitlines()))
+        if split_id is not None:
+            raw_settings['split_id'] = identifier(split_id)
+        settings = (RidgeMLPProbe if ridge_plus_mlp else MLPProbe).model_validate(raw_settings)
     if settings.split_id is None:
         split_identity = {
             'dataset_id': settings.dataset_id,
@@ -114,7 +138,7 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
     output = artifact_dir(cfg, 'difficulty', attempt_id, 'checkpoints')
     if output.exists():
         raise FileExistsError(f'Attempt ID already exists (including partial): {output}')
-    before_code = code_evidence(root)
+    before_code = code_evidence(root, frozen_training=supplied_settings)
     rollouts, samples, evidence = load_selection(cfg, settings)
     if not all(r.get('resolved') is True and r.get('evaluation_status') == 'completed' for r in rollouts):
         raise ValueError('MLP requires an explicitly resolved-only training selection')
@@ -142,6 +166,10 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
             'feature_transform': 'single-site-vector', 'dtype': 'float32'}
     architecture = {'input_width': 4096, 'hidden_dim': settings.hidden_dim, 'dropout': settings.dropout,
                     'layernorm_eps': 1e-5, 'activation': 'gelu', 'dtype': 'float32'}
+    if settings.hidden_dims is not None:
+        architecture_id = FLEX_RIDGE_ARCHITECTURE if ridge_plus_mlp else FLEX_ARCHITECTURE
+        architecture.update(hidden_dims=settings.hidden_dims, activation=settings.activation,
+                            normalization=settings.normalization)
     environment = {'python': sys.version, 'numpy': np.__version__, 'platform': platform.platform()}
     actual_device = None
     if mode == 'fit':
@@ -162,9 +190,10 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
         'split_sha256': sha256(split_path / 'split.json'), 'sample_order_sha256': evidence['sample_order_sha256'],
         'train_sample_ids_sha256': hash_json(split['sample_ids']['train']),
         'model_fingerprint': next(iter(fingerprints)), 'fit_scope': 'train',
-        'training_config_path': str(training_config_path.relative_to(root)),
+        'training_config_path': str(training_config_path),
         'training_config_sha256': training_config_sha256,
         'training_config': training_config_raw,
+        'training_config_frozen': supplied_settings,
         'model_contract': {'model_kind': kind, 'architecture_id': architecture_id,
                            'feature_schema': FEATURE_SCHEMA, 'input_spec': spec, 'architecture': architecture,
                            'targets': settings.targets, 'target_transforms': {
@@ -178,9 +207,10 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
     }
     if ridge_plus_mlp:
         attempt['ridge_sources'] = ridge_sources
-        attempt['model_contract']['combination'] = 'ridge(x) + mlp_residual(x), in log1p space'
+        attempt['model_contract']['combination'] = 'ridge(x) + mlp_residual(x), in the configured target space'
         attempt['model_contract']['ridge_frozen'] = True
     output.mkdir(parents=True)
+    write_json(output / 'training-config.json', training_config_raw)
     write_json(output / 'attempt.json', attempt)
     write_json(output / 'experiment.json', attempt)
     completed = []
@@ -190,7 +220,7 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
                    'completed_targets': list(completed), **fields})
 
     def finish():
-        if sha256(training_config_path) != training_config_sha256:
+        if not supplied_settings and sha256(training_config_path) != training_config_sha256:
             raise ValueError('MLP training config changed during attempt')
         load_selection(cfg, settings)
         load_split(root, settings.dataset_id, settings.split_id, settings.dataset_receipt_sha256, samples)
@@ -200,6 +230,8 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
             _, current_sources = load_sources(root, settings, next(iter(fingerprints)), split)
             if current_sources != ridge_sources:
                 raise ValueError('Ridge publication changed during attempt')
+        if visualization is not None:
+            visualization.close_writers()
         progress('complete')
         finish_attempt(output, attempt, root, before_code, parents=[
             {'path': str(source.relative_to(root)), 'receipt_sha256': settings.dataset_receipt_sha256},
@@ -227,6 +259,8 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
         if mode == 'check-data':
             finish()
             return {'path': str(output), 'mode': mode, 'samples': len(samples), 'input_spec': spec}
+        if visualization is not None:
+            visualization.start(output)
         trained, selected = {}, {}
         train, validation, test = indices['train'], indices['validation'], indices['test']
         for target in settings.targets:
@@ -234,7 +268,7 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
             history_path.parent.mkdir(parents=True, exist_ok=True)
             with history_path.open('w', encoding='utf-8') as stream:
                 def record(row):
-                    row = {'target': target, **row}
+                    row = {'target': target, 'train_optimization_loss': row['train_loss'], **row}
                     # Regression has no classification accuracy. Record MSE/R2/MAE/RMSE
                     # for all partitions; test remains diagnostic only.
                     for role, idx in (('train', train), ('validation', validation), ('test', test)):
@@ -244,6 +278,13 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
                         row[f'{role}_r2'] = quality['r2']
                         row[f'{role}_mae'] = quality['mae']
                         row[f'{role}_rmse'] = quality['rmse']
+                    if visualization is not None:
+                        visualization.write(target, row['epoch'], {
+                            'loss/train': row['train_loss'], 'loss/val': row['eval_loss'],
+                            'loss/train_optimization': row['train_optimization_loss'],
+                            'optimizer/learning_rate': row['learning_rate'],
+                            'selection/best_val_loss': row['best_eval_loss'],
+                            'selection/best_epoch': row['best_epoch']})
                     def display(value):
                         return 'null' if value is None else f'{value:.5g}'
                     stream.write(json.dumps(row, allow_nan=False) + '\n')
@@ -259,7 +300,9 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
                 kwargs = dict(hidden_dim=settings.hidden_dim, dropout=settings.dropout, epochs=settings.epochs,
                     learning_rate=settings.learning_rate, weight_decay=settings.weight_decay, seed=settings.seed,
                     device=actual_device, batch_size=settings.batch_size, patience=settings.patience,
-                    min_delta=settings.min_delta, scheduler=settings.scheduler.model_dump())
+                    min_delta=settings.min_delta, scheduler=settings.scheduler.model_dump(),
+                    hidden_dims=settings.hidden_dims, activation=settings.activation,
+                    normalization=settings.normalization, optimizer=settings.optimizer)
                 model = (FrozenRidgePlusFFNEstimator(ridge_models[target], **kwargs) if ridge_plus_mlp
                          else FFNMLEstimator(**kwargs))
                 model.fit(x[train], y[target][train], validation_data=(x[validation], y[target][validation]), epoch_callback=record)
@@ -269,7 +312,7 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
                             feature_schema=FEATURE_SCHEMA, input_spec=spec, architecture=architecture,
                             target=target, target_label=LABELS[target], target_transform=(
                                 target_transform(target)), endpoint='submission',
-                            normalization='layernorm', fit_scope='train', seed=settings.seed,
+                            normalization=settings.normalization, fit_scope='train', seed=settings.seed,
                             best_epoch=model.best_epoch_, epochs_trained=model.epochs_trained_,
                             scheduler=settings.scheduler.model_dump(),
                             training_config_sha256=training_config_sha256)
@@ -341,7 +384,7 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
                   '| Target | Best epoch | Validation MSE | Test R2 (log1p) | Test R2 (raw) |',
                   '|---|---:|---:|---:|---:|']
         if ridge_plus_mlp:
-            report[2:2] = ['Frozen published Ridge + zero-initialized FFN residual in log1p space.',
+            report[2:2] = ['Frozen published Ridge + zero-initialized FFN residual in the configured target space.',
                 'Ridge publication snapshots and hashes are saved per target; Ridge is never refitted.',
                 'Published Ridge fitted samples do not overlap current validation/test samples.', '']
         for target in settings.targets:

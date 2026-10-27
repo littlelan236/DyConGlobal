@@ -4,6 +4,9 @@ import json
 import shlex
 from pathlib import Path
 
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
 from core.io import hash_json, sha256
 
 CONSTRAINT_FILE = "/tmp/dycon-constraints.txt"
@@ -11,20 +14,33 @@ WHEELS_PATH = "/opt/dycon-wheels"
 
 
 class EnvironmentPolicy:
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, *, wheel_hashes=None):
         self.cfg = cfg
         self.environment = cfg["environment"]
         wheelhouse = self.environment["wheelhouse"]
-        self.wheel_hashes = (
+        self.wheel_hashes = dict(wheel_hashes) if wheel_hashes is not None else (
             {p.name: sha256(p) for p in sorted(Path(wheelhouse).glob("*.whl"))} if wheelhouse else {}
         )
-        if self.environment["constraints"] and not self.wheel_hashes:
-            raise ValueError("Wheelhouse is empty")
+        if (self.environment["constraints"] or any(self.environment["repo_pins"].values())) and not self.wheel_hashes:
+            raise ValueError(f"Offline wheelhouse is empty for configured requirements: {wheelhouse}")
+        if wheelhouse and not self.wheel_hashes:
+            raise ValueError(f"Configured wheelhouse contains no wheels: {wheelhouse}")
 
     def specs(self, repo: str) -> list[str]:
-        return list(
-            dict.fromkeys(self.environment["constraints"] + self.environment["repo_pins"].get(repo, []))
-        )
+        normalized = {}
+        pins = {}
+        for text in self.environment["constraints"] + self.environment["repo_pins"].get(repo, []):
+            requirement = Requirement(text)
+            name = canonicalize_name(requirement.name)
+            requirement.name = name
+            key = str(requirement)
+            exact = [s.version for s in requirement.specifier if s.operator == "==" and "*" not in s.version]
+            if exact and not requirement.marker:
+                if name in pins and pins[name] != exact[0]:
+                    raise ValueError(f"Conflicting offline requirement pins for {name}: {pins[name]} vs {exact[0]}")
+                pins[name] = exact[0]
+            normalized.setdefault(key, key)
+        return list(normalized.values())
 
     def variables(self) -> dict[str, str]:
         env = dict(self.environment["variables"])
@@ -41,6 +57,9 @@ class EnvironmentPolicy:
                 "PIP_DISABLE_PIP_VERSION_CHECK": "1",
             }
         )
+        if self.environment.get("wheelhouse") and not self.environment["network_fallback"]:
+            # Also governs official eval scripts and their isolated build subprocesses.
+            env["PIP_NO_INDEX"] = "1"
         return env
 
     def bootstrap(self, repo: str) -> str:
@@ -73,16 +92,21 @@ class EnvironmentPolicy:
             "timeouts": self.cfg["timeouts"],
             "repo": repo,
             "specs": self.specs(repo),
+            "requirements": self.specs(repo),
+            "constraints": self.specs(repo),
             "wheel_hashes": self.wheel_hashes,
             "bootstrap": self.bootstrap(repo),
         }
         return {"policy_hash": hash_json(value), **value}
 
     def wrap_eval(self, script: str) -> str:
+        from runtime.containers.dependencies import INSTALL_ERROR_GUARD
+
         # Export before the official conda activation and every subsequent pip install.
         exports = "\n".join(f"export {k}={shlex.quote(v)}" for k, v in self.variables().items())
         head, separator, rest = script.partition("\n")
-        return head + separator + exports + "\n" + rest
+        prefix = exports + "\n" + INSTALL_ERROR_GUARD + "\n"
+        return head + separator + prefix + rest if head.startswith("#!") else prefix + script
 
 
 PROBE_CODE = """import json,sys,subprocess,importlib,os,re

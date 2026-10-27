@@ -99,6 +99,9 @@ class ImageLeaseManager:
     def __init__(self, cfg, client):
         self.cfg, self.client = cfg, client
         info = client.info()
+        from runtime.docker_storage import assert_data_root
+
+        assert_data_root(cfg, info)
         self.docker_root = Path(info["DockerRootDir"])
         self.state = Path(cfg["project_root"]) / "state/images"
         self.state.mkdir(parents=True, exist_ok=True)
@@ -256,7 +259,10 @@ class ImageLeaseManager:
         image_id = store.image_id
         name = image_id.replace(":", "-")
         try:
-            with (self.state / (name + ".lease")).open("a+") as lifetime:
+            from runtime.docker_storage import storage_lease, assert_data_root
+
+            with storage_lease(self.cfg), (self.state / (name + ".lease")).open("a+") as lifetime:
+                assert_data_root(self.cfg, self.client.info())
                 fcntl.flock(lifetime, fcntl.LOCK_SH)
                 with file_lock(self.state / (name + ".load.lock")):
                     present = self._exists(image_id)

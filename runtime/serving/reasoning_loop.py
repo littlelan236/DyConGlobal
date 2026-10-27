@@ -12,6 +12,8 @@ class ReasoningLoopDetector:
         self.options = options
         self.close_ids = set(close_ids)
         self.count = 0
+        self.phase = "reasoning"
+        self.include_post_close = options.get("include_post_close", False)
         self.closed = False
         self.hit = None
         self.capacity = max(options["repeat_count"] * options["max_period_tokens"],
@@ -40,7 +42,9 @@ class ReasoningLoopDetector:
             # Hashes only prefilter; native IDs prove equality even on collision.
             if all(self.tokens[i % self.capacity] == self.tokens[(i + period) % self.capacity]
                    for i in range(start, end - period)):
-                return {"rule": self.VERSION, "config_sha256": hash_json(opts),
+                return {"rule": "exact_token_period_v2" if self.include_post_close else self.VERSION,
+                        **({"phase": self.phase, "scope": "generated_output"} if self.include_post_close else {}),
+                        "config_sha256": hash_json(opts),
                         "period_tokens": period, "repeats": repeats, "repeated_tokens": size,
                         "start_output_token": start, "end_output_token_exclusive": end,
                         "detected_at_output_tokens": end}
@@ -51,8 +55,10 @@ class ReasoningLoopDetector:
             return self.hit
         for token in new_ids:
             if token in self.close_ids:
-                self.closed = True
-                break
+                if not self.include_post_close:
+                    self.closed = True
+                    break
+                self.phase = "post_close"
             self.tokens[self.count % self.capacity] = token
             self.count += 1
             self._hash = (self._hash * self._BASE + token + 1) & self._MASK

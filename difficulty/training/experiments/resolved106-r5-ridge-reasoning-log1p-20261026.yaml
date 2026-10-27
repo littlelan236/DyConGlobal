@@ -1,0 +1,22 @@
+﻿schema_version: 2
+run:
+  attempt_id: ridge-resolved106-r5-event70-15-15-reasoning-log1p-20261026
+  mode: fit
+data:
+  dataset_id: resolved106-r5-native-resolved-20261026
+  expected_receipt_sha256: c8705fb033db70df3d252061fe38b0530cf7273267b95cf8d241fbcd49fe96f2
+  split:
+    id: resolved106-r5-event70-15-15-v1-seed42-20261026
+  targets:
+    - submission_remaining_reasoning_tokens_log1p
+features:
+  public_site: 3
+model:
+  kind: ridge
+  ridge:
+    layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+    alphas: [0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0, 100000000.0]
+    standardize: true
+    blas_threads: 4
+tensorboard:
+  enabled: false

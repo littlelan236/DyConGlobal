@@ -40,6 +40,9 @@ class DurableAgent(DefaultAgent):
         self._loop_hit = None
 
     def run(self, task="", **kwargs):
+        reset = getattr(self.model, "reset_loop_escape", None)
+        if reset is not None:
+            reset()
         self._loop_history.clear()
         self._loop_step = 0
         self._loop_hit = None
@@ -80,6 +83,9 @@ class DurableAgent(DefaultAgent):
         return message
 
     def execute_actions(self, message):
+        check = getattr(self.model, "check_cancelled", None)
+        if check is not None:
+            check()
         hook = getattr(self.model, "record_action_phase", None)
         if hook is None or not message.get("extra", {}).get("dycon_parallel"):
             return super().execute_actions(message)

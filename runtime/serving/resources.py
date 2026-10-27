@@ -124,19 +124,24 @@ def inspect_devices(serving_python, devices, *, probe=True):
 
 @contextmanager
 def reserve_serving_devices(root, serving_python, devices):
+    """Inspect devices; physical GPU sharing is allowed, MIG remains exclusive."""
     normalized = normalize_devices(devices)
-    with ExitStack() as stack:
-        # Lock each device so overlapping TP groups cannot bypass admission.
-        lock_paths = []
-        for device in sorted(normalized):
-            digest = sha256(device.encode()).hexdigest()[:24]
-            path = Path(root) / "state" / f"serving-gpu-{digest}.lock"
-            stack.enter_context(file_lock(path, nonblocking=True))
-            lock_paths.append(str(path))
-        info = inspect_devices(serving_python, devices)
-        if info["device_kind"] == "mig" and any(
-            row["process_count"] for row in info["device_memory"]
-        ):
-            raise RuntimeError("Requested MIG instance is occupied; choose an idle instance")
-        info["lock_paths"] = lock_paths
-        yield info
+    if normalized[0].startswith("MIG-"):
+        with ExitStack() as stack:
+            lock_paths = []
+            for device in sorted(normalized):
+                digest = sha256(device.encode()).hexdigest()[:24]
+                path = Path(root) / "state" / f"serving-gpu-{digest}.lock"
+                stack.enter_context(file_lock(path, nonblocking=True))
+                lock_paths.append(str(path))
+            info = inspect_devices(serving_python, devices)
+            if any(row["process_count"] for row in info["device_memory"]):
+                raise RuntimeError("Requested MIG instance is occupied; choose an idle instance")
+            info["lock_paths"] = lock_paths
+            yield info
+        return
+
+    # Physical GPU processes may coexist; vLLM performs the actual memory admission.
+    info = inspect_devices(serving_python, devices)
+    info["lock_paths"] = []
+    yield info

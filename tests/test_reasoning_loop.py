@@ -89,3 +89,36 @@ def test_legacy_config_and_snapshot_do_not_enable_guard(cfg):
     restored = load_snapshot(cfg["project_root"], "legacy-reasoning-loop")
     assert "reasoning_loop" not in restored["parallel"]
     assert (run / "resolved-config.json").read_bytes() == before
+
+
+def test_post_close_loop_preserves_absolute_output_coordinates():
+    opts = options(include_post_close=True, min_generated_tokens=64,
+                   min_repeated_tokens=32, max_period_tokens=8, check_interval_tokens=8)
+    prefix = list(range(100, 132)) + [248069]
+    ids = prefix + [4, 5] * 128
+    detector = ReasoningLoopDetector(opts, [248069])
+    hit = detector.feed(ids)
+    assert hit["phase"] == "post_close"
+    assert hit["scope"] == "generated_output"
+    assert hit["rule"] == "exact_token_period_v2"
+    assert hit["start_output_token"] >= len(prefix)
+    a, b, period = hit["start_output_token"], hit["end_output_token_exclusive"], hit["period_tokens"]
+    assert ids[a:b] == ids[b-period:b] * hit["repeats"]
+
+
+def test_expanded_period_detects_2566_token_cycle_after_close():
+    ids = [41, 248069] + list(range(10000, 12566)) * 9
+    opts = options(include_post_close=True, max_period_tokens=8192)
+    hit = ReasoningLoopDetector(opts, [248069]).feed(ids)
+    assert hit["period_tokens"] == 2566 and hit["phase"] == "post_close"
+    assert ReasoningLoopDetector({**opts, "max_period_tokens": 2048}, [248069]).feed(ids) is None
+
+
+def test_legacy_reasoning_loop_option_preserves_resolved_hash(cfg):
+    path = Path(cfg["config_source"])
+    raw = yaml.safe_load(path.read_text())
+    raw["parallel"] = {"enabled": False, "reasoning_loop": options()}
+    raw["parallel"]["reasoning_loop"].pop("include_post_close", None)
+    path.write_text(yaml.safe_dump(raw))
+    legacy = resolve(path)
+    assert "include_post_close" not in legacy["parallel"]["reasoning_loop"]

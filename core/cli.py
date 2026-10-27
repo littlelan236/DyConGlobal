@@ -1,4 +1,4 @@
-﻿"""Light CLI; heavy model, agent and Docker dependencies are lazy imports."""
+"""Light CLI; heavy model, agent and Docker dependencies are lazy imports."""
 
 import argparse
 import json
@@ -33,14 +33,23 @@ def main(argv=None):
     q = run_sub.add_parser("start")
     q.add_argument("run_id")
     q.add_argument("--detach", action="store_true")
+    q.add_argument("--check-only", action="store_true", help="Run the managed startup acceptance without rollout tasks")
     q = run_sub.add_parser("wait")
     q.add_argument("run_id")
     q = run_sub.add_parser("resume")
     q.add_argument("run_id")
     q.add_argument("--detach", action="store_true")
+    q.add_argument("--check-only", action="store_true")
     q = run_sub.add_parser("cancel")
     q.add_argument("run_id")
     q.add_argument("--reason", default="user requested cancellation")
+    q = run_sub.add_parser("revise-capture-budget", help="Audit an explicitly authorized offline capture resource revision")
+    q.add_argument("run_id")
+    q.add_argument("--revision-id", required=True)
+    q.add_argument("--max-bytes", type=int, required=True)
+    q.add_argument("--high", type=float, required=True)
+    q.add_argument("--low", type=float, required=True)
+    q.add_argument("--reason", required=True)
     run_sub.add_parser("list")
     harness = sub.add_parser("harness", help="Prepare, run and inspect run-local harness results")
     harness_sub = harness.add_subparsers(dest="harness_command", required=True)
@@ -54,6 +63,11 @@ def main(argv=None):
     q.add_argument("--gold", action="store_true")
     q = harness_sub.add_parser("status")
     q.add_argument("run_id")
+    q = harness_sub.add_parser("metadata-prefetch", help="Cache exact official requirements before harness execution")
+    q.add_argument("--instances", type=Path, required=True)
+    q.add_argument("--output", type=Path, required=True)
+    q.add_argument("--proxy", help="Explicit host-side proxy; never changes container network policy")
+    q.add_argument("--refresh", action="store_true", help="Revalidate cached bytes against the pinned upstream revision")
     report = sub.add_parser("report", help="Project a run-local report")
     report_sub = report.add_subparsers(dest="report_command", required=True)
     q = report_sub.add_parser("run")
@@ -64,6 +78,22 @@ def main(argv=None):
     q.add_argument("run_id")
     q = capture_sub.add_parser("recover")
     q.add_argument("run_id")
+    q = capture_sub.add_parser("repair")
+    q.add_argument("run_id")
+    q.add_argument("--rollout-id", action="append", default=[])
+    q.add_argument("--session-id", action="append", default=[])
+    q.add_argument("--apply", action="store_true")
+    q.add_argument("--repair-id")
+    q.add_argument("--pointwise", action="store_true",
+                   help="Recover all integrity-checked points, including incomplete sessions")
+    q = capture_sub.add_parser("archive", help="Archive inactive capture spool to NAS and release local storage")
+    q.add_argument("run_id")
+    q.add_argument("--archive-id", required=True)
+    q.add_argument("--size-only-cleanup", action="store_true", help="Complete an already copied archive using file set and size only")
+    q = capture_sub.add_parser("relocate-spool", help="Relocate stopped local capture storage and rebind its disk ledger")
+    q.add_argument("--destination", type=Path, required=True)
+    q.add_argument("--migration-id", required=True)
+    q.add_argument("--apply", action="store_true")
     artifact = sub.add_parser("artifact", help="Inspect or verify run artifacts")
     artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
     q = artifact_sub.add_parser("show")
@@ -76,12 +106,29 @@ def main(argv=None):
     q.add_argument("--dataset-id")
     for cmd in ["config-check", "catalog-check", "runtime-check", "recover"]:
         sub.add_parser(cmd)
+    storage = sub.add_parser("docker-storage", help="Apply/check config.yaml rootless Docker data-root")
+    storage.add_argument("action", choices=["status", "apply"])
+    wheelhouse = sub.add_parser("wheelhouse", help="Build/verify a shared immutable task wheelhouse")
+    wheelhouse_sub = wheelhouse.add_subparsers(dest="wheelhouse_command", required=True)
+    p = wheelhouse_sub.add_parser("build")
+    p.add_argument("publication_id")
+    p.add_argument("--source", action="append", default=[], type=Path)
+    p.add_argument("--download-build-tools", action="store_true")
+    p = wheelhouse_sub.add_parser("verify")
+    p.add_argument("path", type=Path)
     sub.add_parser("capture-recover").add_argument("run_id")
+    p = sub.add_parser("capture-publish")
+    p.add_argument("run_id")
+    p.add_argument("--repair-id", required=True)
+    p.add_argument("--publication-id", required=True)
+    p.add_argument("--resolved-only", action="store_true")
+    p.add_argument("--coverage-policy", choices=["complete_native_sessions_v1", "available_native_suffix_v1"], default="complete_native_sessions_v1")
     p = sub.add_parser("capture-reclassify", help="Reclassify finalized branch captures from native token evidence")
     p.add_argument("run_id")
     p.add_argument("--session-id", required=True, action="append")
     p.add_argument("--wait-for-run", action="store_true", help=argparse.SUPPRESS)
     p = sub.add_parser("online-index")
+    p.add_argument("--publication-id")
     p.add_argument("run_id")
     p.add_argument("index_id")
     p.add_argument("--rollout-id", action="append", default=[])
@@ -111,6 +158,9 @@ def main(argv=None):
     for cmd in ["tasks-import", "rollouts-import", "evaluations-import"]:
         sub.add_parser(cmd).add_argument("list")
     sub.add_parser("model-register").add_argument("checkpoint")
+    skills_images = sub.add_parser("skillsbench-images", help="Prepare pinned SkillsBench images in NAS")
+    skills_images.add_argument("action", choices=["plan", "prepare", "status", "verify"])
+    skills_images.add_argument("--task-id", action="append", default=[])
     p = sub.add_parser("benchmark-pull")
     p.add_argument("cohort_id")
     p.add_argument("--count", type=int, default=600)
@@ -166,6 +216,36 @@ def main(argv=None):
     p.add_argument("--source-run")
     p.add_argument("--rollout-id", action="append", default=[])
     p.add_argument("--rollout-list", type=Path)
+    p = sub.add_parser("action-submission-audit", help="Audit submitted empty/invalid patches from frozen 80-task cohorts")
+    p.add_argument("analysis_id", nargs="?")
+    p.add_argument("--list", action="store_true", help="Read-only candidate run inventory")
+    p.add_argument("--check", action="store_true", help="Verify an existing audit receipt and source hashes")
+    p.add_argument("--task-count", type=int, default=80)
+    p.add_argument("--min-submitted", type=int, default=30, help="Exclusive threshold: submitted must be greater")
+    p.add_argument("--reference-run", default="verified80-parallel-baseline-20261021")
+    p = sub.add_parser("action-branch-stats", help="Exact-action diversity and winner-support histograms from frozen parallel decisions")
+    from action.evaluation.branch_curves import METRICS
+    p.add_argument("analysis_id")
+    p.add_argument("--source-run", action="append", default=[])
+    scope = p.add_mutually_exclusive_group()
+    scope.add_argument("--rollout-id", action="append", default=[])
+    scope.add_argument("--rollout-list", type=Path)
+    p.add_argument("--branch-scope", choices=["all", "retained", "both"], default="both")
+    p.add_argument("--termination-reason", help="Optional exact termination reason, e.g. Submitted")
+    p.add_argument("--format", dest="formats", choices=["png", "svg"], action="append", default=[])
+    p.add_argument("--dpi", type=int, default=180)
+    p.add_argument("--line-mode", choices=["per-run", "all-runs", "both", "none", "per-trajectory"], default="both",
+                   help="Normalized run averages, or one raw-step figure per selected rollout with per-trajectory")
+    p.add_argument("--line-metric", dest="line_metrics", action="append", default=[], choices=[m for m, _ in METRICS],
+                   help="Repeat to choose chart metrics; per-trajectory defaults to H, H/ln(K), K, exp(H), 1-q")
+    p.add_argument("--progress-points", type=int, default=101,
+                   help="Inclusive 0..1 interpolation grid size (2..1001)")
+    p.add_argument("--check", action="store_true", help="Verify existing branch receipt and source checksums")
+    p = sub.add_parser("action-review-length", help="Estimate review episodes from frozen submission/action evidence")
+    p.add_argument("analysis_id")
+    p.add_argument("--audit-id")
+    p.add_argument("--action-id")
+    p.add_argument("--check", action="store_true")
     p = sub.add_parser("action-classify", help="Create an immutable project-level action analysis and heatmaps")
     p.add_argument("analysis_id")
     p.add_argument("--source-run", action="append", required=True, help="Repeat for multiple source runs; use explicit rollout bindings")
@@ -214,6 +294,11 @@ def main(argv=None):
     p.add_argument("--bootstrap-samples", type=int, default=2000)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--skip-unavailable", action="store_true")
+    p = sub.add_parser("difficulty-train", help="Train an estimator from a standalone training YAML")
+    p.add_argument("--training-config", default="difficulty/training/config.yaml")
+    p = sub.add_parser("difficulty-tensorboard", help="Inspect or stop this project's managed TensorBoard")
+    p.add_argument("attempt_id")
+    p.add_argument("--action", choices=["status", "stop"], default="status")
     p = sub.add_parser("difficulty-ridge")
     p.add_argument("experiment_id")
     p.add_argument("--mode", choices=["dry-run", "check-data", "fit"], default="fit")
@@ -262,6 +347,16 @@ def main(argv=None):
     if a.command == "rollout" and a.resume and a.task_id:
         parser.error("resume uses the immutable task selection")
     explicit_run = a.analysis_run_id or getattr(a, "run_id", None)
+    if a.command == "harness" and a.harness_command == "metadata-prefetch":
+        if a.analysis_run_id or a.set:
+            parser.error("metadata-prefetch reads root config.yaml without run overrides")
+        from benchmark_evaluation.metadata import prefetch
+        cfg = resolve(a.config)
+        result = prefetch(cfg, a.instances, a.output, a.proxy, a.refresh)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if result['status'] != 'complete':
+            raise SystemExit(2)
+        return
     if a.command in {"runs-migrate-to-repetition", "migration-verify"}:
         from application.migration.runs_to_repetition import apply as apply_migration, inventory, verify as verify_migration
 
@@ -274,7 +369,15 @@ def main(argv=None):
             result = apply_migration(root, root / a.manifest, archive_root=a.archive_root)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
-    run_commands = {"rollout", "harness", "capture", "artifact", "report", "capture-recover", "online-index"}
+    if a.command == "capture" and a.capture_command == "relocate-spool":
+        if a.set or a.analysis_run_id:
+            parser.error("capture storage relocation reads root config without run overrides")
+        from hidden.relocate_spool import relocate_spool
+        result = relocate_spool(resolve(a.config), destination=a.destination,
+                                migration_id=a.migration_id, apply=a.apply)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    run_commands = {"rollout", "harness", "capture", "artifact", "report", "capture-recover", "capture-publish", "online-index"}
     if a.command in {"enrich", "token-trace", "trajectory-token-audit", "hidden", "dataset-index", "token-join"}:
         candidate = Path(a.config).resolve().parent / "runs" / a.dataset_id / "plan.json"
         if candidate.exists():
@@ -291,6 +394,39 @@ def main(argv=None):
         cfg = load_plan(Path(a.config).resolve().parent, explicit_run)["config"]
     else:
         cfg = resolve(a.config, a.set)
+    if a.command == "skillsbench-images":
+        if a.set or a.analysis_run_id:
+            parser.error("skillsbench-images reads root config.yaml; no run override")
+        if not cfg.get("skillsbench_images"):
+            parser.error("Configure skillsbench_images in root config.yaml")
+        from runtime.images.skillsbench import inventory, prepare, status, verify
+        if a.action != "prepare" and a.task_id:
+            parser.error("--task-id is only supported by prepare")
+        if a.action == "prepare":
+            result = prepare(cfg, only=a.task_id)
+        else:
+            result = {"plan": inventory, "status": status, "verify": verify}[a.action](cfg)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if a.action == "prepare" and result["status"] != "complete":
+            raise SystemExit(2)
+        if a.action == "verify" and not result["deep_verified"]:
+            raise SystemExit(2)
+        return
+    if a.command == "wheelhouse":
+        if a.analysis_run_id or a.set:
+            parser.error("wheelhouse reads root config.yaml; use explicit sources, not run overrides")
+        from runtime.wheelhouse import build, verify
+        result = (build(cfg, a.publication_id, a.source, a.download_build_tools)
+                  if a.wheelhouse_command == "build" else verify(a.path))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if a.command == "docker-storage":
+        if a.set or a.analysis_run_id:
+            parser.error("docker-storage reads the editable root config.yaml; no run snapshots or --set")
+        from runtime.docker_storage import apply, status
+        result = apply(cfg) if a.action == "apply" else status(cfg)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     catalog = Catalog(cfg["project_root"])
     def publish_artifacts(capture=False):
         if cfg.get("run_id") and not a.command.startswith("action-"):
@@ -299,10 +435,24 @@ def main(argv=None):
                 capture_publication(cfg["project_root"], cfg["run_id"])
             refresh(cfg["project_root"], cfg["run_id"])
 
+    if a.command == "capture-publish":
+        from hidden.publish_online import publish_online
+        result = publish_online(cfg, a.run_id, repair_id=a.repair_id, publication_id=a.publication_id, resolved_only=a.resolved_only, coverage_policy=a.coverage_policy)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
     if a.command == "capture":
         from application.execution.status import run_status
         if a.capture_command == "status":
             result = run_status(cfg["project_root"], a.run_id)
+        elif a.capture_command == "archive":
+            from hidden.archive_online import archive_online
+            result = archive_online(cfg, a.run_id, archive_id=a.archive_id, size_only_cleanup=a.size_only_cleanup)
+        elif a.capture_command == "repair":
+            from hidden.repair_online import repair_online
+            result = repair_online(cfg, a.run_id, rollout_ids=a.rollout_id,
+                                   session_ids=a.session_id, apply=a.apply,
+                                   repair_id=a.repair_id, pointwise=a.pointwise)
         else:
             from hidden.recover_online import recover_online
             result = recover_online(cfg, a.run_id)
@@ -354,6 +504,10 @@ def main(argv=None):
             result = {"run_id": a.run_id, "path": str(create_run(
                 cfg, a.run_id, operation=a.operation, tasks_file=a.tasks_file,
                 task_ids=a.task_id, partition=a.partition, repeat_count=a.repeat_count))}
+        elif a.run_command == "revise-capture-budget":
+            from application.execution.capture_budget_revision import revise_capture_budget
+            result = revise_capture_budget(cfg["project_root"], a.run_id, revision_id=a.revision_id,
+                                           max_bytes=a.max_bytes, high=a.high, low=a.low, reason=a.reason)
         elif a.run_command == "show":
             result = show_run(cfg["project_root"], a.run_id)
         elif a.run_command == "status":
@@ -365,12 +519,13 @@ def main(argv=None):
         elif a.run_command == "wait":
             result = wait(cfg["project_root"], a.run_id)
         elif a.run_command in {"start", "resume"}:
-            result = launch(cfg["project_root"], a.run_id, resume=True, detach=a.detach)
+            result = launch(cfg["project_root"], a.run_id, resume=a.run_command == "resume",
+                            detach=a.detach, check_only=a.check_only)
         else:
             result = reconcile_run(cfg["project_root"], a.run_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         if result.get("exit_code", 0) != 0:
-            raise SystemExit(result["exit_code"])
+            raise SystemExit(result["exit_code"] if isinstance(result.get("exit_code"), int) else 1)
         return
     if a.command == "config-check":
         result = cfg
@@ -400,7 +555,7 @@ def main(argv=None):
     elif a.command == "online-index":
         from difficulty.datasets.online import build_published_index
 
-        result = str(build_published_index(cfg, a.run_id, a.index_id, a.rollout_id, a.rollout_list))
+        result = str(build_published_index(cfg, a.run_id, a.index_id, a.rollout_id, a.rollout_list, publication_id=a.publication_id))
     elif a.command == "difficulty-dataset":
         if a.dataset_command == "compose":
             from difficulty.datasets.compose import compose_datasets
@@ -444,6 +599,15 @@ def main(argv=None):
     elif a.command == "rollout":
         if a.resume and a.set:
             raise ValueError("Resume uses immutable snapshot; --set requires a new run")
+        import os
+        if os.environ.get("DYCON_SUPERVISED") != "1" or os.environ.get("DYCON_EXECUTION_RUN") != str(Path(cfg["project_root"]) / "runs" / a.run_id):
+            from application.execution.supervisor import launch
+            result = launch(cfg["project_root"], a.run_id, resume=a.resume,
+                            check_only=a.check_only, task_ids=a.task_id)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            if result.get("error") or result.get("exit_code") not in (0,):
+                raise SystemExit(1)
+            return
         from rollout.runner import run_manifest
 
         result = run_manifest(
@@ -528,6 +692,45 @@ def main(argv=None):
         from difficulty.datasets.index import build_index
 
         result = str(build_index({**cfg, "source_run_id": a.source_run or cfg.get("run_id")}, a.dataset_id, a.capture_id, a.index_id, a.rollout_id, a.rollout_list))
+    elif a.command == "action-submission-audit":
+        from action.analyzers.submissions import audit_submissions, check_audit, inventory
+        if a.list and a.check:
+            parser.error("Use --list or --check, not both")
+        if a.task_count <= 0 or a.min_submitted < 0:
+            parser.error("task-count must be positive and min-submitted nonnegative")
+        if a.list:
+            result = inventory(cfg["project_root"], a.task_count, a.min_submitted, a.reference_run)
+        elif not a.analysis_id:
+            parser.error("Specify a new analysis ID, or use --list")
+        elif a.check:
+            result = check_audit(cfg, a.analysis_id)
+        else:
+            result = audit_submissions(cfg, a.analysis_id, task_count=a.task_count,
+                                       min_submitted=a.min_submitted, reference_run=a.reference_run)
+    elif a.command == "action-branch-stats":
+        from action.analyzers.branches import analyze_branches, check_branch_analysis
+        if a.check:
+            if (a.source_run or a.rollout_id or a.rollout_list or a.termination_reason or a.formats
+                    or a.line_mode != "both" or a.progress_points != 101 or a.line_metrics):
+                parser.error("--check reads frozen settings; do not pass source or plot selection arguments")
+            result = check_branch_analysis(cfg, a.analysis_id)
+        else:
+            if not a.source_run:
+                parser.error("action-branch-stats requires at least one --source-run")
+            result = analyze_branches(cfg, a.analysis_id, run_id=a.source_run,
+                                      rollout_ids=a.rollout_id, rollout_list=a.rollout_list,
+                                      scope=a.branch_scope, termination_reason=a.termination_reason,
+                                      formats=a.formats or ("png", "svg"), dpi=a.dpi,
+                                      line_mode=a.line_mode, progress_points=a.progress_points,
+                                      line_metrics=a.line_metrics)
+    elif a.command == "action-review-length":
+        from action.analyzers.review_length import run_review_length, check_review_length
+        if a.check:
+            result = check_review_length(cfg["project_root"], a.analysis_id)
+        else:
+            if not a.audit_id or not a.action_id:
+                parser.error("action-review-length requires --audit-id and --action-id, or --check")
+            result = run_review_length(cfg, a.analysis_id, audit_id=a.audit_id, action_id=a.action_id)
     elif a.command == "action-classify":
         from action.analyzers.trajectories import classify_trajectories
 
@@ -551,6 +754,12 @@ def main(argv=None):
         from difficulty.evaluation.run import evaluate_predictions
 
         result = str(evaluate_predictions(cfg, a.index_id, a.predictions, a.evaluation_id))
+    elif a.command == "difficulty-train":
+        from difficulty.training.entrypoint import run
+        result = run(cfg, a.training_config)
+    elif a.command == "difficulty-tensorboard":
+        from difficulty.training.visualization import manage
+        result = manage(cfg, a.attempt_id, action=a.action)
     elif a.command == "difficulty-ridge":
         import os
 
@@ -584,6 +793,15 @@ def main(argv=None):
         from runtime.containers.recovery import recover
 
         result = recover(cfg)
+    if a.command == "rollout":
+        import os
+        from core.cancellation import request_for
+        request = request_for(Path(cfg["project_root"]) / "runs" / a.run_id,
+                              os.environ.get("DYCON_EXECUTION_ATTEMPT"))
+        if request is not None:
+            print(json.dumps({"run_id": a.run_id, "cancelled": True,
+                              "partial_results": result}, ensure_ascii=False, indent=2))
+            return
     publish_artifacts(capture=a.command in {"rollout", "capture-recover"})
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if a.command == "rollout" and read_json(Path(cfg["project_root"])/"runs"/a.run_id/"status.json")["stage"]=="failed":

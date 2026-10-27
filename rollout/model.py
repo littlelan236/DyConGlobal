@@ -67,6 +67,17 @@ def make_model(cfg, deadline, capture_context=None, runtime=None, sample=None):
             super().__init__(*args, **kwargs)
             self._dycon_capture_step = 0
             self._dycon_metric_step = 0
+            self.reset_loop_escape()
+
+        def reset_loop_escape(self):
+            from rollout.loop_escape import LoopEscapeHistory
+
+            self._dycon_loop_escape = LoopEscapeHistory()
+
+        def check_cancelled(self):
+            cancellation = (runtime or {}).get('cancellation')
+            if cancellation is not None:
+                cancellation.check()
 
         def record_action_phase(self, message, phase, details=None):
             summary = message.get("extra", {}).get("dycon_parallel")
@@ -92,18 +103,24 @@ def make_model(cfg, deadline, capture_context=None, runtime=None, sample=None):
             return redact(value)
 
         def _query(self, messages, **kwargs):
+            self.check_cancelled()
             capture = self.config.model_kwargs.get("extra_body", {}).get("dycon_capture")
             if capture is not None:
                 capture["api_attempt_id"] = uuid4().hex
-            return super()._query(messages, **kwargs)
+            from rollout.progress import generation_phase
+            with generation_phase(runtime):
+                return super()._query(messages, **kwargs)
 
         def query(self, messages, **kwargs):
             from core.io import hash_json
+            cancellation = (runtime or {}).get('cancellation')
+            if cancellation is not None:
+                cancellation.check()
 
             self.config.model_kwargs["timeout"] = deadline.remaining(cfg["timeouts"]["model_seconds"])
             capture = self.config.model_kwargs.get("extra_body", {}).get("dycon_capture")
             if capture is not None:
-                for key in ("decision_id", "branch_id", "branch_count", "parent_prefix_sha256"):
+                for key in ("decision_id", "branch_id", "branch_count", "parent_prefix_sha256", "decision_deadline_unix"):
                     capture.pop(key, None)
                 capture.update(step_id=self._dycon_capture_step, query_id=uuid4().hex)
                 self._dycon_capture_step += 1
@@ -166,7 +183,8 @@ def make_model(cfg, deadline, capture_context=None, runtime=None, sample=None):
                         cfg, (runtime or {}).get("capture_controller"),
                         client=(runtime or {}).get("parallel_client"),
                         diagnostic_mode=(runtime or {}).get("diagnostic_selection_mode"),
-                        diagnostic_branches=(runtime or {}).get("diagnostic_branch_count"))
+                        diagnostic_branches=(runtime or {}).get("diagnostic_branch_count"),
+                        loop_escape_history=self._dycon_loop_escape, cancellation=cancellation)
 
                     def generate(prepared, metadata, seed):
                         options = copy.deepcopy(self.config.model_kwargs)
@@ -178,7 +196,9 @@ def make_model(cfg, deadline, capture_context=None, runtime=None, sample=None):
                         options["timeout"] = deadline.remaining(cfg["timeouts"]["model_seconds"])
                         # Call the same native model transport and parsers, with
                         # per-branch immutable kwargs; no shared metadata races.
-                        return LitellmModel._query(self, prepared, **options)
+                        from rollout.progress import generation_phase
+                        with generation_phase(runtime):
+                            return LitellmModel._query(self, prepared, **options)
 
                     def parse(response):
                         try:

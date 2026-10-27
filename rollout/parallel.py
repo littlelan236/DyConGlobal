@@ -8,6 +8,7 @@ import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from core.cancellation import Cancelled, CompletionWake
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ import requests
 
 from core.io import hash_json
 from rollout.consensus import select_consensus
+from rollout.loop_escape import LoopEscapeHistory, apply_escape, prepare_escape, selection_failure
 
 
 class ParallelSelectionError(RuntimeError):
@@ -56,7 +58,7 @@ class ServingParallelClient:
 
     def call(self, action, payload):
         response = requests.post(self.base + "/dycon/parallel/" + action,
-                                 json=payload, timeout=self.admission_timeout if action == "reserve" else self.timeout,
+                                 json=payload, timeout=self.admission_timeout if action in {"reserve", "branch-acquire"} else self.timeout,
                                  headers=self.headers)
         response.raise_for_status()
         return response.json()
@@ -72,9 +74,12 @@ def active(cfg, step):
 
 
 class ParallelReasoningCoordinator:
-    def __init__(self, cfg, controller, client=None, *, diagnostic_mode=None, diagnostic_branches=None):
+    def __init__(self, cfg, controller, client=None, *, diagnostic_mode=None, diagnostic_branches=None,
+                 loop_escape_history=None, cancellation=None):
+        self.cancellation = cancellation
         self.cfg, self.controller = cfg, controller
         self.options = cfg["parallel"]
+        self.loop_escape_history = loop_escape_history if loop_escape_history is not None else LoopEscapeHistory()
         self.client = client or ServingParallelClient(cfg)
         self.diagnostic_mode = diagnostic_mode
         self.branches = diagnostic_branches or self.options["branch_count"]
@@ -86,41 +91,84 @@ class ParallelReasoningCoordinator:
     def run(self, messages, capture, generate, parse, calculate_cost):
         if not capture or self.controller is None:
             raise ParallelSelectionError("Parallel rollout requires a live capture controller")
+        if self.cancellation is not None:
+            self.cancellation.check()
         opts = self.options
         baseline = opts.get("mode", "parallel") == "parallel_baseline"
         consensus = opts.get("mode") == "parallel_consensus" and self.diagnostic_mode is None
         random_selection = baseline and self.diagnostic_mode is None
         decision = "dec-" + uuid4().hex
+        decision_deadline = time.time() + opts.get("decision_ttl_seconds", 28860)
         prefix = hash_json(messages)
         candidates = []
         for branch in range(self.branches):
             metadata = {**copy.deepcopy(capture), "decision_id": decision, "branch_id": branch,
                         "branch_count": self.branches, "parent_prefix_sha256": prefix,
+                        "decision_deadline_unix": decision_deadline,
                         "api_attempt_id": uuid4().hex}
             candidates.append(BranchCandidate(branch, metadata))
             if self.diagnostic_mode:
                 metadata["diagnostic_score_disabled"] = True
         admission_start = time.monotonic()
         self.client.call("reserve", {"decision_id": decision,
+                                     "decision_deadline_unix": decision_deadline,
                                      "branches": [c.branch_id for c in candidates]})
         admission_ms = (time.monotonic() - admission_start) * 1000
         start = time.monotonic()
+        wake = None
         try:
             def one(candidate):
+                acquired = False
                 try:
+                    if opts.get("dynamic_branch_admission", False):
+                        lease = self.client.call("branch-acquire", {"decision_id": decision, "branch_id": candidate.branch_id})
+                        if lease.get("acquired") is not True:
+                            raise Cancelled("Parallel branch did not acquire a live lease")
+                        acquired = True
+                    if self.cancellation is not None:
+                        self.cancellation.check()
                     candidate.response = generate(messages, candidate.metadata,
                                                   self.cfg["generation"]["seed"] + candidate.branch_id)
                     candidate.cost = calculate_cost(candidate.response)["cost"]
+                    if self.cancellation is not None:
+                        self.cancellation.check()
                     if candidate.response.choices[0].finish_reason == "abort":
                         candidate.error = ParallelSelectionError("Native branch aborted without loop evidence")
                 except Exception as exc:
                     candidate.error = exc
+                finally:
+                    if acquired:
+                        try:
+                            self.client.call("branch-release", {"decision_id": decision, "branch_id": candidate.branch_id,
+                                                                "reason": "coordinator_complete"})
+                        except Exception:
+                            pass
                 return candidate
 
             with ThreadPoolExecutor(max_workers=len(candidates), thread_name_prefix="dycon-branch") as pool:
                 futures = [pool.submit(one, c) for c in candidates]
-                for future in as_completed(futures):
-                    future.result()
+                if self.cancellation is None:
+                    for future in as_completed(futures):
+                        future.result()
+                else:
+                    wake = CompletionWake(self.cancellation)
+                    pending = set(futures)
+                    for future in futures:
+                        future.add_done_callback(wake.notify)
+                    while pending:
+                        finished = wake.wait(pending, self.cancellation)
+                        if self.cancellation.event.is_set():
+                            for future in pending:
+                                future.cancel()
+                            break
+                        for future in finished:
+                            future.result()
+                        pending.difference_update(finished)
+            if self.cancellation is not None:
+                self.cancellation.check()
+            cancelled = next((c.error for c in candidates if isinstance(c.error, Cancelled)), None)
+            if cancelled is not None:
+                raise cancelled
             decode_ms = (time.monotonic() - start) * 1000
             wait_start = time.monotonic()
             score_error = None
@@ -167,6 +215,8 @@ class ParallelReasoningCoordinator:
                     except Exception as exc:
                         candidate.error = exc
                 row = {"branch_id": candidate.branch_id, "api_attempt_id": candidate.metadata["api_attempt_id"],
+                       "score_identity": {k: score[k] for k in (
+                           "session_id", "decision_id", "branch_id", "api_attempt_id", "step_id", "request_sha256") if k in score},
                        "seed": self.cfg["generation"]["seed"] + candidate.branch_id,
                        "native_request_id": score.get("native_request_id"),
                        "close_sample_id": score.get("sample_id"),
@@ -198,6 +248,17 @@ class ParallelReasoningCoordinator:
                     if candidate.message is not None:
                         row.update(status="eligible", reason=None)
                 records.append(row)
+            escape_meta = None
+            if opts.get("loop_escape", {}).get("enabled") and self.diagnostic_mode is None:
+                escape_meta = prepare_escape(records, {c.branch_id for c in formatted}, self.loop_escape_history)
+                escape_meta.update(rollout_mode=opts.get("mode", "parallel"),
+                                   fallback_policy=opts["fallback_policy"], consensus_config=opts.get("consensus", {}))
+                failure = selection_failure(records, escape_meta, escape_meta["rollout_mode"],
+                                            escape_meta["fallback_policy"], escape_meta["consensus_config"])
+                apply_escape(records, escape_meta, failure)
+                allowed = set(escape_meta["candidate_ids_after"])
+                eligible = [c for c in eligible if c.branch_id in allowed]
+                formatted = [c for c in formatted if c.branch_id in allowed]
             fallback = None
             selection_error = None
             consensus_meta = None
@@ -265,6 +326,7 @@ class ParallelReasoningCoordinator:
                 winner = None
                 selection_error = ParallelSelectionError("No eligible scored parallel candidate")
             evidence = {"schema_version": 1, "session_id": capture["session_id"],
+                        "decision_deadline_unix": decision_deadline,
                         "decision_id": decision, "step_id": capture["step_id"],
                         "query_id": capture["query_id"], "parent_prefix_sha256": prefix,
                         "branch_count": len(candidates), "transport": "concurrent_n1",
@@ -278,6 +340,8 @@ class ParallelReasoningCoordinator:
                         "admission_ms": admission_ms,
                         "response_to_selection_ms": (time.monotonic() - wait_start) * 1000,
                         "total_cost": sum(c.cost for c in candidates)}
+            if escape_meta is not None:
+                evidence["loop_escape"] = escape_meta
             if consensus:
                 evidence["rollout_mode"] = "parallel_consensus"
                 evidence["selection_mode"] = "parallel_consensus"
@@ -329,12 +393,16 @@ class ParallelReasoningCoordinator:
             }
             # Binding native receipts is event-driven and never waits for NAS.
             # A receipt failure stops before tools are executed, retaining raw responses.
+            if self.cancellation is not None:
+                self.cancellation.check()
             evidence = self.controller.record_decision(evidence, self.cfg["capture"]["control_seconds"])
+            if escape_meta is not None:
+                self.loop_escape_history.remember(evidence)
             if selection_error is not None:
                 if baseline:
                     for message in getattr(selection_error, "messages", []):
                         message.setdefault("extra", {}).update(
-                            decision_id=decision, cost=evidence["total_cost"])
+                            decision_id=decision, cost=evidence["total_cost"], total_usage=evidence["total_usage"])
                 raise selection_error
             capture.update(winner.metadata)
             summary = {k: v for k, v in evidence.items() if k != "candidates"}
@@ -348,6 +416,8 @@ class ParallelReasoningCoordinator:
             message["extra"].update(dycon_parallel=summary, cost=evidence["total_cost"])
             return message
         finally:
+            if wake is not None:
+                wake.close()
             try:
                 self.client.call("release", {"decision_id": decision})
             except Exception:

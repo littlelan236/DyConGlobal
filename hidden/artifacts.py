@@ -35,6 +35,30 @@ def read_arrays(root, row):
         return {k: archive[k] for k in archive.files}
 
 
+def read_repaired_session(root, repair_id, session_id, *, verify_dependencies=True):
+    """Read a published pointwise repair without implicitly enabling training.
+
+    Pass returned point rows to read_arrays(root, row). Recovery bindings remain
+    explicit; identity-only and orphan points are not native-exact token evidence.
+    """
+    from core.io import identifier
+    root = Path(root).resolve()
+    base = root / 'capture-repairs' / identifier(repair_id) / 'sessions' / identifier(session_id)
+    receipt = read_json(base / 'receipt.json')
+    if receipt['repair_id'] != repair_id or receipt['session_id'] != session_id:
+        raise ValueError('Repaired session receipt identity mismatch')
+    files = dict(receipt['files'])
+    if verify_dependencies:
+        files.update(receipt['dependencies'])
+    for relative, digest in files.items():
+        if sha256(owned_path(root, relative)) != digest:
+            raise ValueError('Repaired session checksum mismatch: ' + relative)
+    index = read_json(base / 'point-index.json')
+    if Path(index['tensor_root']).resolve() != root or index['session_id'] != session_id:
+        raise ValueError('Repaired tensor root/session identity mismatch')
+    return {'points': index['points'], 'coverage': read_json(base/'coverage.json'), 'receipt': receipt}
+
+
 def read_request(root, evidence):
     if evidence.get("ledger_ref"):
         path = owned_path(root, evidence["ledger_ref"])
@@ -79,6 +103,24 @@ def response_records(trajectory):
         extra = message.get("extra") or {}
         if isinstance(extra.get("response"), dict):
             yield index, message, extra["response"]
+
+
+def matching_request_receipts(session_id, message, response, receipts):
+    """Shared exact native identity join for live preparation and offline repair."""
+    metadata = (message.get("extra", {}).get("request") or {}).get("dycon_capture", {})
+    return [
+        row for row in receipts
+        if row["session_id"] == session_id
+        and (not metadata.get("decision_id") or (
+            row.get("decision_id") == metadata["decision_id"]
+            and row.get("branch_id") == metadata["branch_id"]))
+        and (row.get("query_id") == metadata["query_id"] if metadata.get("query_id")
+             else row["step_id"] == metadata.get("step_id"))
+        and (not metadata.get("api_attempt_id") or row.get("api_attempt_id") == metadata["api_attempt_id"])
+        and ((metadata.get("decision_id") and row.get("decision_id") == metadata["decision_id"])
+             or not response.get("id") or row["request_id"] == response["id"]
+             or row["request_id"].startswith(response["id"] + "-"))
+    ]
 
 
 def read_branch_index(root, session_id):

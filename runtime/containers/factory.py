@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -10,12 +11,15 @@ from pathlib import Path
 import docker
 import requests
 
-from core.io import hash_json, now, write_json
+from core.io import hash_json, now, sha256, write_json
 from runtime.containers.policy import EnvironmentPolicy, parse_probe, probe_command
+from runtime.containers.dependencies import setup_error
 
 
 class EnvironmentSetupFailed(RuntimeError):
-    pass
+    def __init__(self, message, *, dependency_failure=None):
+        super().__init__(message)
+        self.dependency_failure = dependency_failure
 
 
 class ContainerCorrupted(RuntimeError):
@@ -67,9 +71,29 @@ class ManagedContainer:
             bootstrap = self.policy.bootstrap(self.instance["repo"])
             result = self.factory.execute(self, bootstrap, self.factory.cfg["timeouts"]["bootstrap_seconds"])
             (self.context.output_dir / "bootstrap.log").write_text(result["output"])
+            receipt = {"schema_version": 1, "instance_id": self.instance["instance_id"],
+                       "attempt_id": self.context.attempt_id, "container_id": self.id,
+                       "policy_hash": self.spec["policy_hash"],
+                       "requirements": self.policy.specs(self.instance["repo"]),
+                       "constraints": self.policy.specs(self.instance["repo"]),
+                       "wheel_hashes": self.policy.wheel_hashes,
+                       "offline": not self.policy.environment["network_fallback"],
+                       "bootstrap_log_sha256": sha256(self.context.output_dir / "bootstrap.log"),
+                       "returncode": result["returncode"], "status": "failed", "at": now()}
+            write_json(self.context.output_dir / "bootstrap-receipt.json", receipt)
             if result["returncode"] != 0:
-                raise EnvironmentSetupFailed(f"Bootstrap failed: {result['output'][-2000:]}")
-            self.factory.probe(self, "environment.json")
+                error = setup_error(self.factory.cfg, self.context, result['output'],
+                    stage='bootstrap', returncode=result['returncode'],
+                    requirements=self.policy.specs(self.instance['repo']),
+                    wheelhouse=self.policy.environment.get('wheelhouse'),
+                    log_path=self.context.output_dir / 'bootstrap.log')
+                if error.dependency_failure:
+                    write_json(self.context.output_dir / 'bootstrap-receipt.json', {
+                        **receipt, 'dependency_failure': error.dependency_failure})
+                raise error
+            probe = self.factory.probe(self, "environment.json")
+            write_json(self.context.output_dir / "bootstrap-receipt.json", {
+                **receipt, "status": "ready", "packages_hash": probe["packages_hash"]})
             self.factory.event(self.context, "ready", container_id=self.id)
         except Exception:
             self.factory.close(self)
@@ -101,7 +125,19 @@ class ContainerFactory:
         from core.deadline import Deadline
 
         self.deadline = deadline or Deadline(cfg["execution"]["pipeline_wall_seconds"])
-        self.policy = EnvironmentPolicy(cfg)
+        if cfg["environment"].get("docker_data_root"):
+            from runtime.docker_storage import assert_data_root
+
+            assert_data_root(cfg, self.client.info())
+        try:
+            self.policy = EnvironmentPolicy(cfg)
+        except ValueError as exc:
+            run_id = cfg.get('run_id') or cfg.get('evaluation_run_id')
+            if not run_id:
+                raise
+            context = TaskContext(run_id, '__run__', 'preflight', 'environment-preflight',
+                Path(cfg['project_root']) / 'state/environment-failures' / run_id / 'preflight')
+            raise setup_error(cfg, context, str(exc), stage='preflight') from exc
         self._task_policies = {}
         self.images = dict(images or {})
         self._lock = threading.Lock()
@@ -122,6 +158,12 @@ class ContainerFactory:
         from runtime.containers.repairs import environment_overrides
 
         overrides = environment_overrides(self.cfg, instance)
+        shared_wheelhouse = self.cfg["environment"].get("wheelhouse")
+        if shared_wheelhouse:
+            # A configured root wheelhouse is the common mount. Preserve task
+            # pins and every other override; legacy snapshots with null retain
+            # their task-specific mount behavior.
+            overrides["wheelhouse"] = shared_wheelhouse
         if not overrides:
             return self.policy
         from core.config import Environment
@@ -132,7 +174,9 @@ class ContainerFactory:
                 environment = dict(self.cfg["environment"])
                 environment.update(overrides)
                 validated = Environment.model_validate(environment).model_dump()
-                self._task_policies[iid] = EnvironmentPolicy({**self.cfg, "environment": validated})
+                hashes = self.policy.wheel_hashes if shared_wheelhouse else None
+                self._task_policies[iid] = EnvironmentPolicy(
+                    {**self.cfg, "environment": validated}, wheel_hashes=hashes)
             return self._task_policies[iid]
 
     def event(self, context: TaskContext, event: str, **extra):
@@ -193,6 +237,17 @@ class ContainerFactory:
         self.deadline.check()
         if not instance.get("nas_image"):
             raise ValueError("Missing NAS image reference")
+        # Validate offline inputs before loading a large image or acquiring its lease.
+        try:
+            self.policy_for(instance).identity(instance["repo"])
+        except ValueError as exc:
+            write_json(context.output_dir / "environment-preflight.json", {
+                "status": "failed", "instance_id": instance["instance_id"],
+                "attempt_id": context.attempt_id, "reason": str(exc), "at": now()})
+            raise setup_error(self.cfg, context, str(exc), stage='preflight',
+                wheelhouse=self.cfg['environment'].get('wheelhouse') or
+                    (instance.get('environment_overrides') or {}).get('wheelhouse'),
+                log_path=context.output_dir / 'environment-preflight.json') from exc
         from runtime.images.nas import NasImageStore
 
         store = NasImageStore(self.cfg, instance["nas_image"])
@@ -249,6 +304,8 @@ class ContainerFactory:
                 "dycon.task": context.instance_id,
                 "dycon.attempt": context.attempt_id,
                 "dycon.role": context.role,
+                **({"dycon.execution": os.environ["DYCON_EXECUTION_ATTEMPT"]}
+                   if os.environ.get("DYCON_EXECUTION_ATTEMPT") else {}),
             },
         )
         self.event(context, "created", container_id=container.id, spec_hash=hash_json(spec))
@@ -284,7 +341,20 @@ class ContainerFactory:
     def probe(self, container: ManagedContainer, filename: str) -> dict:
         out = self.execute(container, probe_command(), self.cfg["timeouts"]["bootstrap_seconds"])
         if out["returncode"] != 0:
-            raise EnvironmentSetupFailed(out["output"][-2000:])
+            reason = None
+            failed = []
+            try:
+                failed = [c for c in parse_probe(out['output']).get('constraints', []) if not c.get('satisfied')]
+                if failed:
+                    reason = 'installed_version_mismatch'
+            except ValueError:
+                pass
+            log = container.context.output_dir / 'probe-error.log'
+            log.write_text(out['output'], encoding='utf-8')
+            raise setup_error(self.cfg, container.context, out['output'], stage='probe',
+                returncode=out['returncode'], reason=reason,
+                requirements=container.policy.specs(container.instance['repo']),
+                wheelhouse=container.policy.environment.get('wheelhouse'), log_path=log, version_checks=failed)
         data = parse_probe(out["output"])
         data["spec_hash"] = hash_json(container.spec)
         data["policy_hash"] = container.spec["policy_hash"]
@@ -306,10 +376,47 @@ class ContainerFactory:
                 if lease:
                     lease.__exit__(None, None, None)
 
-    def cleanup_owned(self, run_id: str):
+    def cleanup_cancelled(self, run_id: str):
+        return self.cleanup_owned(run_id, cleanup_images=False)
+
+    def cleanup_owned(self, run_id: str, *, cleanup_images=True):
         for container in self.client.containers.list(
             all=True, filters={"label": ["dycon.project=" + self.cfg["project_root"], "dycon.run=" + run_id]}
         ):
             self.close(container)
-        if self._image_manager:
+        if self._image_manager and cleanup_images:
             self._image_manager.cleanup()
+
+
+def cleanup_execution_containers(cfg, run_id, execution_attempt_id, client=None):
+    """Cancellation cleanup never prunes images or visits another execution."""
+    from core.cancellation import policy
+    from core.io import identifier
+    run_id, execution_attempt_id = identifier(run_id), identifier(execution_attempt_id)
+    own_client = client is None
+    client = client or docker.DockerClient(base_url=cfg['environment']['docker_host'],
+                                         timeout=min(3, policy(cfg)['cleanup_seconds']))
+    labels = ['dycon.project=' + cfg['project_root'], 'dycon.run=' + run_id,
+              'dycon.execution=' + execution_attempt_id]
+    removed, errors, remaining = [], [], []
+    try:
+        for container in client.containers.list(all=True, filters={'label': labels}):
+            if (container.labels.get('dycon.project') != cfg['project_root'] or
+                    container.labels.get('dycon.run') != run_id or
+                    container.labels.get('dycon.execution') != execution_attempt_id):
+                raise RuntimeError('Docker returned a container outside the requested execution')
+            try:
+                container.remove(force=True)
+                removed.append(container.id)
+            except docker.errors.NotFound:
+                removed.append(container.id)
+            except Exception as exc:
+                errors.append({'container_id': container.id, 'error': repr(exc)})
+        remaining = [c.id for c in client.containers.list(all=True, filters={'label': labels})]
+    except Exception as exc:
+        errors.append({'error': repr(exc)})
+    finally:
+        if own_client:
+            client.close()
+    return {'complete': not errors and not remaining, 'removed': removed,
+            'remaining': remaining, 'errors': errors}

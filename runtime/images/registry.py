@@ -18,14 +18,19 @@ ACCEPT = ", ".join(sorted(INDEX_TYPES | MANIFEST_TYPES))
 
 
 class Registry:
-    def __init__(self, proxy=None):
+    def __init__(self, proxy=None, *, registry="docker.io"):
         self.session = requests.Session()
         self.session.trust_env = False
         if proxy:
             self.session.proxies = {"https": proxy, "http": proxy}
         self.tokens = {}
+        if not re.fullmatch(r"[a-z0-9.-]+", registry):
+            raise ValueError("Invalid registry hostname")
+        self.registry = registry
 
     def get(self, repository, endpoint, *, stream=False, offset=0):
+        if self.registry != "docker.io":
+            return self._other_registry_get(repository, endpoint, stream=stream, offset=offset)
         if not re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", repository):
             raise ValueError("Invalid Docker Hub repository")
         for attempt in range(5):
@@ -69,6 +74,44 @@ class Registry:
             time.sleep(min(20, 2**attempt))
         raise RuntimeError("Registry retries exhausted")
 
+    def _other_registry_get(self, repository, endpoint, *, stream=False, offset=0):
+        if not re.fullmatch(r"[a-z0-9_./-]+", repository) or ".." in repository:
+            raise ValueError("Invalid registry repository")
+        url = f"https://{self.registry}/v2/{repository}/{endpoint}"
+        for attempt in range(5):
+            headers = {"Accept": ACCEPT}
+            if repository in self.tokens:
+                headers["Authorization"] = "Bearer " + self.tokens[repository]
+            if offset:
+                headers["Range"] = f"bytes={offset}-"
+            response = self.session.get(url, headers=headers, stream=stream, timeout=(20, 120))
+            if response.status_code == 401:
+                challenge = response.headers.get("WWW-Authenticate", "")
+                response.close()
+                if not challenge.lower().startswith("bearer "):
+                    raise ValueError("Public registry requires unsupported authentication")
+                fields = requests.utils.parse_dict_header(challenge[7:])
+                realm = fields.get("realm", "")
+                if not realm.startswith("https://"):
+                    raise ValueError("Registry token endpoint must use HTTPS")
+                params = {"service": fields.get("service", self.registry),
+                          "scope": fields.get("scope", f"repository:{repository}:pull")}
+                with self.session.get(realm, params=params, timeout=(20, 60)) as auth:
+                    auth.raise_for_status()
+                    body = auth.json()
+                    token = body.get("token") or body.get("access_token")
+                    if not isinstance(token, str) or not token:
+                        raise ValueError("Registry returned no anonymous token")
+                    self.tokens[repository] = token
+                continue
+            if response.status_code >= 500 and attempt < 4:
+                response.close()
+                time.sleep(min(20, 2**attempt))
+                continue
+            response.raise_for_status()
+            return response
+        raise RuntimeError("Registry authentication retries exhausted")
+
     def close(self):
         self.session.close()
 
@@ -94,11 +137,11 @@ def persist_bytes(directory, raw, expected=None):
     return digest
 
 
-def image_metadata(repository, directory, *, reference="latest", proxy=None):
+def image_metadata(repository, directory, *, reference="latest", proxy=None, registry="docker.io"):
     """Retain the original index, every platform/attestation manifest and config."""
     import json
 
-    client = Registry(proxy)
+    client = Registry(proxy, registry=registry)
     descriptors = {}
     active = set()
 
@@ -138,6 +181,9 @@ def image_metadata(repository, directory, *, reference="latest", proxy=None):
 
     try:
         root = visit(reference)
+        if registry != "docker.io":
+            for item in descriptors.values():
+                item["registry"] = registry
         return root, list(descriptors.values())
     finally:
         client.close()
@@ -158,7 +204,7 @@ def transfer_blob(item, directory, seed_directories=(), proxy=None, progress=Non
             os.link(source, target)
             return {"digest": item["digest"], "source": "nas-hardlink", "bytes": item["size"]}
     part = target.with_suffix(".part")
-    client = Registry(proxy)
+    client = Registry(proxy, registry=item.get("registry", "docker.io"))
     received = 0
     try:
         for attempt in range(6):

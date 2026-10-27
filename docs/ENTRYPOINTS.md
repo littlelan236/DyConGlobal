@@ -1,5 +1,33 @@
 # 任务入口与接口约定
 
+## Harness requirements 元数据预取（2026-10-26）
+
+运行前可用 runner 的 `dycon harness metadata-prefetch --instances INSTANCES.json --output NEW_RECEIPT.json [--proxy URL] [--refresh]`，按当前根 config 的 `environment.requirements_cache` 缓存官方 requirements。输入为完整 instance dict 列表，使用 `environment_setup_commit`（否则 base_commit），复用官方递归 requirements reader，不创建容器或修改评分定义。
+
+`--refresh` 对精确 commit 的已有缓存重新取源并比对字节，内容不一致会拒绝替换；正常缓存命中校验 SHA，真实 404/410 保留官方候选路径 fallback。receipt 记录 URL、来源、状态码、内容 SHA 和各 task 结果。已有无来源缓存标为 `legacy-cache-unattributed`，可 refresh 后补齐来源。输出拒绝覆盖，incomplete 返回非零。proxy 只用于宿主预取，不改变 task 的离线依赖或容器网络策略。
+
+共享 wheelhouse 的 `--download-build-tools` 现包含 `flit_core==3.9.0`，覆盖旧 Python 镜像中 Sphinx 的 `flit_core>=3.7` editable build 要求；依然通过 PyPI release SHA 校验并创建新的 immutable publication，不修改旧 wheelhouse。
+
+## Pointwise capture recovery
+
+`dycon capture repair RUN_ID --pointwise --apply --repair-id REPAIR_ID` recovers
+every integrity-checked retained point, including points from incomplete sessions.
+Use repeated `--session-id` arguments to freeze an explicit cohort. Original run
+evidence and finalized sessions are never overwritten. Publication is resumable
+under the same repair ID and selection. Local reports live in
+`runs/RUN_ID/hidden/capture-repairs/REPAIR_ID/`; NAS metadata lives under the
+run's configured capture export root in `capture-repairs/REPAIR_ID/`.
+
+Native token/response evidence, identity-only bindings, and orphan tensors are
+separate classifications. No missing token IDs or hidden tensors are invented.
+The known expected denominator is explicitly incomplete when native receipts
+are absent. All pointwise exports default to `eligible_for_training=false`;
+partial-session points must be explicitly selected and qualified downstream.
+`hidden.artifacts.read_repaired_session(NAS_RUN_ROOT, REPAIR_ID, SESSION_ID)`
+verifies a repaired session receipt. Its point rows can be read with the existing
+`read_arrays(NAS_RUN_ROOT, row)` reader. Tensor dependencies retain their original
+NAS locations and checksums, avoiding needless tensor duplication.
+
 
 
 核对日期：2026-10-21。工程根目录 `/home/wangtianyi/DyConGlobal`，NAS 根目录由 `config.yaml` 的 `paths.nas_root` 指定。
@@ -198,6 +226,8 @@ runs/RUN_ID/
 | 共享 hidden 视图 | analysis | `action-index INDEX_ID ACTION_INDEX_ID` | 引用共享 index，不重复提取 hidden |
 
 | Ridge 尝试 | analysis | `difficulty-ridge ATTEMPT_ID [--dataset-id ID] [--split-id ID] --mode dry-run/check-data/fit` | 新目录拒绝覆盖；默认 fit，见下文 |
+| 统一 difficulty 训练 | analysis | `difficulty-train [--training-config YAML]` / `source difficulty/scripts/train.sh [YAML]` | 独立严格训练配置统一选择 Ridge/MLP/Ridge+MLP，MLP 可配置隐藏层和优化器；fit 自动托管 TensorBoard |
+| TensorBoard 管理 | analysis | `difficulty-tensorboard ATTEMPT_ID --action status/stop` | 只管理本项目登记的服务 |
 | MLP 尝试 | analysis | `difficulty-mlp ATTEMPT_ID --dataset-id ID [--split-id SPLIT_ID] --mode dry-run/check-data/fit` | 参数来自 `difficulty/training/config.yaml`；默认 event split、scheduler 和三分区 epoch 指标 |
 | Ridge+MLP 尝试 | analysis | `difficulty-ridge-mlp ATTEMPT_ID --dataset-id ID [--split-id SPLIT_ID] --mode dry-run/check-data/fit` | 在每个目标的已发布 train-only Ridge 上训练零初始化 FFN 残差；发布 manifest、checkpoint、split 和 SHA 快照到 attempt |
 | 成功轨迹训练集 | analysis | `difficulty-dataset resolved DATASET_ID --source-run RUN_ID --index-id INDEX_REF` | 冻结精确评测和 canonical 样本关系 |
@@ -310,7 +340,7 @@ NAS `store` 相对 `paths.nas_root`。manifest 绑定 OCI config/layers descript
 
 
 
-parallel 单次 reasoning 内部循环保护由 `parallel.reasoning_loop` 配置，当前开启：至少生成 2048 token，每 64 token 检查 1–2048 token 的精确连续周期，要求至少重复 8 次且覆盖至少 1024 token。只检查本次生成且尚未 close 的 reasoning，不检查 prompt 或 action。服务端在现有 generate hook 中接收内部中间输出，命中后调用原生 abort 停止单个 native 请求；客户端仍为非流式响应，不修改 vLLM kernel、forward 或 CUDA Graph 配置。终止分支保留真实 partial token ledger 和 reasoning_loop 证据，不生成 close hidden、score 或工具调用，并从所有 fallback 排除。其他分支继续；全部分支均因循环终止时，rollout 以 `LimitsExceeded` 退出，limit_reason 为 `all_parallel_branches_reasoning_loop`。参数随新 run 冻结，旧快照缺字段时关闭；`enabled: false` 可禁用。检测到原生停止存在异步延迟，最终 token 数和检测位置均记录到证据。
+parallel 单次生成循环保护由 `parallel.reasoning_loop` 配置：当前 `include_post_close=true`，覆盖本次生成的 reasoning 与 `</think>` 后回答/工具参数，保持 native output token 绝对坐标；旧配置缺少该字段时仍仅检查未 close 的 reasoning。至少生成 2048 token，每 64 token 检查 1–8192 token 的精确连续周期，至少重复 8 次且覆盖至少 1024 token，不检查 prompt。服务端调用原生 abort 停止命中的单个 native 请求；结束已确认的请求不再 abort。命中保留真实 partial ledger、phase（reasoning/post_close）和 abort_completed 证据；post-close 分支可能已有 close hidden/score，但无论已有分数均从投票与 fallback 排除，部分工具参数绝不执行。其他分支继续；全部因循环中止仍沿用现有 LimitsExceeded/limit_reason。扩展规则为 exact_token_period_v2，旧 reasoning-only 规则保持 v1。参数随新 run 冻结，旧快照不回填。
 
 
 
@@ -630,3 +660,277 @@ The summary reports `network_retries`; retrying infrastructure does not create a
 ### Trajectory normalization
 
 Use `dycon difficulty-dataset resolved NEW_DATASET --source-run RUN --index-id INDEX --label-normalization trajectory_fraction`. Train fraction targets through the existing `difficulty-ridge`, `difficulty-mlp`, and `difficulty-ridge-mlp` commands using `submission_remaining_steps_fraction` and `submission_remaining_reasoning_tokens_fraction`. Raw labels and existing checkpoints remain unchanged.
+
+物理 GPU 的 managed serving 允许多个 run 共用同一设备，不获取设备独占锁；每个 run 通过独立 serving 端口和各自显存配置启动，GPU 可见性及 vLLM 显存检查仍生效。MIG instance 保留独占锁及已有进程检查；同一 run 的运行锁和 supervisor 锁保持生效。
+
+
+### Unified difficulty estimator training
+
+Use `source difficulty/scripts/train.sh [YAML]` or `dycon difficulty-train --training-config YAML`. The standalone schema-2 config selects a dataset and frozen/generated split, regression targets, Ridge/MLP/Ridge+MLP, input site, MLP layer dimensions and optimizer. Ridge is closed-form and has no optimizer. Ridge+MLP consumes verified frozen publications. TensorBoard records MLP evaluation-mode train/validation loss by epoch and Ridge grid loss by candidate. Remote default is loopback; tunnel from the local PC with `ssh -N -L 16006:127.0.0.1:6006 wangtianyi@10.249.187.9`, then browse `http://localhost:16006`. Check/stop via `dycon difficulty-tensorboard ATTEMPT_ID --action status|stop`. Events close before receipt finalization.
+
+
+## Docker ???????rootless?
+
+??????? `config.yaml` ? `environment.docker_data_root`??? `/data1/wangtianyi/docker`??????NAS namespace?Docker socket ? Docker data-root ??????????????
+
+```bash
+.venvs/runner/bin/dycon docker-storage status
+.venvs/runner/bin/dycon docker-storage apply
+```
+
+`status` ????????? daemon ?????`apply` ??????????? YAML?????????? `${XDG_CONFIG_HOME:-~/.config}/docker/daemon.json`????? daemon ???????????????? `docker.service`???????????????/???????????????????????????????????????????Docker ???? run ? image/container lease ????????????? daemon ????????????????? `state/docker-storage/ID/`?
+
+?? YAML ?????? `apply`??? rollout/harness ?????? Docker?????????????? DockerRootDir???????????????????????????? YAML ???????????????????????????????????????????????????? run ???
+
+NAS ?????? OCI ????? data-root ????? lease ??? cold load ???????????? `docker info` ? DockerRootDir??? containerd ??? root ????????????? run ?????????????????????????????????????????????? capture spool ???????
+
+
+## Native receipt 契约与 bootstrap-only 环境预检（2026-10-26）
+
+parallel 的 bind/output 使用 admission hook 观察到的完整 native request ID；外部 completion ID 仅作旁证。controller 按 `(session_id, decision_id, branch_id, api_attempt_id)` 建立索引，并核对 step、prompt hash 和 scorer 身份。相同 output 内容重试幂等确认；身份或内容冲突使该 decision 终止。插件在最终 stream yield 之前提交 receipt，避免消费方在最终项后关闭流时遗漏 ledger。control bind/output 仅对连接故障作一次幂等重试；失败 decision 的后续 payload 保存在 failures artifact，不继续提交该 decision 的 output。
+
+`failed-DECISION.json` 保留原始 responses 及 `receipt_diagnostics`，分别报告 `no_receipt`、`receipt_delayed`、`duplicate_receipt`、身份冲突、deadline 或 control 故障。`decision_deadline_unix` 从 coordinator 传到 scoring、bind、output 和 decision freeze；原始 receipts 保留至 session finalization。capture HTTP 服务 backlog 为 128，适应 32 分支并发回调。
+
+只验环境时扩展既有维护入口，不启动模型或 gold tests：
+
+```bash
+.venvs/runner/bin/python -m runtime.scripts.gold_image_audit \
+  --root /home/wangtianyi/DyConGlobal \
+  --instances FROZEN_INSTANCES.json --only-file SELECTED_IDS.json \
+  --audit-id UNIQUE_ENVIRONMENT_AUDIT --workers 2 \
+  --config-snapshot VERIFIED_AUDIT_CONFIG.json \
+  --bootstrap-only --repeat-count 2
+```
+
+输入仍须为已冻结的真实 instance dict 列表。每次使用共享 ContainerFactory 新建/启动/清理容器；输出独立 attempt 的 environment-policy、bootstrap.log、environment.json、bootstrap-receipt.json。汇总比较两次 policy/packages hash，报告 environment drift；`mode=bootstrap_only` 且 `resolved=null`，不得将环境可用性当成 gold 或模型解题成功。保留 `--cold-start` 原有拒绝缓存语义，不清理其他 run 的镜像。
+
+EnvironmentPolicy 会规范化 package 名及重复 requirement，并校验冲突 exact pins；repo pins 与全局 constraints 都要求非空离线 wheelhouse。requirements、constraints 和 wheel hashes 进入 policy/receipt。缺少 wheel 的失败在镜像 lease/load 之前写 `environment-preflight.json`，不能用删除 pins、升级 pytest 或安装网络 fallback 绕过。
+
+## Rollout 完整轨迹换 seed 重试（2026-10-26）
+
+根 `config.yaml` 显式启用 `execution.limits_retry.enabled`，并冻结
+`retry_statuses: [LimitsExceeded, reasoning_loop]`、
+`seed_policy: repetition_round_offset_v1`。配置缺省关闭；旧 run 的快照、hash、
+已完成 LimitsExceeded 样本和默认轨迹选择不变。仅新建 run 采用新策略。
+
+整条 agent 轨迹以两种目标状态之一结束后，先保存原轨迹并完成 capture、容器清理，
+然后把同一 task×repetition 放回平坦队列尾部，从干净环境以新 seed 重做。
+这不是 step 续写，也不增加 repetition 或提高 token/step/cost limit。
+其他已有正常终态（包括 ContextWindowExceededError）结束该 sample；Submitted 仍不等于 resolved。
+
+初始 seed 与旧规则一致。设 base seed 为 S、repeat_count 为 R、repetition index 为 r、
+seed round 为 k，冻结 branch_stride 为 B，则 `effective_seed = S + (r + k*R)*B`；
+分支使用 `effective_seed + branch_id`。每次执行校验当前 vLLM OpenAI API 的 signed-int64
+范围，禁止回绕。sample_seed 始终是计划初始值；effective_seed 表示真实执行值。
+
+LimitsExceeded 和 reasoning_loop 无默认次数上限；infra retry 保持同一 seed，
+按 sample 累计 `execution.infrastructure_retry_limit`，不因换 seed 刷新。
+capture 的 block_rollout 故障优先阻断重试；未知故障不能冒充 accepted。
+正式运行前应配置合理的 `execution.pipeline_wall_seconds`。`run cancel` 在 attempt 边界
+停止新派发，允许在途请求和收尾结束；不能立即中断 GPU 请求。
+
+每次真实尝试保存 `attempt-context.json`、`agent-outcome.json`、`attempt.json`；
+`retry-state.json` 是可重建 cursor，`result.json` 只发布 accepted 或明确 failure。
+恢复复用已经确认的 agent 结果和 canonical SHA；capture 已发布的任务沿既有
+`dycon capture recover RUN_ID` 恢复，不重新调用模型。缺少可验证的 capture 收尾证据时，
+保留 CaptureError 和原轨迹，先诊断恢复，不能跨过去换 seed。
+
+运行统计固定在 `runs/RUN_ID/rollout/limits-exceeded-counts.json`，分别记录
+limits_exceeded_count、reasoning_loop_count，以及两者合计 resample_trigger_count，
+包含 run/task/sample 明细。计数源为原始 agent_exit_status，capture 阻断或取消仍保留
+已发生的次数；实际启动新 seed 才增加 resample_retry_count。
+`rollout/statistics-policy.json` 标识新 run 的统计协议；旧 run 不补写。
+resume 和最终收尾核对/重建计数；artifact verify 对已结束 run 校验汇总与原始事实一致。
+
+`run status`、`report run` 与 progress 使用同一统计来源；缺失的旧统计显示未记录。
+progress 还显示 ready_samples、running_attempts、active_generation_samples、
+finalizing_attempts、admission_waiting_samples；active_generation_samples 来自真实模型传输阶段。
+attempt 的 timings 区分排队、admission、容器初始化、agent、capture drain/finalize 和统计写盘。
+平坦队列没有 repetition 屏障，但工具执行、capture 收尾、背压和末尾独立 sample 不足仍可导致 GPU 空等。
+
+启用新策略的 run 结束后，默认 harness/analysis/action/difficulty selection 只取每个
+accepted sample 的 final rollout；run 尚未结束时拒绝冻结默认完整输入。
+诊断中间尝试可显式给 rollout ID，记录 explicit_intermediate；原终态和 null 评测标签不变。
+总费用、token 和时间应覆盖全部物理尝试（parallel 的 total_usage 包含所有分支），
+`report run` 提供 all_attempt_usage。
+这些结果是排除 LimitsExceeded / reasoning_loop 后接受的条件采样，不能当作固定 seed 单次采样的无条件结果。
+
+Live phase counters are published in `rollout/phases.json` and merged into the
+progress view by `run status` and `report run`. Model requests never rewrite the
+full cohort or scan outcome history to publish these counters.
+
+
+## ?? wheelhouse?2026-10-26?
+
+?????`dycon wheelhouse build PUBLICATION_ID [--source DIR ...] [--download-build-tools]`????`dycon wheelhouse verify PATH`?
+??? Catalog ???????????????runtime/cache ???? wheelhouse ???? wheel???? SHA ??????????????????? Python/???????task constraints/repo pins ?????? pins?
+`--download-build-tools` ? PyPI ???????? Python ?? setuptools/wheel/packaging ??????? release SHA256??????????????? runtime/cache/PUBLICATION_ID?? manifest.json????Requires-Python?tags???? SHA?state/wheelhouse ????????? ID ????
+? config.yaml ? environment.wheelhouse ????????????????????????? task ? wheelhouse ???task pins?????????????? wheelhouse=null ???????? task ???????????? hash ?????????????????? task policy?
+network_fallback=false ??? wheelhouse ??PIP_NO_INDEX=1 ??? bootstrap??? harness ? pip ??????????? bootstrap ????? pip ???????????????????????
+???????? run ???????????????????????????????????????????? gold_image_audit ????? Python ??????
+
+
+## ?????????2026-10-26?
+
+??????? preflight?bootstrap ??? probe ?????????? dependency-failure.json??????? state/environment-failures/RUN_ID.json???????? attempt?stage ???????????? sample ???????????????
+???? failure_type=dependency_error?reason?stage?requirements/failed_requirements?wheelhouse?returncode?detail????? diagnostic_path?????????? version_checks????? spec ??????
+reason ?? wheelhouse_unavailable?missing_distribution?version_conflict?python_or_platform_incompatible?dependency_download_network_error?installed_version_mismatch ? dependency_install_failed??? pip ?????????????? requirement/constraint???? ResolutionImpossible??????? wheelhouse ??/????????????????????
+`dycon run status RUN_ID`?`dycon harness status RUN_ID` ? `dycon report run RUN_ID` ?? environment_failures ???rollout ? attempt/progress.sample ?? failure_type?dependency_failure?progress ?? environment_dependency_failure_count ????? attempt?stage ????????????????????????? infrastructure_exhausted?
+????????? pip/python -m pip/uv pip/conda ???????????? ERR marker ????????????????????harness outcome ?? status=infra_error?resolved=null?failure_type=dependency_error?summary ?? dependency_failure_count?dependency_reason_counts?failure_counts ??? dependency_error????????????????????????????? wheel ?????????
+???????????????? marker ???????????mock?????????/pip ?????????????????????????? run ?????????????
+
+
+## Parallel 跨 step 主动循环脱离
+
+根 `config.yaml` 中设置 `parallel.loop_escape.enabled: true` 后，在新建 run
+的冻结配置中启用；默认 `false`。已有 run/resume 使用原快照，缺少该配置的
+旧快照仍视为关闭，旧证据不回写。`parallel`、`parallel_baseline`、
+`parallel_consensus` 共用此预筛选，然后各自沿用原有 score/fallback、均匀随机、
+exact-action 共识选择。诊断 `first_valid_unscored` 不启用此机制。
+
+每个 rollout attempt/model 独立维护 branch slot 历史（含未选中但解析成功的输出）。
+槽位使用固定 branch ID 与 `generation.seed + branch_id`，与并发完成/admission
+顺序无关；它不是连续保留分支自身世界状态的 tree search。从第二个实际 parallel
+decision 开始，仅比较同槽位的全部先前有效输出；非 parallel step 不增加历史。
+优先保留 action 新变化的分支并排除 action 重复者；只有所有有效 action 均确认
+重复时才使用 reasoning 的变化。action 复用 canonical tool-action 身份，忽略 tool
+call ID、JSON key 顺序和传输字段，保留命令空白、执行参数和 action 顺序。
+缺失/不可比较的 action 或缺失/空 reasoning 是 unknown，不计为新变化，保守保留。
+
+若全部可比较输出重复，或过滤后不满足原模式的可选条件（例如共识不足两条），
+记录主动脱离失败并恢复本轮真实候选，交回原选择策略；不伪造 winner，不提前终止。
+`agent.loop_repeat_limit: 8` 及其周期历史保持原样，最终由原 detector 报
+`LimitsExceeded`。单次生成的 `parallel.reasoning_loop` token 检测不变；原有
+baseline scoring error、API/format/limit 错误优先级和共识最少分支约束保持不变。
+
+decision receipt 的 `loop_escape` 记录版本、parallel decision 序号、筛选阶段、
+前/建议/实际候选和失败原因。各 candidate 的独立 `loop_escape` 记录历史可用性、
+指纹、比较、匹配历史 decision、排除状态和原因；不会冒充 estimator_filtered 或
+共识投票结果。写 receipt 时从同 session 先前 receipts 重放历史并校验；关闭时
+保留旧 evidence 形态。配置检查使用 `.venvs/runner/bin/dycon config-check`。
+
+
+## Submitted patch 统计入口（2026-10-26）
+
+`analysis` 环境：`dycon action-submission-audit [ANALYSIS_ID] [--list | --check] [--task-count 80] [--min-submitted 30] [--reference-run RUN_ID]`。
+纳入相同冻结 task ID 集合、rollout operation、submitted 严格超过阈值的 run。
+新 ID 生成项目级只读来源统计；--list 只列范围；--check 验证该审计的专属 receipt 与输入哈希。
+最新评测兼容旧 infra_error 与新版 completed+invalid_patch，重评不重复计数轨迹。
+详细口径、结果与复查长度提案见 [action 审计文档](../action/SUBMISSION-REVIEW-AUDIT-CN.md)。
+# 高并发准入与有界取消（2026-10-26 修复）
+
+以下约定更新前文“cancel 仅写文件”和“reconcile 仅检查快照”的历史描述。
+
+- serving 将长期 reserve/acquire/results 等待、native bind/output 回执、tensor 发布、短控制分别放入有界执行池；准入等待不再消耗完成请求所需的默认 executor。native output 回执缺失仍记录 capture failure，不冒充完整采集或触发重复模型采样。
+- 新 execution 的 rollout 子进程与 supervisor 隔离 session；managed serving 在 exec 前登记身份并等待 supervisor ACK。记录 PID、start_ticks、host、boot_id、PGID/SID 以及 run/execution 归属。取消只管理这些专属资源，不按 GPU 或进程名清理共享服务。
+- `dycon run cancel RUN_ID --reason TEXT` 保持幂等的请求写盘语义，同时由 runner 文件事件监听唤醒调度、停止新派发/重试，并通过独立控制路径唤醒 broker、取消 native 请求。CLI 接受请求不等于实际退出。
+- `run status`、`report run`、`run wait` 的 `cancellation` 分开展示 request、supervisor ACK、runner ACK、真实 exit 和 termination/cleanup。强杀保留实际 -15/-9；协作取消也保留实际返回码，是否取消及是否清理以独立事实判断。
+- 根 `execution.cancellation` 默认 control/cooperative/TERM/kill-verify/cleanup 预算为 3/10/30/5/15 秒。supervisor 以独立截止时间推进，无法协作时 TERM，必要时 KILL，再核验本 execution 的容器。不运行全项目 recover 或镜像 prune。系统不可中断 I/O、Docker/NAS 故障会明确记录失败/未核验，不承诺无条件清理成功。
+- `run resume` 在旧 execution 清理确认后归档取消请求并建立新代际；旧取消通知不能影响新 execution。旧快照缺少新字段时使用本 execution 记录的兼容默认值，不改历史 config/hash/selection。
+- 若 supervisor 已退出且取消尚未完成，`dycon run reconcile RUN_ID` 可按原身份与原取消期限接管停止；非父进程无法取得的退出码写 null，并明确 `returncode_source=unavailable_non_child`，不猜测信号或成功。仍活跃的 supervisor 不会被 reconcile 替代；旧版非隔离进程组拒绝自动扩大停止范围。
+- 可用 `dycon run start RUN_ID --detach --check-only` 执行正式启动验收并由同一个 supervisor 管理。该命令真实使用 GPU/容器。`parallel.validation_repetitions=N` 除既有自然请求外，会运行 N 轮、每轮完整 rollout_workers 的 overlap；不按 capacity/branch_count 截掉超额组。新报告记录真实容量饱和与等待峰值。
+
+普通/parallel/baseline/consensus、capture/steering 继续使用既有唯一入口和冻结配置。原取消流程不做工具中途精确续写；未完成 native/trajectory/capture 保留 partial/interrupted 证据，已完成 sample 不倒改。
+
+
+## SkillsBench image preparation (2026-10-26)
+
+The `skillsbench_images` block in root config.yaml owns the pinned source,
+NAS publication, build workers, timeout, proxy and builder identity. This
+stage prepares images only; it does not register SWE-shaped fake tasks or run
+agents, oracle or verifier. Official `tasks/` only; `tasks-extra/` is excluded.
+
+```bash
+.venvs/runner/bin/dycon skillsbench-images plan
+.venvs/runner/bin/dycon skillsbench-images prepare
+.venvs/runner/bin/dycon skillsbench-images status
+.venvs/runner/bin/dycon skillsbench-images verify
+```
+
+Prepare is resumable and locked; `--task-id` selects a temporary preparation
+subset while the frozen publication still declares all official tasks. The
+command exits 2 until all images are complete. A compose sidecar is a separate
+image. Original task Dockerfiles remain unchanged. A separately staged Dockerfile adds a recorded apt mirror/retry profile; its SHA and profile are saved per image. Build logs
+and progress live in `state/skillsbench-images/STORE/`; content-addressed OCI
+blobs, per-service image records, frozen plan and final image manifest live in
+`paths.nas_root/STORE/`. `verify` deeply hashes all published graphs and exits 2
+if anything is missing. This verifies image integrity, not task correctness.
+
+Builds use the native rootless Docker context, verified against environment.docker_host. Source images/frontends are fetched through the NAS registry client and preloaded locally. Daemon proxy settings are unchanged; no daemon restart or global prune. Apt mirrors retain signature checks; invocation-specific configuration receipts are saved under attempt-configs/. A 100 GiB free-space
+floor protects /data1 before admission. Skill injection and verifier runtime
+dependencies are not added by this stage. Existing NAS/OCI importer and loader
+are reused. Changing source/environment requires a new publication store.
+
+
+## 复查长度分析入口（2026-10-26）
+
+analysis环境：action-review-length ANALYSIS_ID --audit-id AUDIT_ID --action-id ACTION_ID。
+检查：action-review-length ANALYSIS_ID --check。
+实现：action/analyzers/review_length.py、review_phases.py、review_effects.py；
+统计：action/evaluation/review_statistics.py。
+读取两个冻结父产物及SHA绑定canonical轨迹，只读来源，不执行轨迹命令。
+新ID生成独立action/outputs产物及receipt；unknown不补0，不属于七分类action-check。
+详见[action复查长度分析](../action/REVIEW-LENGTH-CN.md)。
+
+## Action 分支统计与曲线（analysis 环境，2026-10-26）
+
+入口 `dycon action-branch-stats ANALYSIS_ID --source-run RUN_ID`；
+重复 source-run 可组合来源，使用 `--rollout-id`（单 run）或 `--rollout-list` 选择轨迹。
+最小绘图身份是 `(source_run_id, rollout_id)`，不按 task 分组；不再提供 `--task-id`。
+
+`--line-mode per-trajectory` 每轨迹一张原始 step 图，`--line-metric NAME` 可重复选择面板。
+默认面板为 entropy、normalized_entropy、action_types、effective_action_count、winner_uncertainty。
+图在 `plots/per-trajectory/RUN_ID/ROLLOUT_ID.*`，原值在 `curves/per-trajectory.csv`，
+`plots/trajectory-index.json` 为逐张覆盖清单。无 parallel step 时生成该轨迹的不可用说明图。
+
+`--line-mode per-run|all-runs|both|none` 保留；run 平均曲线按轨迹独立归一化到0–100%，
+每个 run 内等权平均。默认 both 不含逐轨迹图，要批量逐条绘制须显式使用 per-trajectory。
+`--branch-scope all|retained|both` 默认both；`--termination-reason Submitted` 可选；
+`--format png|svg`、`--dpi 180`、`--progress-points 101` 沿用原约定。
+
+```bash
+.venvs/analysis/bin/dycon action-branch-stats NEW_ID \
+  --source-run RUN_ID --rollout-id ROLLOUT_ID --line-mode per-trajectory --line-metric entropy
+.venvs/analysis/bin/dycon action-branch-stats NEW_ID --check
+```
+
+产物在 `action/outputs/ANALYSIS_ID/`，使用独立 branch receipt 和同名 `--check`。
+详见 [action 分支统计](../action/BRANCH-ACTION-STATS-CN.md)。
+
+## Repaired capture publication
+
+Use `dycon capture-publish RUN_ID --repair-id REPAIR_ID --publication-id PUBLICATION_ID --resolved-only`
+to publish complete native-exact repaired sessions as online finalized token labels.
+The command verifies exact harness patch outcomes and preserves original evidence.
+Partial or unbound sessions are explicitly excluded.
+See [capture publication guide](CAPTURE-PUBLICATION-CN.md) for policy and downstream training commands.
+
+
+### SkillsBench image integrity completion: 2026-10-27
+
+The pinned 87-task / 88-service image publication is complete under
+skillsbench-f860ecf02-20261026, with images-manifest.json and full
+skillsbench-images verify SHA/OCI checks. This is image availability and
+integrity, not oracle/harness success. Upstream task files remain unchanged.
+
+Task-specific build compatibility is declared only in root
+skillsbench_images.task_compatibility and recorded in image provenance:
+SeisBench gets verified setuptools 80.9.0 for its missing pkg_resources provider;
+the TicToc tar extraction skips unmappable archive ownership; Coursier uses
+explicit, dynamically rendered proxy JVM flags with unchanged Scala 2.13.12.
+verified_wheels mounts identical official-hash-checked artifacts read-only;
+it does not bypass hashes or substitute package versions. AgentOps uses a
+source-linked, metadata-only rootless ownership derivation in the separate
+skillsbench-ownership-f860ecf02-20261026 NAS store. Oracle validation remains
+explicitly not_run for these environment adaptations.
+
+The build-only socat forwarder is managed by prepare and is closed afterwards.
+It does not replace the existing 7897 service or change daemon proxy settings.
+Final receipts and adaptation details are in
+state/skillsbench-images/skillsbench-f860ecf02-20261026/final-summary.json.
+
+## Capture spool archival
+
+Use `dycon capture archive RUN_ID --archive-id ARCHIVE_ID` to move inactive run spool history to NAS.
+All file hashes are checked before local duplicates and run-specific reservations are released.
+Historical evidence paths remain readable. See [capture archive guide](CAPTURE-ARCHIVE-CN.md).

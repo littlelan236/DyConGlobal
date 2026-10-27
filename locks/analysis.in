@@ -9,6 +9,8 @@ pydantic==2.13.5
 requests==2.34.2
 pytest==9.1.1
 ruff==0.17.0
-setuptools==84.0.0
+setuptools==80.10.2
 tree-sitter==0.26.0
 tree-sitter-bash==0.25.1
+
+tensorboard==2.20.0

@@ -168,6 +168,9 @@ def validate_consensus_evidence(decision, options=None):
     """Audit stored selection with the same selector; never execute tools or replace the winner."""
     import json
 
+    from rollout.loop_escape import validate_loop_escape_evidence
+
+    validate_loop_escape_evidence(decision)
     if decision.get("selection_mode") != "parallel_consensus":
         return
     config = decision.get("consensus_config")

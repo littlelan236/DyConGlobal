@@ -277,7 +277,7 @@ class ServingManager:
                 env["DYCON_CAPTURE_EXPORT_OPTIONS"] = json.dumps(capture_cfg["export"])
                 env["DYCON_CAPTURE_RESERVE_BYTES"] = str(cfg["images"]["reserve_bytes"])
                 self.capture_controller._write("inventory.json", self.capture_token_inventory)
-                self.capture_controller._write("capture-config.json", self.capture_controller.config)
+                self.capture_controller.write_configuration()
                 self.runtime = {
                     "capture_control_url": self.capture_server.base_url,
                     "capture_token_inventory": self.capture_token_inventory,
@@ -318,9 +318,23 @@ class ServingManager:
                 },
             )
             self.log = (self.output / "server.log").open("ab")
+            attempt_id = os.environ.get("DYCON_EXECUTION_ATTEMPT")
+            execution_run = os.environ.get("DYCON_EXECUTION_RUN")
+            if attempt_id and execution_run:
+                from uuid import uuid4
+                resource_id = "serving-" + uuid4().hex
+                attempt = Path(execution_run) / "execution/attempts" / attempt_id
+                write_json(attempt / "spawn-intents" / (resource_id + ".json"),
+                           {"resource_id": resource_id, "role": "serving", "created_at": now()})
+                args = [serving_python, "-m", "application.execution.process_gate",
+                        execution_run, attempt_id, resource_id, *args]
+                env["DYCON_CANCEL_OWNER_RUN"] = Path(execution_run).name
             self.process = subprocess.Popen(
                 args, cwd=root, env=env, stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True
             )
+            from core.processes import identity
+            write_json(self.output / "process.json", {**identity(self.process.pid), "managed": True,
+                       "run_id": self.output.parent.name, "execution_attempt_id": attempt_id})
         elif cfg["steering"]["enabled"]:
             raise ValueError("Steering requires managed pinned EasySteer provenance")
         session = requests.Session()

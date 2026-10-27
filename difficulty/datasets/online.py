@@ -4,18 +4,19 @@ import math
 from pathlib import Path
 
 from application.execution.evidence import RunEvidence
-from difficulty.datasets.selection import select_run
 from core.io import artifact_dir, read_json, sha256, write_json
 from core.locking import exclusive_artifact
+from difficulty.datasets.selection import select_run
+from enrichment.online_trace import publication_directory
 
 
 @exclusive_artifact("difficulty-dataset", "index_id")
-def build_published_index(cfg, run_id, index_id, rollout_ids=(), rollout_list=None):
+def build_published_index(cfg, run_id, index_id, rollout_ids=(), rollout_list=None, publication_id=None):
     """Reference published shards directly; no implicit packed tensor copy."""
     from core.config import load_snapshot
 
     frozen = load_snapshot(cfg["project_root"], run_id)
-    trace = Path(cfg["project_root"]) / "runs" / run_id / "enrichment/online"
+    trace = publication_directory(cfg["project_root"], run_id, publication_id)
     receipt = read_json(trace / "receipt.json")
     for name, digest in receipt["files"].items():
         if sha256(trace / name) != digest:
@@ -67,6 +68,7 @@ def build_published_index(cfg, run_id, index_id, rollout_ids=(), rollout_list=No
             "capture_id": run_id,
             "hidden_root": str(source),
             "label_root": str(trace.relative_to(cfg["project_root"])),
+            "publication_id": publication_id,
             "samples": samples,
             "source_receipt_sha256": sha256(trace / "receipt.json"),
             "split_authority": "source run task snapshot",
@@ -96,11 +98,14 @@ def build_online_index(cfg, capture_id, index_id):
     if not run_id:
         raise ValueError("Packed dataset selection requires an explicit source run")
     catalog = RunEvidence(cfg["project_root"], run_id).read()
+    wanted = set(select_run(cfg["project_root"], run_id)["rollout_ids"])
     partitions = {task["instance_id"]: task["partition"] for task in catalog["tasks"].values()}
     rows = []
     for event in read_json(source / "index.json"):
         if event["rollout_id"] not in catalog["rollouts"]:
             raise ValueError("Packed event belongs to another run")
+        if event["rollout_id"] not in wanted:
+            continue
         row = dict(event)
         row["remaining_steps_log1p"] = math.log1p(row["remaining_steps"])
         row["remaining_reasoning_tokens_log1p"] = math.log1p(row["remaining_reasoning_tokens_after"])

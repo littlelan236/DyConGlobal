@@ -128,8 +128,8 @@ def select_trajectories(cfg, run_id=None, rollout_ids=(), rollout_list=None):
             "duplicate_trajectory_aliases": aliases, "sources": sources, "source_snapshots": snapshots}
 
 
-def read_actions(root, source):
-    """Read one SHA-bound byte snapshot; avoid ledger hydration and future outputs."""
+def read_messages(root, source):
+    """Read SHA-bound canonical messages; shared by action classification and audits."""
     raw = owned_path(root, source["trajectory_path"]).read_bytes()
     if hashlib.sha256(raw).hexdigest() != source["trajectory_sha256"]:
         raise ValueError(f"Trajectory checksum mismatch: {source['rollout_id']}")
@@ -137,8 +137,13 @@ def read_actions(root, source):
     messages = trajectory.get("messages") if isinstance(trajectory, dict) else None
     if not isinstance(messages, list) or any(not isinstance(message, dict) for message in messages):
         raise ValueError("Trajectory must contain a messages list")
+    return messages
+
+
+def read_actions(root, source):
+    """Read one SHA-bound byte snapshot; avoid ledger hydration and future outputs."""
     return [
         {"message_index": i, "tool_calls": m.get("tool_calls") or []}
-        for i, m in enumerate(messages)
+        for i, m in enumerate(read_messages(root, source))
         if m.get("role") == "assistant"
     ]

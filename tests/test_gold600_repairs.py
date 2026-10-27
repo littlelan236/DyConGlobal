@@ -73,6 +73,9 @@ def test_repairs_bound_threads_and_use_shared_offline_policy(cfg):
     assert network["variables"]["HTTPS_PROXY"] == ""
     from runtime.containers.factory import ContainerFactory
 
+    wheels = Path(cfg["project_root"]) / "runtime/cache/gold600-wheels"
+    wheels.mkdir(parents=True)
+    (wheels / "pytest_httpbin-1.0.2-py2.py3-none-any.whl").write_bytes(b"fixture")
     factory = ContainerFactory(cfg, client=object())
     row = {"instance_id": "psf__requests-2873", "repo": "psf/requests"}
     policy = factory.policy_for(row)

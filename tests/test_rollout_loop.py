@@ -276,6 +276,7 @@ def test_runner_persists_loop_and_resumes_without_retry(cfg, monkeypatch, captur
     from runtime.containers import rollout_adapter
 
     pytest.importorskip("docker")
+    cfg["execution"].pop("limits_retry", None)  # Explicit legacy no-resampling contract.
     cfg["agent"].update(loop_repeat_limit=8, loop_max_period=7)
     cfg["capture"].update(enabled=capture, failure_policy="block_rollout")
     cfg["execution"]["infrastructure_retry_limit"] = 2

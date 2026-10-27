@@ -80,21 +80,25 @@ class RidgeEstimator:
         return np.c_[x, np.ones(len(x))] @ self.weights
 
 
-def _mlp(dim, hid, drop, seed, zero=False):
+def _mlp(dim, hid, drop, seed, zero=False, *, hidden_dims=None, activation='gelu', normalization='layernorm'):
     import torch
     import torch.nn as nn
 
     torch.manual_seed(seed)
-    m = nn.Sequential(
-        nn.LayerNorm(dim),
-        nn.Linear(dim, hid),
-        nn.GELU(),
-        nn.Dropout(drop),
-        nn.Linear(hid, hid),
-        nn.GELU(),
-        nn.Dropout(drop),
-        nn.Linear(hid, 1),
-    )
+    dims = [hid, hid] if hidden_dims is None else list(hidden_dims)
+    if not dims or any(type(d) is not int or d <= 0 for d in dims):
+        raise ValueError('hidden_dims must be a nonempty list of positive integers')
+    activations = {'gelu': nn.GELU, 'relu': nn.ReLU, 'silu': nn.SiLU}
+    if activation not in activations or normalization not in {'layernorm', 'none'}:
+        raise ValueError('Unsupported MLP activation/normalization')
+    # Identity keeps parameter numbering identical to the legacy two-block layout.
+    blocks = [nn.LayerNorm(dim) if normalization == 'layernorm' else nn.Identity()]
+    width = dim
+    for hidden in dims:
+        blocks.extend([nn.Linear(width, hidden), activations[activation](), nn.Dropout(drop)])
+        width = hidden
+    blocks.append(nn.Linear(width, 1))
+    m = nn.Sequential(*blocks)
     if zero:
         nn.init.zeros_(m[-1].weight)
         nn.init.zeros_(m[-1].bias)
@@ -131,7 +135,8 @@ class FFNMLEstimator(_Torch):
 
     def __init__(
         self, hidden_dim=256, dropout=0.0, epochs=100, learning_rate=1e-3, weight_decay=1e-4, seed=42,
-        *, device='cpu', batch_size=256, patience=None, min_delta=0.0, scheduler=None
+        *, device='cpu', batch_size=256, patience=None, min_delta=0.0, scheduler=None,
+        hidden_dims=None, activation='gelu', normalization='layernorm', optimizer=None
     ):
         self.hidden_dim = hidden_dim
         self.dropout = dropout
@@ -145,6 +150,10 @@ class FFNMLEstimator(_Torch):
         self.patience = patience
         self.min_delta = min_delta
         self.scheduler_config = scheduler or {'enabled': False}
+        self.hidden_dims = hidden_dims
+        self.activation = activation
+        self.normalization = normalization
+        self.optimizer_config = optimizer
 
     def fit(self, x, y, *, validation_data=None, epoch_callback=None):
         import time
@@ -178,9 +187,10 @@ class FFNMLEstimator(_Torch):
                           torch.from_numpy(self._training_targets(x, y)[:, None])),
             batch_size=min(self.batch_size, len(x)), shuffle=True, generator=generator,
         )
-        opt = torch.optim.AdamW(
-            self._module.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
-        )
+        from difficulty.training.config import Optimizer
+        options = Optimizer.model_validate(self.optimizer_config or {
+            'kind': 'adamw', 'learning_rate': self.learning_rate, 'weight_decay': self.weight_decay})
+        opt = options.build(self._module.parameters())
         scheduler = None
         if self.scheduler_config.get('enabled'):
             if self.scheduler_config.get('kind') != 'reduce_on_plateau':
@@ -243,7 +253,8 @@ class FFNMLEstimator(_Torch):
         return self
 
     def _make_module(self):
-        return _mlp(self.input_dim, self.hidden_dim, self.dropout, self.seed)
+        return _mlp(self.input_dim, self.hidden_dim, self.dropout, self.seed,
+                    hidden_dims=self.hidden_dims, activation=self.activation, normalization=self.normalization)
 
     def _training_targets(self, x, y):
         return y
@@ -289,7 +300,8 @@ class FrozenRidgePlusFFNEstimator(FFNMLEstimator):
     def _make_module(self):
         if len(self.ridge_model['coef']) != self.input_dim:
             raise ValueError('Frozen Ridge input width mismatch')
-        return _mlp(self.input_dim, self.hidden_dim, self.dropout, self.seed, zero=True)
+        return _mlp(self.input_dim, self.hidden_dim, self.dropout, self.seed, zero=True,
+                    hidden_dims=self.hidden_dims, activation=self.activation, normalization=self.normalization)
 
     def predict_base(self, x):
         from difficulty.models.ridge_grid import predict_model

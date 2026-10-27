@@ -92,3 +92,68 @@ Action 分为两个互补层：action-classify 直接读取 canonical rollout tr
 core.cli 调用 action.datasets.index.create_action_index，读取 difficulty/datasets/SHARED_INDEX_ID/index.json，记录源索引 SHA，写入 action/datasets/ACTION_INDEX_ID/index.json。它不是 trajectory action 分类的前置步骤。
 
 action 复用已有 hidden 与 task 分区，不重复提取 latent，不向当前 prefix 泄漏未来动作。当前 taxonomy 只分析可观察 shell/tool 行为；action 训练、taxonomy 学习和动作评测尚未实现。完整任务链见 [ENTRYPOINTS.md](../docs/ENTRYPOINTS.md)。
+
+
+## Submitted patch 审计与收尾复查原则
+
+80-task cohort 中 submitted > 30 的 run，按最新非 gold、SHA 绑定评测统计空/无效 patch；另报历史任一次。
+实现位于 `action/analyzers/submissions.py`，复用 canonical reader，不执行轨迹命令。
+
+```bash
+.venvs/analysis/bin/dycon action-submission-audit --list
+.venvs/analysis/bin/dycon action-submission-audit NEW_AUDIT_ID --task-count 80 --min-submitted 30
+.venvs/analysis/bin/dycon action-submission-audit NEW_AUDIT_ID --check
+```
+
+本次完整统计、5 个 run 的范围、分母、8 条真实轨迹示例与复查长度原则提案见
+[Submitted patch 与收尾复查分析](SUBMISSION-REVIEW-AUDIT-CN.md)。
+产物位于 `action/outputs/ANALYSIS_ID/`，使用专属 audit receipt/`--check`；不属于七分类 action-check。
+复查边界仍是提案，尚未生成总体复查长度标签。
+
+
+## 复查长度自动判定探索（2026-10-26）
+
+新增30条轨迹/1792个assistant step的观察、文件副作用追踪、状态机方法和探索原型，见
+[复查长度自动判定](REVIEW-LENGTH-AUTOMATION-CN.md)。
+正式action样例分析为 `review-length-extra30-20261026`；原型与临时结果在
+`temp/review_length_automation_20261026/`，不执行轨迹命令，不作为已验证的总体复查长度。
+
+
+## 复查长度统一入口与最终结果
+
+已实现 action-review-length：复用冻结action与提交审计，按文件副作用及episode规则统计复查长度。
+实现、指标口径、302条真实运行结果、unknown和测试记录见
+[复查长度分析](REVIEW-LENGTH-CN.md)。
+
+    .venvs/analysis/bin/dycon action-review-length NEW_ID --audit-id AUDIT_ID --action-id ACTION_ID
+    .venvs/analysis/bin/dycon action-review-length NEW_ID --check
+
+最终结果ID：review-length-submitted302-final-20261026。使用专属--check，不传给七分类action-check。
+
+## 分支 action 统计、熵与进度曲线（2026-10-26，schema v2）
+
+使用 `dycon action-branch-stats`，最小绘图单位为 `source_run_id + rollout_id`，
+不按 task 合并重复轨迹。`--task-id` 已移除，直接用 `--rollout-id` 或 binding 清单选择。
+
+```bash
+# 指定一条轨迹：原始 step，不插值或平均。
+.venvs/analysis/bin/dycon action-branch-stats NEW_SINGLE_ID \
+  --source-run RUN_A --rollout-id ROLLOUT_ID --line-mode per-trajectory
+
+# 该 run 的全部 eligible/final 轨迹，各绘制独立一张图。
+.venvs/analysis/bin/dycon action-branch-stats NEW_BATCH_ID \
+  --source-run RUN_A --line-mode per-trajectory
+
+# 每条轨迹的独立图中仅显示熵；也可重复 --line-metric 选择多个指标。
+.venvs/analysis/bin/dycon action-branch-stats NEW_ENTROPY_ID \
+  --source-run RUN_A --line-mode per-trajectory --line-metric entropy
+
+.venvs/analysis/bin/dycon action-branch-stats NEW_BATCH_ID --check
+```
+
+逐轨迹默认五面板：H、H/ln(K)、action种类数K、Perplexity exp(H)、Winner不确定性1−q。
+图在 `plots/per-trajectory/RUN_ID/ROLLOUT_ID.*`；原始数值在 `curves/per-trajectory.csv`，
+覆盖清单在 `plots/trajectory-index.json`。无 parallel step 的轨迹单独标注不可用。
+run 平均图 `per-run/all-runs/both` 保留，采用0–100%进度和轨迹等权平均；默认仍为 `both`。
+完整公式、参数、选择边界和历史兼容见 [分支 action 统计](BRANCH-ACTION-STATS-CN.md)。
+

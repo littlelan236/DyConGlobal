@@ -6,8 +6,9 @@ Execution code never re-reads the mutable root YAML for an existing run.
 
 from __future__ import annotations
 
-import yaml
 from pathlib import Path
+
+import yaml
 
 from catalog.store import Catalog
 from core.config import load_snapshot, snapshot
@@ -101,8 +102,15 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
         (run / folder).mkdir(parents=True, exist_ok=True)
     branch_count = cfg.get("parallel", {}).get("branch_count", 1) if operation == "rollout" else 1
     write_work_items(run, make_work_items(selection, run_id, repeat_count, cfg["generation"]["seed"], branch_count))
+    if operation == "rollout":
+        from rollout.retry import initialize_counts
+        initialize_counts(run, read_json(run / "rollout/work-items.json"))
     write_json(run / "status.json", {"stage": "planned", "run_id": run_id, "operation": operation})
-    write_json(run / "progress.json", {})
+    if operation == "rollout":
+        from rollout.progress import Progress
+        Progress(run, frozen, read_json(run / "rollout/work-items.json")["items"])._write()
+    else:
+        write_json(run / "progress.json", {})
     write_json(run / "artifacts.json", {"schema_version": 1, "run_id": run_id, "artifacts": []})
     write_json(run / "code-identity.json", {"schema_version": 1, "git": _git_identity(root)})
     write_json(run / "events" / "000001.json", {
@@ -164,6 +172,9 @@ def load_plan(root, run_id):
     )
     if expected["items"] != work_items["items"]:
         raise ValueError("Run work items disagree with frozen selection/config")
+    from rollout.retry import enabled
+    if enabled(cfg) and expected["seed_policy"] != work_items.get("seed_policy"):
+        raise ValueError("Run seed policy disagrees with frozen configuration")
     return {"run": run, "plan": plan, "config": cfg, "tasks": tasks, "work_items": work_items}
 
 

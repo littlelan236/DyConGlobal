@@ -7,12 +7,13 @@ from collections import Counter
 from pathlib import Path
 
 from application.execution.evidence import RunEvidence
-from core.io import hash_json, now, update_status, write_json
+from core.io import hash_json, now, read_json, update_status, write_json
 from core.locking import exclusive_run
 from runtime.containers.factory import ContainerFactory, TaskContext
+from runtime.containers.dependencies import classify_dependency_failure, from_exception, record_dependency_failure
 
 
-FAILURE_TYPES = ("invalid_patch", "network_error", "timeout", "other_error")
+FAILURE_TYPES = ("invalid_patch", "network_error", "timeout", "dependency_error", "other_error")
 MAX_NETWORK_RETRIES = 2
 NETWORK_RETRY_DELAY_SECONDS = 1
 
@@ -25,6 +26,11 @@ def classify_harness_failure(*, exception=None, evidence=""):
     infra_error with an explicit other_error classification.
     """
     text = evidence or ""
+    dependency = from_exception(exception) if exception is not None else None
+    dependency = dependency or classify_dependency_failure(text)
+    if dependency:
+        return {'failure_type': 'dependency_error', 'failure_detail': dependency['detail'],
+                'dependency_failure': dependency}
     if exception is not None:
         text = f"{text}\n{exception!r}\n{exception}"
     lowered = text.lower()
@@ -64,6 +70,25 @@ def _evaluation_evidence(output: Path, evaluation_task_id: str, rollout_id: str,
         if path.exists():
             parts.append(path.read_text(encoding="utf-8", errors="replace"))
     return "\n".join(parts)
+
+
+def _dependency_evidence(cfg, output, evaluation_task_id, rollout_id, instance_id, evidence='', exception=None):
+    failure = from_exception(exception) if exception is not None else None
+    if failure:
+        return failure
+    directory = output / 'environment' / evaluation_task_id / instance_id
+    path = directory / 'dependency-failure.json'
+    saved = read_json(path) if path.exists() else None
+    if saved and saved.get('stage') in {'preflight', 'bootstrap'}:
+        return saved
+    failure = classify_dependency_failure(evidence,
+        wheelhouse=cfg['environment'].get('wheelhouse'),
+        offline=not cfg['environment'].get('network_fallback', False),
+        log_path=output / 'harness' / evaluation_task_id / rollout_id / instance_id / 'test_output.txt')
+    if failure:
+        context = TaskContext(cfg['evaluation_run_id'], instance_id, evaluation_task_id, 'harness', directory)
+        return record_dependency_failure(cfg, context, failure)
+    return saved
 
 
 def install_harness_adapter(cfg: dict, factory: ContainerFactory, rows: list[dict], output: Path):
@@ -223,15 +248,24 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None):
                         spec, prediction, False, False, factory.client,
                         evaluation_task_id, timeout,
                     )
-                    if graded["completed"]:
+                    logs = _evaluation_evidence(output, evaluation_task_id, rid, iid)
+                    dependency = _dependency_evidence(cfg, output, evaluation_task_id, rid, iid, logs)
+                    if dependency:
+                        attempt_result = {'failure_type': 'dependency_error',
+                            'failure_detail': dependency['detail'], 'dependency_failure': dependency}
+                    elif graded["completed"]:
                         attempt_result = {"status": "completed", "resolved": bool(graded["resolved"])}
                     else:
                         attempt_result = classify_harness_failure(
-                            evidence=_evaluation_evidence(output, evaluation_task_id, rid, iid))
+                            evidence=logs)
                 except Exception as exc:
                     # Classify the exception separately: an old git-apply log must
                     # not turn a later connection failure into a patch failure.
                     attempt_result = classify_harness_failure(exception=exc)
+                    dependency = _dependency_evidence(cfg, output, evaluation_task_id, rid, iid, exception=exc)
+                    if dependency:
+                        attempt_result.update(failure_type='dependency_error',
+                            failure_detail=dependency['detail'], dependency_failure=dependency)
                     attempt_result["error"] = repr(exc)
 
                 failure_type = attempt_result.get("failure_type")
@@ -248,7 +282,9 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None):
                 # Replace the final outcome so successful retries cannot retain
                 # stale network failure_type/error fields.
                 result = {"patch_sha256": result["patch_sha256"], **attempt_result}
-                if result["status"] != "ConnectionError" or attempt == MAX_NETWORK_RETRIES:
+                retryable = result['status'] == 'ConnectionError' or (
+                    result.get('dependency_failure', {}).get('reason') == 'dependency_download_network_error')
+                if not retryable or attempt == MAX_NETWORK_RETRIES:
                     break
                 time.sleep(NETWORK_RETRY_DELAY_SECONDS * (attempt + 1))
             result["attempts"] = attempts
@@ -260,6 +296,9 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None):
                 rid, result = future.result()
                 outcomes[rid] = result
                 write_json(output / "progress.json", outcomes)
+                if result.get('failure_type') == 'dependency_error':
+                    update_status(output / 'status.json', 'evaluation',
+                        dependency_failure_count=sum(x.get('failure_type') == 'dependency_error' for x in outcomes.values()))
         resolved = sum(row["resolved"] is True for row in outcomes.values())
         summary = {
             "evaluation_id": eval_id,
@@ -271,6 +310,9 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None):
             "graded": sum(row["status"] == "completed" for row in outcomes.values()),
             "failure_counts": dict(Counter(row["failure_type"] for row in outcomes.values()
                                             if row.get("failure_type"))),
+            "dependency_failure_count": sum(row.get('failure_type') == 'dependency_error' for row in outcomes.values()),
+            "dependency_reason_counts": dict(Counter(row['dependency_failure']['reason'] for row in outcomes.values()
+                                                      if row.get('dependency_failure'))),
             "outcomes": outcomes,
             "finished_at": now(),
         }
@@ -298,7 +340,8 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None):
                 },
             )
         update_status(
-            output / "status.json", "complete" if summary["graded"] == summary["requested"] else "incomplete"
+            output / "status.json", "complete" if summary["graded"] == summary["requested"] else "incomplete",
+            dependency_failure_count=summary['dependency_failure_count']
         )
         return summary
     except BaseException as exc:

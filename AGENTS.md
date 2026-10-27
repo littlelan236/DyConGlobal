@@ -9,12 +9,13 @@
 - 普通、capture、steering、steering+capture rollout 都通过 `dycon rollout`；只在唯一 `config.yaml` 中切换开关。正式 rollout 拒绝 `--set`，resume 使用原始快照。
 - 批量历史 extraction 使用 `enrichment.scripts.launch_extraction`；queue worker 由 launcher 调度。该 launcher 固定 `anchors-20261017` 批次及 GPU 0–3，不是通用批次创建工具。
 - 诊断先查找已有 `hidden/evaluation/`、`runtime/scripts/` 工具，核对参数、硬编码范围和副作用。历史 speed-test/验收脚本不能替代生产入口。
+- `difficulty/scripts/train.sh` 是 `difficulty-train` 的正式 Bash `source` 包装，只委托统一 CLI。`difficulty/training/config.yaml` 是明确授权的 difficulty 专用配置，不改变 rollout 的根配置约定。`dycon difficulty-train` 完成配置校验、dataset/split 身份绑定、服务管理和 attempt 产物登记。`
 - 只有 Python API 的能力应明确说明边界。需要新增正式任务时，应在既有 CLI/模块中实现可维护入口并补充文档；不要用临时训练/提取脚本填补入口空缺。
 - action trajectory 分类使用 dycon action-classify，直接读取 manifest 绑定的 canonical trajectory；不得要求 enrichment 作为隐含前置，也不得另写 trajectory 读取脚本。
 
 ## 配置与数据
 
-- 唯一可编辑配置为 `config.yaml`；`catalog/manifest.json` 仅维护 benchmark 任务定义与分区；轨迹、补丁和评测属于指定 run 的 `evidence.json`。
+- rollout 等共享运行参数仍使用根 `config.yaml`；difficulty estimator 训练专用配置位于 `difficulty/training/config.yaml`，由正式 `difficulty-train` CLI 读取。`catalog/manifest.json` 仅维护 benchmark 任务定义与分区；轨迹、补丁和评测属于指定 run 的 `evidence.json`。
 - `runs/<run>/resolved-config.json`、selection、hash 和 artifact receipt 是不可变证据，禁止为适配新参数而修改旧快照。
 - unresolved、未评测和基础设施故障的成功剩余量标签保留 null；重建 token 证据不能冒充 exact IDs；action 分析复用现有 hidden。
 - 使用任务对应的 `.venvs/runner`、`.venvs/analysis`、`.venvs/easysteer`、`.venvs/latent-vllm`，不混用推理和提取 runtime。

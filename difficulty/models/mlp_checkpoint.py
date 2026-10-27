@@ -15,10 +15,21 @@ MODEL_KIND = 'ffn_mlp'
 ARCHITECTURE_ID = 'layernorm-ffn-2block-v1'
 RIDGE_MLP_KIND = 'ridge_plus_ffn'
 RIDGE_MLP_ARCHITECTURE = 'frozen-ridge-layernorm-ffn-2block-v1'
+FLEX_ARCHITECTURE = 'configurable-ffn-v2'
+FLEX_RIDGE_ARCHITECTURE = 'frozen-ridge-configurable-ffn-v2'
 FEATURE_SCHEMA = 'public-hidden-last-token-v1'
 IDENTITY_KEYS = ('attempt_id', 'dataset_id', 'split_id', 'dataset_receipt_sha256',
                  'split_receipt_sha256', 'split_sha256', 'sample_order_sha256',
                  'train_sample_ids_sha256', 'model_fingerprint')
+
+
+def configurable_shapes(width, dims, normalization):
+    shapes = {'0.weight': [width], '0.bias': [width]} if normalization == 'layernorm' else {}
+    for i, hidden in enumerate(dims):
+        shapes.update({f'{1+3*i}.weight': [hidden, width], f'{1+3*i}.bias': [hidden]})
+        width = hidden
+    shapes.update({f'{1+3*len(dims)}.weight': [1, width], f'{1+3*len(dims)}.bias': [1]})
+    return shapes
 
 
 def parameter_shapes(width, hidden):
@@ -31,6 +42,9 @@ def parameter_shapes(width, hidden):
 def _validate(metadata, state, expected=None):
     architecture_id = {MODEL_KIND: ARCHITECTURE_ID, RIDGE_MLP_KIND: RIDGE_MLP_ARCHITECTURE}.get(
         metadata.get('model_kind'))
+    flexible = metadata.get('architecture_id') in {FLEX_ARCHITECTURE, FLEX_RIDGE_ARCHITECTURE}
+    if flexible:
+        architecture_id = {MODEL_KIND: FLEX_ARCHITECTURE, RIDGE_MLP_KIND: FLEX_RIDGE_ARCHITECTURE}.get(metadata.get('model_kind'))
     if (metadata.get('schema_version') != 1 or architecture_id is None
             or metadata.get('architecture_id') != architecture_id
             or metadata.get('feature_schema') != FEATURE_SCHEMA
@@ -40,7 +54,7 @@ def _validate(metadata, state, expected=None):
                 'linear' if metadata.get('target', '').endswith('_fraction') else target_transform(metadata.get('target', '')),
             }
             or metadata.get('fit_scope') != 'train'
-            or metadata.get('normalization') != 'layernorm'
+            or metadata.get('normalization') not in ({'layernorm', 'none'} if flexible else {'layernorm'})
             or metadata.get('endpoint') != 'submission'):
         raise ValueError('Invalid MLP checkpoint model/target contract')
     for key in IDENTITY_KEYS:
@@ -54,7 +68,8 @@ def _validate(metadata, state, expected=None):
     width, hidden = architecture['input_width'], architecture['hidden_dim']
     if (type(width) is not int or type(hidden) is not int or width <= 0 or hidden <= 0
             or architecture.get('dtype') != 'float32'
-            or architecture.get('layernorm_eps') != 1e-5 or architecture.get('activation') != 'gelu'
+            or architecture.get('layernorm_eps') != 1e-5
+            or architecture.get('activation') not in ({'gelu', 'relu', 'silu'} if flexible else {'gelu'})
             or not 0 <= architecture['dropout'] < 1):
         raise ValueError('Invalid MLP architecture')
     spec = metadata['input_spec']
@@ -68,7 +83,14 @@ def _validate(metadata, state, expected=None):
             or type(metadata.get('epochs_trained')) is not int
             or metadata['epochs_trained'] < metadata['best_epoch']):
         raise ValueError('Invalid MLP best epoch')
-    shapes = parameter_shapes(width, hidden)
+    if flexible:
+        dims = architecture.get('hidden_dims')
+        if (not isinstance(dims, list) or not dims or any(type(d) is not int or d <= 0 for d in dims)
+                or architecture.get('normalization') != metadata['normalization']):
+            raise ValueError('Invalid configurable MLP architecture')
+        shapes = configurable_shapes(width, dims, metadata['normalization'])
+    else:
+        shapes = parameter_shapes(width, hidden)
     if metadata['model_kind'] == RIDGE_MLP_KIND:
         source = metadata.get('ridge_source', {})
         if (source.get('target') != metadata['target'] or source.get('public_site') != sites[0]
@@ -146,7 +168,8 @@ def load_checkpoint(path, device='cpu'):
 
     architecture = metadata['architecture']
     kwargs = dict(hidden_dim=architecture['hidden_dim'], dropout=architecture['dropout'],
-                  seed=metadata['seed'], device=device)
+                  seed=metadata['seed'], device=device, hidden_dims=architecture.get('hidden_dims'),
+                  activation=architecture['activation'], normalization=metadata['normalization'])
     if metadata['model_kind'] == RIDGE_MLP_KIND:
         ridge = {k.removeprefix('ridge.'): state.pop(k) for k in list(state) if k.startswith('ridge.')}
         estimator = FrozenRidgePlusFFNEstimator(ridge, **kwargs)
@@ -154,7 +177,7 @@ def load_checkpoint(path, device='cpu'):
         estimator = FFNMLEstimator(**kwargs)
     estimator.input_dim = architecture['input_width']
     estimator.device_ = str(resolve_device(device))
-    estimator._module = _mlp(estimator.input_dim, estimator.hidden_dim, estimator.dropout, estimator.seed)
+    estimator._module = estimator._make_module()
     estimator._module.load_state_dict({k: torch.from_numpy(v) for k, v in state.items()}, strict=True)
     estimator._module.to(estimator.device_).eval()
     estimator.best_epoch_ = metadata['best_epoch']

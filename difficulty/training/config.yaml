@@ -1,47 +1,62 @@
-# MLP and Ridge+MLP training configuration; loaded by their official dycon commands.
-mlp_probe:
-  dataset_id: resolved-closeonly331-20261021
-  dataset_receipt_sha256: ca5e299638b38e60d0ffb0b54adc0cb9c8d86531d3f2cce5641a65817bfed6d7
-  split_id: auto-mlp-6a763e9188c4e1d3
-  split_receipt_sha256: 447398a53bf8f63feb24e80d6413270b096578a191c99896b78594efdf9abb17
-  split_strategy: event_random_v1
-  split_seed: 42
-  validation_fraction: 0.15
-  test_fraction: 0.15
-  expected_tasks: 106
-  expected_rollouts: 106
-  expected_samples: 6104
-  public_site: 3
+# Dedicated estimator training configuration. Edit this file, then source difficulty/scripts/train.sh.
+# Existing settings retained; dataset references migrated to the active schema-2 source.
+schema_version: 2
+run:
+  attempt_id: auto
+  mode: fit
+data:
+  dataset_id: resolved-migration331-20261024
+  expected_receipt_sha256: null
+  split:
+    strategy: event_random_v1
+    seed: 42
+    validation_fraction: 0.15
+    test_fraction: 0.15
   targets:
-    - submission_remaining_steps_log1p
-    - submission_remaining_steps_linear
-    - submission_remaining_reasoning_tokens_log1p
-    - submission_remaining_reasoning_tokens_linear
-  hidden_dim: 1024
-  dropout: 0.1
+  - submission_remaining_steps_log1p
+  - submission_remaining_steps_linear
+  - submission_remaining_reasoning_tokens_log1p
+  - submission_remaining_reasoning_tokens_linear
+features:
+  public_site: 3
+model:
+  kind: ffn_mlp
+  mlp:
+    hidden_dims:
+    - 1024
+    - 1024
+    activation: gelu
+    normalization: layernorm
+    dropout: 0.1
+training:
   epochs: 10000
   batch_size: 256
-  learning_rate: 0.001
-  weight_decay: 0.0001
-  patience: 100
-  min_delta: 0.0
   seed: 42
   device: auto
   torch_threads: 4
+  loss: mse
+  optimizer:
+    kind: adamw
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    betas:
+    - 0.9
+    - 0.999
+    eps: 1.0e-08
+  early_stopping:
+    patience: 100
+    min_delta: 0.0
   scheduler:
     enabled: true
     kind: reduce_on_plateau
     factor: 0.5
     patience: 5
     threshold: 0.0001
-    min_lr: 0.000001
-
-ridge_mlp_probe:
-  dataset_id: resolved-closeonly331-20261021
-  dataset_receipt_sha256: ca5e299638b38e60d0ffb0b54adc0cb9c8d86531d3f2cce5641a65817bfed6d7
-  targets:
-    - submission_remaining_steps_log1p
-    - submission_remaining_reasoning_tokens_log1p
-  ridge_publications:
-    submission_remaining_steps_log1p: runtime/parallel-artifacts/ridge-closeonly331-step-log1p-train-20261021/manifest.json
-    submission_remaining_reasoning_tokens_log1p: runtime/parallel-artifacts/ridge-closeonly331-reasoning-log1p-train-20261021/manifest.json
+    min_lr: 1.0e-06
+tensorboard:
+  enabled: true
+  host: 127.0.0.1
+  port: 6006
+  flush_secs: 5
+  reload_interval: 5
+  keep_after_training: true

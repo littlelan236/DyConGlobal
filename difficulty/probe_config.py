@@ -73,6 +73,10 @@ class MLPProbe(BaseModel):
     public_site: int = Field(default=2, ge=0, lt=32)
     targets: list[str] = Field(default_factory=lambda: list(MLP_DEFAULT_TARGETS))
     hidden_dim: int = Field(default=256, gt=0)
+    hidden_dims: list[int] | None = None
+    activation: Literal['gelu', 'relu', 'silu'] = 'gelu'
+    normalization: Literal['layernorm', 'none'] = 'layernorm'
+    optimizer: dict | None = None
     dropout: float = Field(default=0.0, ge=0, lt=1)
     epochs: int = Field(default=100, gt=0)
     batch_size: int = Field(default=256, gt=0)
@@ -90,6 +94,12 @@ class MLPProbe(BaseModel):
         import re
         from core.io import identifier
 
+        if self.hidden_dims is not None and (not self.hidden_dims or any(
+                type(d) is not int or d <= 0 for d in self.hidden_dims)):
+            raise ValueError('hidden_dims must contain positive integers')
+        if self.optimizer is not None:
+            from difficulty.training.config import Optimizer
+            Optimizer.model_validate(self.optimizer)
         identifier(self.dataset_id)
         if self.split_id is not None:
             identifier(self.split_id)

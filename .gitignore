@@ -40,6 +40,9 @@ desktop.ini
 /runs/**
 /state/**
 /isolated/
+# Archived run evidence and externally downloaded benchmark checkouts
+/archive/
+/benchmarks/
 /baseline/
 /assets/
 /models/
@@ -69,6 +72,7 @@ desktop.ini
 /hidden/outputs/**
 /hidden/reports/**
 /hidden/online/**
+/hidden/spool
 /hidden/spool/**
 /hidden/evaluation/outputs/**
 /hidden/evaluation/*.json

@@ -7,6 +7,15 @@ from core.io import hash_json, owned_path, read_json, sha256, write_json
 from hidden.artifacts import event_records, read_arrays, read_request
 
 
+def publication_directory(project_root, run_id, publication_id=None):
+    """Resolve an explicit immutable trace without aliasing another run."""
+    from core.io import identifier
+    relative = f"runs/{identifier(run_id)}/enrichment/online"
+    if publication_id is not None:
+        relative = f"runs/{identifier(run_id)}/enrichment/online-publications/{identifier(publication_id)}"
+    return owned_path(project_root, relative)
+
+
 def reasoning_blocks(prompt, output, open_ids, close_ids):
     if not open_ids or not close_ids:
         raise ValueError("Reasoning marker token IDs must be nonempty")
@@ -62,7 +71,7 @@ def reasoning_targets(request, open_ids, close_ids):
 
 
 def finalize_token_events(export_root, output, *, open_ids, close_ids,
-                          request_evidence=None, event_rows=None, trajectory_paths=None):
+                          request_evidence=None, event_rows=None, trajectory_paths=None, finalization_paths=None, allow_missing=False):
     """Finalize an export or an explicitly bounded migrated session.
 
     Optional inputs bind canonical ledger hashes, exact event rows and current
@@ -91,7 +100,7 @@ def finalize_token_events(export_root, output, *, open_ids, close_ids,
             continue
         request["ledger_ref"] = str(path.relative_to(root))
         request["ledger_sha256"] = sha256(path)
-        finalization_path = root / "sessions" / request["session_id"] / "finalization.json"
+        finalization_path = (owned_path(root, finalization_paths[request["session_id"]]) if finalization_paths is not None else root / "sessions" / request["session_id"] / "finalization.json")
         if request.get("schema_version", 1) >= 2 and not finalization_path.exists():
             rejected_requests.add(request["request_id"])
             continue
@@ -261,6 +270,8 @@ def finalize_token_events(export_root, output, *, open_ids, close_ids,
         "unexpected": sorted(observed - expected),
         "close_availability": availability,
     }
+    coverage["policy"] = "available_points" if allow_missing else "complete"
+    coverage["expected_count_scope"] = "explicitly_bound_native_requests"
     write_json(out / "coverage.json", coverage)
     receipt = {
         "schema_version": 1,
@@ -277,6 +288,6 @@ def finalize_token_events(export_root, output, *, open_ids, close_ids,
         },
     }
     write_json(out / "receipt.json", receipt)
-    if coverage["missing"] or coverage["unexpected"]:
+    if coverage["unexpected"] or (coverage["missing"] and not allow_missing):
         raise ValueError("Online reasoning-event coverage differs from exact token receipts")
     return out
