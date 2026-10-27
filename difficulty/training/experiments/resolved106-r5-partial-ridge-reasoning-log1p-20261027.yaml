@@ -4,7 +4,7 @@ run:
   mode: fit
 data:
   dataset_id: resolved106-r5-partial-native-resolved-20261027
-  expected_receipt_sha256: null
+  expected_receipt_sha256: c935fa7b648049c5f2991782b049ec1f2992231ffa85494156ce1caceb63ddaf
   split:
     id: resolved106-r5-partial-event70-15-15-v1-seed42-20261027
   targets:

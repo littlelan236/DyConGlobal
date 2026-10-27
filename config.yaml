@@ -1,6 +1,14 @@
 schema_version: 1
 paths:
   nas_root: /VM/wangtianyi/DyConGlobal
+  artifact_roots:
+    run: /home/wangtianyi/DyConGlobal
+    difficulty_cache: /home/wangtianyi/DyConGlobal
+  artifact_scan_roots:
+    - /home/wangtianyi/DyConGlobal
+    - /data1/wangtianyi/DyConGlobal
+    - /data2/wangtianyi/DyConGlobal
+    - /data3/wangtianyi/DyConGlobal
 benchmark:
   partition: null
 model:

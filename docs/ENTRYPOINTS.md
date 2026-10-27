@@ -897,6 +897,23 @@ analysis环境：action-review-length ANALYSIS_ID --audit-id AUDIT_ID --action-i
 产物在 `action/outputs/ANALYSIS_ID/`，使用独立 branch receipt 和同名 `--check`。
 详见 [action 分支统计](../action/BRANCH-ACTION-STATS-CN.md)。
 
+### 可视化模式与平均分母补充（2026-10-27）
+
+`per-trajectory`=每条rollout一张原始step图；`per-run`=每个run的轨迹均值一张图；
+`all-runs`=各run均值放在同图；默认`both`=per-run+all-runs，不含逐条绘图；`none`不画折线。
+`--line-metric`可重复，在上述模式中都只控制面板，不改变统计范围。
+
+单run全部默认轨迹平均：
+
+```bash
+.venvs/analysis/bin/dycon action-branch-stats NEW_RUN_MEAN_ID \
+  --source-run RUN_ID --line-mode per-run --branch-scope both --progress-points 101
+```
+
+run均值先对各轨迹独立归一化/插值，再在每个点按有效轨迹等权平均，横轴0–100%。
+无parallel step或没有有效观测的轨迹不补零；实际贡献数见curves/per-run.csv的n_trajectories。
+最新实例`consensus32-all-trajectory-average-20261027`见[action可视化指南](../action/BRANCH-ACTION-STATS-CN.md)。
+
 ## Repaired capture publication
 
 Use `dycon capture-publish RUN_ID --repair-id REPAIR_ID --publication-id PUBLICATION_ID --resolved-only`
@@ -934,3 +951,18 @@ state/skillsbench-images/skillsbench-f860ecf02-20261026/final-summary.json.
 Use `dycon capture archive RUN_ID --archive-id ARCHIVE_ID` to move inactive run spool history to NAS.
 All file hashes are checked before local duplicates and run-specific reservations are released.
 Historical evidence paths remain readable. See [capture archive guide](CAPTURE-ARCHIVE-CN.md).
+
+
+## 重复 rollout 的成功次数与预测 / 真实剩余量曲线（2026-10-27）
+
+`.venvs/analysis/bin/dycon difficulty-plot-trajectories SOURCE_RUN NEW_PLOT_ID --attempt-id FITTED_RIDGE_ATTEMPT --dataset-id RESOLVED_DATASET --target submission_remaining_reasoning_tokens_log1p`
+
+输出项目级 `difficulty/evaluations/NEW_PLOT_ID/`：逐 task 成功次数、逐 step 真值与预测、每轨迹 SVG，以及同 task 同行的自包含 `report.html`。
+使用 `dycon artifact verify NEW_PLOT_ID --scope difficulty-evaluation` 校验；缺少最终 result 的 repetition 单列 pending，不伪造评测或标签。
+详见 [轨迹对照说明](TRAJECTORY-COMPARISON-CN.md)。
+
+
+### 预测与真值独立覆盖（2026-10-27）
+
+在 `difficulty-plot-trajectories` 中显式添加 `--repair-id REPAIR_ID`，即可对全部可验证的 repaired canonical close hidden 预测，独立于真值是否可用。
+预测、真值分别统计覆盖数；canonical-identity-only 预测点单列，不冒充 native token 标签。输出 `coverage-audit.json`，旧训练数据集和旧图保持不可变。

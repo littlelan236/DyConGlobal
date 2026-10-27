@@ -12,6 +12,8 @@ from core.io import write_json
 def cfg(tmp_path):
     raw = yaml.safe_load((Path(__file__).parents[1] / "config.yaml").read_text())
     raw.pop("parallel", None)  # Unit fixtures do not depend on a GPU acceptance config.
+    raw["paths"]["artifact_roots"] = {}
+    raw["paths"]["artifact_scan_roots"] = []
     raw["environment"].pop("docker_data_root", None)  # Host Docker paths are not test fixtures.
     raw["environment"]["wheelhouse"] = None  # Published host caches are not unit fixtures.
     raw["model"].update(path=None, fingerprint="fixture-model", served_name="fixture")

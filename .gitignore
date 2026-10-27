@@ -171,3 +171,14 @@ desktop.ini
 
 # Keep intentional directory placeholders, but not historical payloads
 !.gitkeep
+
+# Machine-local disk targets and task-scoped relocation/visualization backups
+/config.local.yaml
+/config.local.yml
+/difficulty/training/config.local.yaml
+/difficulty/training/experiments/*.local.yaml
+*.bak-storage-*
+*.bak-visualization-*
+
+# Retired capture spool payloads; maintained capture code lives in hidden/*.py
+/hidden/capture-archive-retired/

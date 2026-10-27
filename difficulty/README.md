@@ -170,3 +170,16 @@ Create a new resolved dataset with `--label-normalization trajectory_fraction` t
 Edit standalone `difficulty/training/config.yaml`, then run `source difficulty/scripts/train.sh` (or pass a YAML path). The source wrapper delegates to `dycon difficulty-train` in the analysis environment and preserves the caller shell via a subshell. Schema 2 selects dataset/split/targets, Ridge, MLP or Ridge+MLP, input site, MLP hidden dimensions/activation/normalization/dropout, optimizer, scheduler and device. Ridge remains closed-form; Ridge+MLP requires one verified published Ridge manifest per target. Every run creates a new immutable attempt.
 
 TensorBoard binds to remote loopback port 6006 by default. On the local PC run `ssh -N -L 16006:127.0.0.1:6006 wangtianyi@10.249.187.9`, then open `http://localhost:16006`. MLP events expose evaluation-mode train/validation MSE per epoch and separate optimization loss; Ridge events use candidate-trial steps. Events are included in the attempt receipt. Check or stop the managed service with `dycon difficulty-tensorboard ATTEMPT_ID --action status|stop`.
+
+
+## 重复 rollout 预测与真实剩余量对照（2026-10-27）
+
+使用 `dycon difficulty-plot-trajectories RUN_ID PLOT_ID --attempt-id RIDGE_ATTEMPT --dataset-id RESOLVED_DATASET --target submission_remaining_reasoning_tokens_log1p`。
+按 canonical repetition 统计成功次数；每条成功轨迹绘制预测与 native 真值双面板，同 task 同行汇总到自包含 HTML。缺失证据保留断线及说明图。
+完整口径与统一 artifact 校验见 [轨迹对照说明](../docs/TRAJECTORY-COMPARISON-CN.md)。
+
+
+### 预测与真值独立覆盖（2026-10-27）
+
+在 `difficulty-plot-trajectories` 中显式添加 `--repair-id REPAIR_ID`，即可对全部可验证的 repaired canonical close hidden 预测，独立于真值是否可用。
+预测、真值分别统计覆盖数；canonical-identity-only 预测点单列，不冒充 native token 标签。输出 `coverage-audit.json`，旧训练数据集和旧图保持不可变。

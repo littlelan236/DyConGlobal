@@ -3,25 +3,72 @@
 from pathlib import Path
 
 
-def plot_trajectory(rows, output, *, title="remaining workload"):
+def plot_trajectory(rows, output, *, title="remaining workload", ylabel="remaining workload",
+                    comparison=False, xlim=None, ylim=None, logylim=None, note=""):
+    """Plot explicit predictions and truth; None creates gaps, never a zero label.
+
+    comparison=True adds native log1p scores and log1p truth in a second panel.
+    It also renders an explicit unavailable panel when no qualified rows exist.
+    Existing evaluation callers retain their single-panel behavior.
+    """
     if not rows:
         raise ValueError("No trajectory rows")
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError as exc:
-        raise RuntimeError("Install the analysis extra") from exc
-    x = [r["step_id"] for r in rows]
-    true = [r["target"] for r in rows]
-    pred = [r["prediction"] for r in rows]
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(x, true, label="true")
-    ax.plot(x, pred, label="predicted")
-    ax.set(xlabel="agent step", ylabel="remaining workload", title=title)
-    ax.legend()
-    fig.tight_layout()
+    import math
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    from matplotlib.ticker import MaxNLocator
+
+    def value(row, key):
+        v = row.get(key)
+        if v is None:
+            return float('nan')
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError('Curve values must be finite numbers or None')
+        return v
+
+    x = [r['step_id'] for r in rows]
+    if any(type(v) is not int or v < 0 for v in x) or x != sorted(set(x)):
+        raise ValueError('Curve step IDs must be unique sorted nonnegative integers')
+    # Materialize missing integer steps so matplotlib cannot bridge absent samples.
+    indexed = {r['step_id']: r for r in rows}
+    x = list(range(x[0], x[-1] + 1))
+    rows = [indexed.get(step, {'step_id': step}) for step in x]
+    true = [value(r, 'target') for r in rows]
+    pred = [value(r, 'prediction') for r in rows]
+    fig = Figure(figsize=(8, 6.5 if comparison else 4))
+    FigureCanvasAgg(fig)
+    axes = fig.subplots(2 if comparison else 1, 1, squeeze=False).ravel()
+    def panel(ax, y, p, label):
+        ax.plot(x, y, color='#15803d', linewidth=1.7, label='True remaining', marker='.', markersize=3)
+        ax.plot(x, p, color='#2563eb', linewidth=1.2, label='Predicted remaining', marker='.', markersize=3)
+        ax.set(xlabel='Canonical assistant step (0-based)', ylabel=label)
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.grid(alpha=.18)
+        if xlim is not None:
+            ax.set_xlim(xlim)
+        if not any(math.isfinite(v) for v in y + p):
+            ax.text(.5, .5, 'No qualified native hidden / labels', transform=ax.transAxes,
+                    ha='center', va='center', color='#9a3412')
+        ax.legend(fontsize=8)
+    panel(axes[0], true, pred, ylabel + ' (raw units)')
+    axes[0].set_title(title, fontsize=10)
+    if ylim is not None:
+        low, high = ylim
+        pad = max(high-low, 1) * .05
+        axes[0].set_ylim(low-pad, high+pad)
+    if comparison:
+        truth_log = [math.log1p(v) if math.isfinite(v) and v >= 0 else float('nan') for v in true]
+        pred_log = [value(r, 'prediction_log1p') for r in rows]
+        panel(axes[1], truth_log, pred_log, 'log1p(' + ylabel + ')')
+        if logylim is not None:
+            low, high = logylim
+            pad = max(high-low, 1) * .05
+            axes[1].set_ylim(low-pad, high+pad)
+    if note:
+        fig.text(.08, .015, note, fontsize=8, color='#9a3412')
+    fig.tight_layout(rect=(0, .035 if note else 0, 1, 1))
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=160)
-    plt.close(fig)
 
 
 def plot_parallel_scores(steps, branches, output, *, target, title, subtitle):

@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from core.io import identifier, owned_path
+from core.io import identifier, owned_path, run_path
 
 
 class RunLocator:
     def __init__(self, root, run_id):
         self.root = Path(root).resolve()
         self.run_id = identifier(run_id)
-        self.run = owned_path(self.root, f"runs/{self.run_id}")
+        self.run = run_path(self.root, self.run_id)
 
     def path(self, *parts):
         return owned_path(self.root, str(Path("runs") / self.run_id / Path(*parts)))

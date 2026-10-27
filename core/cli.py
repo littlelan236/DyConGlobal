@@ -271,6 +271,16 @@ def main(argv=None):
     p.add_argument("index_id")
     p.add_argument("predictions")
     p.add_argument("evaluation_id")
+    p = sub.add_parser("difficulty-plot-trajectories", help="Resolved repetition counts and Ridge/truth curves grouped by task")
+    p.add_argument("run_id")
+    p.add_argument("plot_id")
+    p.add_argument("--attempt-id", required=True)
+    p.add_argument("--dataset-id", required=True)
+    p.add_argument("--reuse-predictions-id", help="Reuse receipt/model-verified trajectory predictions while extending coverage")
+    p.add_argument("--repair-id", help="Use all receipt-bound repaired action-close hidden, independently of GT")
+    p.add_argument("--target", required=True, choices=[
+        "submission_remaining_reasoning_tokens_log1p", "submission_remaining_reasoning_tokens_linear",
+        "submission_remaining_steps_log1p", "submission_remaining_steps_linear"])
     p = sub.add_parser("difficulty-plot-parallel", help="Plot stored branch scores on a finalized trajectory")
     p.add_argument("run_id")
     p.add_argument("plot_id", nargs="?")
@@ -524,7 +534,7 @@ def main(argv=None):
         else:
             result = reconcile_run(cfg["project_root"], a.run_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        if result.get("exit_code", 0) != 0:
+        if isinstance(result, dict) and result.get("exit_code", 0) != 0:
             raise SystemExit(result["exit_code"] if isinstance(result.get("exit_code"), int) else 1)
         return
     if a.command == "config-check":
@@ -773,6 +783,10 @@ def main(argv=None):
         from difficulty.training.mlp_probe import run_probe
         result = run_probe(cfg, a.attempt_id, mode=a.mode, split_id=a.split_id, dataset_id=a.dataset_id,
                            kind='ridge_plus_ffn' if a.command == 'difficulty-ridge-mlp' else 'ffn_mlp')
+    elif a.command == "difficulty-plot-trajectories":
+        from difficulty.evaluation.trajectories import visualize_trajectories
+        result = visualize_trajectories(cfg, a.run_id, a.plot_id, attempt_id=a.attempt_id,
+                                        dataset_id=a.dataset_id, target=a.target, repair_id=a.repair_id, reuse_predictions_id=a.reuse_predictions_id)
     elif a.command == "difficulty-plot-parallel":
         from difficulty.evaluation.parallel import list_parallel_trajectories, visualize_parallel
 

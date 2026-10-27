@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from core.io import hash_json, owned_path, read_json, sha256, write_json
+from core.io import cache_roots, hash_json, owned_path, read_json, sha256, write_json
 from core.locking import file_lock
 from difficulty.receipts import verify_receipt
 
@@ -199,15 +199,17 @@ def prepare_cache(cfg, settings, samples):
     """Build checksummed disposable layer memmaps, never reuse partial cache files."""
     identity = hash_json({"source": settings.dataset_receipt_sha256,
                           "sample_order": [s["sample_id"] for s in samples], "schema": 1})
-    parent = Path(cfg["project_root"]) / "difficulty/cache"
+    roots = cache_roots(cfg)
+    parent = roots[0]
     parent.mkdir(parents=True, exist_ok=True)
     destination = parent / identity
     with file_lock(parent / (identity + ".lock"), nonblocking=True):
         legacy = Path(cfg['project_root']) / 'state/difficulty-cache' / identity
-        # Old cache is a checksummed compatibility input; new writes are domain-owned.
-        if not destination.exists() and legacy.exists():
-            destination = legacy
-        if destination.exists():
+        candidates = [root / identity for root in roots if (root / identity).exists()]
+        if not candidates and legacy.exists():
+            candidates = [legacy]
+        if candidates:
+            destination = candidates[0]
             manifest = read_json(destination / "cache.json")
             if manifest["identity"] != identity or set(manifest["files"]) != {
                 f"layer-{layer:02d}.f32.npy" for layer in range(32)
@@ -216,6 +218,13 @@ def prepare_cache(cfg, settings, samples):
             for name, digest in manifest["files"].items():
                 if sha256(owned_path(destination, name)) != digest:
                     raise ValueError("Feature cache checksum mismatch; remove corrupt cache explicitly")
+            for candidate in candidates[1:]:
+                other = read_json(candidate / "cache.json")
+                if other != manifest:
+                    raise ValueError("Conflicting feature caches found across storage roots")
+                for name, digest in other["files"].items():
+                    if sha256(owned_path(candidate, name)) != digest:
+                        raise ValueError("Feature cache checksum mismatch; remove corrupt cache explicitly")
             return destination
         required = len(samples) * 32 * 4096 * 4 + 256 * 1024**2
         if shutil.disk_usage(parent).free < required + 2 * 1024**3:

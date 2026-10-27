@@ -10,7 +10,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from core.io import hash_json, identifier, owned_path, read_json, sha256, write_json
+from core.io import artifact_roots, hash_json, identifier, owned_path, read_json, run_path, sha256, write_json
 from difficulty.probe_config import RidgeProbe
 
 
@@ -269,6 +269,8 @@ class Steering(Strict):
 
 class Paths(Strict):
     nas_root: str
+    artifact_roots: dict[str, str] = Field(default_factory=dict)
+    artifact_scan_roots: list[str] = Field(default_factory=list)
 
 
 class Difficulty(Strict):
@@ -533,9 +535,21 @@ def resolve(path, overrides=()):
 
 def snapshot(cfg, run_id, selection):
     assert_frozen(cfg)
-    run = owned_path(cfg["project_root"], "runs/" + identifier(run_id))
+    run_id = identifier(run_id)
+    roots = artifact_roots(cfg, "run")
+    target_root = Path(cfg.get("paths", {}).get("artifact_roots", {}).get("run", cfg["project_root"])).resolve()
+    run = target_root / "runs" / run_id
+    run.parent.mkdir(parents=True, exist_ok=True)
     run.mkdir(parents=True, exist_ok=False)
+    # Keep legacy project-root/runs/<id> callers working while the physical run is elsewhere.
+    alias = Path(cfg["project_root"]) / "runs" / run_id
+    if alias != run and not alias.exists():
+        alias.parent.mkdir(parents=True, exist_ok=True)
+        alias.symlink_to(run, target_is_directory=True)
     frozen = copy.deepcopy(cfg)
+    if target_root != Path(cfg["project_root"]).resolve():
+        frozen["run_storage_root"] = str(target_root)
+        frozen["config_hash"] = hash_json({k: v for k, v in frozen.items() if k != "config_hash"})
     frozen["selection"] = selection
     frozen["selection_sha256"] = hash_json(selection)
     write_json(run / "resolved-config.json", frozen)
@@ -544,7 +558,27 @@ def snapshot(cfg, run_id, selection):
 
 
 def load_snapshot(root, run_id):
-    cfg = read_json(owned_path(root, f"runs/{identifier(run_id)}/resolved-config.json"))
+    run_id = identifier(run_id)
+    candidates = [Path(root).resolve() / "runs" / run_id]
+    config_path = Path(root).resolve() / "config.yaml"
+    if config_path.exists():
+        try:
+            raw = yaml.load(config_path.read_text(encoding="utf-8"), Loader=UniqueLoader) or {}
+        except yaml.YAMLError:
+            raw = {}
+        for value in raw.get("paths", {}).get("artifact_scan_roots", []):
+            candidate = Path(value).expanduser().resolve() / "runs" / run_id
+            if candidate not in candidates:
+                candidates.append(candidate)
+        preferred = raw.get("paths", {}).get("artifact_roots", {}).get("run")
+        if preferred:
+            candidate = Path(preferred).expanduser().resolve() / "runs" / run_id
+            if candidate not in candidates:
+                candidates.insert(0, candidate)
+    run_dir = next((candidate for candidate in candidates if (candidate / "resolved-config.json").exists()), None)
+    if run_dir is None:
+        raise FileNotFoundError(f"Run snapshot not found: {run_id}")
+    cfg = read_json(run_dir / "resolved-config.json")
     if Path(cfg["project_root"]).resolve() != Path(root).resolve():
         raise ValueError("Run snapshot belongs to another project")
     expected = cfg["config_hash"]

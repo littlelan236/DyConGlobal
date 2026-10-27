@@ -70,6 +70,30 @@ def reasoning_targets(request, open_ids, close_ids):
     return targets, availability
 
 
+def annotate_remaining_workloads(trajectories):
+    """Attach native suffix labels in place; shared by finalization and plots."""
+    for rollout_id, steps in trajectories.items():
+        steps.sort(key=lambda step: step["step_id"])
+        if len({step["step_id"] for step in steps}) != len(steps):
+            raise ValueError("Several requests claim the same trajectory step")
+        task_ids = {step["task_id"] for step in steps}
+        if len(task_ids) != 1:
+            raise ValueError("A trajectory spans several task identities")
+        trajectory_hash = hash_json(
+            [{"prompt": step["prompt_token_ids"], "output": step["output_token_ids"]} for step in steps]
+        )
+        suffix, censored = 0, False
+        for step_index in range(len(steps) - 1, -1, -1):
+            step = steps[step_index]
+            step["remaining_steps"] = sum(int(s.get("is_action_response", True)) for s in steps[step_index:])
+            step["exact_token_trace_sha256"] = trajectory_hash
+            for block in reversed(step["blocks"]):
+                block["future_reasoning_tokens"] = suffix
+                censored = censored or not block["complete"]
+                block["remaining_censored"] = censored
+                suffix += block["end"] - block["start"]
+
+
 def finalize_token_events(export_root, output, *, open_ids, close_ids,
                           request_evidence=None, event_rows=None, trajectory_paths=None, finalization_paths=None, allow_missing=False):
     """Finalize an export or an explicitly bounded migrated session.
@@ -133,26 +157,7 @@ def finalize_token_events(export_root, output, *, open_ids, close_ids,
         requests[request["request_id"]] = request
         trajectories[request["rollout_id"]].append(request)
         source_files[str(path.relative_to(root))] = digest
-    for rollout_id, steps in trajectories.items():
-        steps.sort(key=lambda step: step["step_id"])
-        if len({step["step_id"] for step in steps}) != len(steps):
-            raise ValueError("Several requests claim the same trajectory step")
-        task_ids = {step["task_id"] for step in steps}
-        if len(task_ids) != 1:
-            raise ValueError("A trajectory spans several task identities")
-        trajectory_hash = hash_json(
-            [{"prompt": step["prompt_token_ids"], "output": step["output_token_ids"]} for step in steps]
-        )
-        suffix, censored = 0, False
-        for step_index in range(len(steps) - 1, -1, -1):
-            step = steps[step_index]
-            step["remaining_steps"] = sum(int(s.get("is_action_response", True)) for s in steps[step_index:])
-            step["exact_token_trace_sha256"] = trajectory_hash
-            for block in reversed(step["blocks"]):
-                block["future_reasoning_tokens"] = suffix
-                censored = censored or not block["complete"]
-                block["remaining_censored"] = censored
-                suffix += block["end"] - block["start"]
+    annotate_remaining_workloads(trajectories)
     accepted, excluded = [], []
     for path, event in (event_records(root) if event_rows is None else event_rows):
         if event["request_id"] in rejected_requests:

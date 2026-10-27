@@ -157,3 +157,17 @@ action 复用已有 hidden 与 task 分区，不重复提取 latent，不向当�
 run 平均图 `per-run/all-runs/both` 保留，采用0–100%进度和轨迹等权平均；默认仍为 `both`。
 完整公式、参数、选择边界和历史兼容见 [分支 action 统计](BRANCH-ACTION-STATS-CN.md)。
 
+### 单 run 全部轨迹平均：直接命令（2026-10-27）
+
+```bash
+.venvs/analysis/bin/dycon action-branch-stats NEW_RUN_MEAN_ID \
+  --source-run RUN_ID --branch-scope both --line-mode per-run --progress-points 101
+.venvs/analysis/bin/dycon action-branch-stats NEW_RUN_MEAN_ID --check
+```
+
+省略rollout和终态筛选表示当前run的全部默认eligible/final轨迹；不要把per-trajectory的
+“每条一图”与per-run的“轨迹平均一图”混淆。单run和跨run平均都先逐轨迹归一化到0–100%，
+再按轨迹等权平均；无parallel step的轨迹不补零，实际分母见curves/per-run.csv中的n_trajectories。
+最新示例`consensus32-all-trajectory-average-20261027`选择86条轨迹（76条有parallel step），
+详见[模式对照与平均示例](BRANCH-ACTION-STATS-CN.md)。
+

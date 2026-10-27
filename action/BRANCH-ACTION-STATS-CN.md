@@ -1,6 +1,6 @@
 # 分支 action 统计、熵与轨迹进度曲线
 
-2026-10-26。正式入口：`.venvs/analysis/bin/dycon action-branch-stats`。
+更新：2026-10-27。正式入口：`.venvs/analysis/bin/dycon action-branch-stats`。
 实现：`action/analyzers/branches.py`、`action/evaluation/branch_histograms.py`、
 `action/evaluation/branch_curves.py`。读取现有 canonical trajectory 和 parallel decision；
 不运行模型，不执行轨迹命令，不改变 estimator 或 rollout 配置。
@@ -71,6 +71,38 @@ cd /home/wangtianyi/DyConGlobal
 `retained` 直接使用历史 `retained_branch_ids`，不重新计算阈值或分数。
 没有此名单的非 consensus run 只能用 `--branch-scope all`。
 缺失原始分支证据会明确报错，不把丢失的 action 当成无 action。
+
+### 快速选择绘图模式（2026-10-27 补充）
+
+| `--line-mode` | 每张图包含的数据 | 横轴 | 输出位置 |
+|---|---|---|---|
+| `per-trajectory` | 一条 rollout 的原始值；每轨迹一图 | 原始 assistant step，从1开始 | `plots/per-trajectory/RUN_ID/ROLLOUT_ID.*` |
+| `per-run` | 一个 run 内所选轨迹的等权平均；每 run 一图 | 0–100%进度 | `plots/per-run/RUN_ID.*` |
+| `all-runs` | 各来源 run 的轨迹均值在同图比较 | 0–100%进度 | `plots/all-runs-normalized.*` |
+| `both`（默认） | 同时生成 per-run 和 all-runs；不自动逐条绘图 | 0–100%进度 | 上述两类平均图 |
+| `none` | 不绘折线；仍计算统计、导出曲线数值并生成整数直方图 | 不适用 | 统计与数值导出仍保留 |
+
+逐轨迹默认五个面板；run 平均图默认展示全部可用指标。两者都可重复使用 `--line-metric`
+只选部分面板，例如 entropy、normalized_entropy、effective_action_count、winner_uncertainty。
+这些字段中的 normalized_entropy 是纵轴指标 H/ln(K)，与横轴的轨迹长度归一化是两回事。
+
+```bash
+# 一个 run 的全部默认 eligible/final 轨迹平均；不限定 Submitted。
+.venvs/analysis/bin/dycon action-branch-stats NEW_RUN_MEAN_ID \
+  --source-run RUN_ID --branch-scope both --line-mode per-run \
+  --progress-points 101 --format png --format svg
+
+# 若只平均指定轨迹子集，在上述命令上额外传入 --rollout-id 或 --rollout-list。
+# 若只平均 Submitted 轨迹，额外传入 --termination-reason Submitted。
+# 只有逐条独立绘制时，才使用 --line-mode per-trajectory。
+.venvs/analysis/bin/dycon action-branch-stats NEW_RUN_MEAN_ID --check
+```
+
+“全部轨迹”指该来源 run 的默认 eligible/final canonical selection，仍遵守原有发布、
+重采样 final 和 alias 规则，不表示无条件扫描所有历史文件。
+所有平均都先逐轨迹归一化/插值，再在每个 run、每个进度点按有效轨迹等权平均。
+没有 parallel step 或该位置没有有限指标值的轨迹不补零参与平均，
+逐点实际分母见 `curves/per-run.csv:n_trajectories`；`total_trajectories` 是选择总数。
 
 ## 2. 每个 step 的符号与计算
 
@@ -215,3 +247,25 @@ branch-receipt.json
 - `consensus32-single-trajectory-panels-v2-20261026`：直接指定一条 rollout，17 steps，默认五指标独立图。
 - 两组真实产物均通过来源、数值、逐轨迹覆盖和图表文件校验。
 - 相关计算/坐标/同task多轨迹分离/指标选择及既有action可视化回归合计36项测试通过。
+
+### 最新单 run 全部轨迹平均示例（2026-10-27）
+
+来源：`parallel-consensus32-dynamic-w2-s64-lowreserve-t8h-20261025`。
+已生成并通过 `--check` 的分析 ID 为 `consensus32-all-trajectory-average-20261027`。
+选择全部86条轨迹、2703个parallel steps；其中10条无parallel step，不补零，
+H_all曲线的每个进度点有76条有效轨迹参与平均。未额外限定Submitted，
+因此与早先只选40条Submitted轨迹的图不是同一数据范围。
+
+远程产物：
+
+```text
+action/outputs/consensus32-all-trajectory-average-20261027/
+  plots/per-run/parallel-consensus32-dynamic-w2-s64-lowreserve-t8h-20261025.png
+  plots/per-run/parallel-consensus32-dynamic-w2-s64-lowreserve-t8h-20261025.svg
+  curves/per-run.csv
+  analysis.json / selection.json / summary.json / branch-receipt.json
+```
+
+该示例使用101点、包含0%和100%端点的进度网格；实线为全部分支，虚线为历史estimator保留分支。
+`curves/per-run.csv` 中x为0..1，图中显示0..100%，mean是对应进度的轨迹均值。
+完整口径和已选轨迹应以本分析自身的冻结metadata与selection为准。
