@@ -32,13 +32,19 @@ def import_rollout(root, spec):
     if task["benchmark"] == "webarena_verified" and not workspace_subject:
         raise ValueError("WebArena trajectories require a web_trace subject; patch fallback is forbidden")
     subject_kind = read_json(workspace_subject).get("kind") if workspace_subject else None
-    if workspace_subject and subject_kind not in {"workspace", "web_trace"}:
+    if workspace_subject and subject_kind not in {"workspace", "web_trace", "live_state"}:
         raise ValueError("Unknown evaluation subject kind")
     if task["benchmark"] == "webarena_verified" and subject_kind != "web_trace":
         raise ValueError("WebArena trajectories require a web_trace subject")
     if subject_kind == "web_trace" and task["benchmark"] != "webarena_verified":
         raise ValueError("Web trace subjects belong only to WebArena Verified tasks")
+    if task["benchmark"] == "terminalbench_2_1" and subject_kind != "live_state":
+        raise ValueError("Terminal tasks require live trial proof; empty patch fallback is forbidden")
+    if subject_kind == "live_state" and task["benchmark"] != "terminalbench_2_1":
+        raise ValueError("Live state proof belongs only to Terminal-Bench tasks")
     submission = info.get("submission") or "" if not workspace_subject else ""
+    if not submission and termination == "Submitted":
+        submission = "\n"
     with file_lock(root / f"state/import-{rid}.lock"):
         run_catalog = RunEvidence(root, run_id)
         run_data = run_catalog.read()
@@ -75,8 +81,8 @@ def import_rollout(root, spec):
             "purposes": spec.get("purposes", []),
             "trajectory_path": artifact_reference(root, trajectory),
             "trajectory_sha256": digest,
-            "submission_status": "not_applicable" if subject_kind == "workspace" else (
-                "submitted" if termination == "Submitted" else "unsubmitted"),
+            "submission_status": "not_applicable" if subject_kind in {"workspace", "live_state"} else (
+                "submitted" if str(termination).lower() == "submitted" or bool(submission) else "unsubmitted"),
             "termination_reason": termination,
             "evaluation_status": "not_run",
             "resolved": None,
@@ -90,7 +96,7 @@ def import_rollout(root, spec):
                 "reused_from": info.get("tact", {}).get("reused_from"),
             },
         }
-        if task["benchmark"] == "skillsbench":
+        if task["benchmark"] in {"skillsbench", "swebench_pro_v2", "terminalbench_2_1"}:
             row["task_package_sha256"] = task["instance"]["package_sha256"]
         if task["benchmark"] == "webarena_verified":
             row.update({key: task["instance"][key] for key in (
@@ -120,7 +126,6 @@ def import_rollout(root, spec):
                                                 "re_evaluation": subject_kind == "web_trace"},
                         "subject_path": artifact_reference(root, target),
                         "subject_sha256": sha256(target)})
-            verify_subject(root, row)
         else:
             row.update({"patch_path": artifact_reference(root, patch), "patch_sha256": sha256(patch)})
         sample = spec.get("sample") or {}
@@ -140,6 +145,8 @@ def import_rollout(root, spec):
             for key in ("effective_seed", "seed_round", "seed_policy"):
                 row[key] = execution[key]
             row["provenance"]["attempt_context"] = execution
+        if workspace_subject:
+            verify_subject(root, row)
         run_catalog.register_rollout(rid, row, task)
         if subject_kind == "workspace" and spec.get("evaluation") is not None:
             report = Path(spec["evaluation_report"]).resolve()

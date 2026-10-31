@@ -21,7 +21,9 @@ from rollout.retry import record_agent_outcome
 from runtime.images.nas import ImageLeaseManager, NasImageStore
 from runtime.agents.openhands import resource_override
 
-SKILLSBENCH_AGENT_ENVIRONMENT = {"DYCON_OPENHANDS_TERMINAL": "subprocess"}
+from runtime.agents.openhands import OPENHANDS_AGENT_ENVIRONMENT
+
+SKILLSBENCH_AGENT_ENVIRONMENT = OPENHANDS_AGENT_ENVIRONMENT
 
 
 def image_reference(cfg, unit):
@@ -1053,18 +1055,8 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
         with OpenHandsBridge(bridge_cfg, binding, cfg["execution_context"]["profile"], output, deadline, runtime, capture) as bridge:
             # LiteLLM requires an explicit provider prefix for OpenAI-compatible
             # endpoints. Keep the vLLM served name unchanged in request bodies.
-            provider_model = "openai/" + cfg["model"]["served_name"]
-            env = {**SKILLSBENCH_AGENT_ENVIRONMENT,
-                   "BENCHFLOW_PROVIDER_BASE_URL": bridge.base_url,
-                   "LITELLM_LOCAL_MODEL_COST_MAP": "true", "OPENHANDS_SUPPRESS_BANNER": "1",
-                   "BENCHFLOW_PROVIDER_API_KEY": bridge.secret,
-                   "BENCHFLOW_PROVIDER_MODEL": provider_model,
-                   "LLM_MODEL": provider_model,
-                   "MODEL": provider_model}
-            env['DYCON_OPENHANDS_MODEL_SECONDS'] = str(max(1, int(deadline.remaining(cfg['timeouts']['model_seconds']))))
-            condenser_budget=cfg['execution_context']['profile'].get('condenser_max_tokens')
-            if condenser_budget:
-                env['OPENHANDS_CONDENSER_MAX_TOKENS']=str(condenser_budget)
+            from runtime.agents.openhands import driver_environment
+            env = driver_environment(cfg, bridge.base_url, bridge.secret, deadline)
             from runtime.agents.openhands import check_version
             check_version()
             skill_mode = cfg["execution_context"]["profile"]["skill_mode"]

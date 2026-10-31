@@ -271,8 +271,13 @@ def evaluate(cfg, task, subject_path, output_dir):
         with (output / "worker.log").open("wb") as log:
             completed = _invoke_worker(command, root, log, cfg.get("timeouts", {}).get("evaluation_seconds", 300))
         if completed.returncode or not result_path.is_file():
+            log_path = output / "worker.log"
+            detail = ""
+            if log_path.is_file():
+                detail = log_path.read_text(errors="replace")[-4000:]
             return {"status": "infra_error", "resolved": None, "failure_type": "evaluator_process_error",
-                    "reason": "EvaluatorProcessExit", "returncode": completed.returncode}
+                    "reason": "EvaluatorProcessExit", "returncode": completed.returncode,
+                    "error": detail}
         os.chmod(result_path, 0o600)
         official = read_json(result_path)
         return {**classify_result(official), "official_status": official["status"],

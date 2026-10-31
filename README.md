@@ -79,3 +79,7 @@ same sample with a deterministic new seed. Infrastructure retries keep their see
 and cumulative budget. Existing run snapshots and completed samples are unchanged.
 See [the rollout retry guide](docs/MINIMUM-RUN-CN.md)
 for capture recovery, counters, final selection, cancellation, and sampling caveats.
+
+## 后端与 adapter 重构
+
+DyCon 的任务执行通过版本化 backend registry 绑定 benchmark、agent、runtime、subject 和 evaluator。当前支持 BenchFlow/OpenHands、Native SWE/mini-swe-agent、Native WebArena/mini-swe-agent，以及 Harbor/OpenHands 的 SWE-bench Pro V2 和 Terminal-Bench 2.1。实现约束、Harbor CLI、OpenHands ACP transport、GPU canary 和未完成范围见 [后端与 adapter 重构说明](docs/BACKEND-ADAPTER-REFACTOR-CN.md)。

@@ -312,6 +312,21 @@ class OpenHandsBridge:
             def log_message(self, *args):
                 pass  # Default HTTP logging would expose the capability URL.
 
+            def do_GET(self):
+                if self.path != "/v1/dycon-health":
+                    self.send_error(404)
+                    return
+                if self.headers.get("Authorization") != "Bearer " + bridge.secret:
+                    self.send_error(401)
+                    return
+                body = json.dumps({"run_id": bridge.binding.get("run_id"),
+                                   "attempt_id": bridge.binding.get("attempt_id"), "model_requests": 0}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_POST(self):
                 if self.path != "/v1/chat/completions":
                     self.send_error(404)

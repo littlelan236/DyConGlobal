@@ -10,7 +10,7 @@ STAGES = ("agent_terminal", "subject_bound", "verifier_persisted", "artifacts_co
 
 
 def artifact_kinds(row):
-    return ("trajectory", "subject") if row.get("evaluation_subject", {}).get("kind") in {"workspace", "web_trace"} else (
+    return ("trajectory", "subject") if row.get("evaluation_subject", {}).get("kind") in {"workspace", "web_trace", "live_state"} else (
         "trajectory", "patch")
 
 
@@ -26,7 +26,7 @@ def verify_subject(root, row):
             raise ValueError("Changed " + kind)
         if kind == "subject":
             manifest = read_json(path)
-            if (manifest.get("schema_version") != 1 or manifest.get("kind") not in {"workspace", "web_trace"}
+            if (manifest.get("schema_version") != 1 or manifest.get("kind") not in {"workspace", "web_trace", "live_state"}
                     or manifest.get("kind") != row.get("evaluation_subject", {}).get("kind")):
                 raise ValueError("Invalid evaluation subject manifest")
             paths = set()
@@ -39,6 +39,16 @@ def verify_subject(root, row):
                     raise ValueError("Changed subject output")
                 if "size" in output and file.stat().st_size != output["size"]:
                     raise ValueError("Changed subject output size")
+            if manifest["kind"] == "live_state":
+                if manifest.get("re_evaluation") is not False or not manifest.get("trial_id") or not manifest["outputs"]:
+                    raise ValueError("Live state proof must bind a real trial and preserved evidence; it is not a replay snapshot")
+                binding = manifest.get("binding", {})
+                for field in ("run_id", "attempt_id", "task_key", "sample_key"):
+                    if binding.get(field) != row.get(field) and not (
+                            field == "run_id" and binding.get(field) == row.get("provenance", {}).get("source_run_id")):
+                        raise ValueError("Live state proof belongs to another attempt")
+                if manifest.get("task_package_sha256") != row.get("task_package_sha256"):
+                    raise ValueError("Live state proof belongs to another task package")
             if manifest["kind"] == "web_trace":
                 if (manifest.get("task_sha256") is not None and row.get("task_definition_sha256") is not None
                         and manifest["task_sha256"] != row["task_definition_sha256"]):

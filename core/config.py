@@ -267,7 +267,7 @@ class Hidden(Strict):
 
 
 class Benchmark(Strict):
-    backend: Literal["swebench", "skillsbench", "webarena_verified"] = "swebench"
+    backend: Literal["swebench", "skillsbench", "webarena_verified", "swebench_pro_v2", "terminalbench_2_1"] = "swebench"
     snapshot_ref: str | None = None
     partition: Literal["train", "val", "test", "excluded"] | None
 
@@ -477,6 +477,15 @@ class WebArena(Strict):
     evaluator_timeout_seconds: int = Field(default=120, gt=0)
 
 
+class Harbor(Strict):
+    runtime_ref: str
+    image_store: str
+    cpu_quota: Literal["strict", "unenforced_with_receipt"] = "strict"
+    network_transport: Literal["unix_model_v1"] = "unix_model_v1"
+    host_proxy: str | None = None
+    seed_stores: list[str] = Field(default_factory=list)
+
+
 class Config(Strict):
     schema_version: Literal[1]
     paths: Paths
@@ -490,6 +499,7 @@ class Config(Strict):
     skillsbench_images: SkillsBenchImages | None = None
     webarena_images: WebArenaImages | None = None
     webarena: WebArena | None = None
+    harbor: Harbor | None = None
     execution: Execution
     timeouts: Timeouts
     enrichment: Enrichment
@@ -506,6 +516,8 @@ class Config(Strict):
         capabilities(self.model_dump())
         if self.benchmark.backend == "webarena_verified" and self.webarena is None:
             raise ValueError("WebArena Verified requires webarena runtime configuration")
+        if self.benchmark.backend in {"swebench_pro_v2", "terminalbench_2_1"} and self.harbor is None:
+            raise ValueError("Harbor benchmarks require a pinned worker/runtime configuration")
         validate_generation_contract(self.model_dump())
         if self.steering.enabled != bool(self.steering.payload):
             raise ValueError("Enabled steering requires a payload; disabled steering must not have one")
@@ -597,6 +609,8 @@ def resolve(path, overrides=()):
         cfg.pop("webarena_images", None)
     if "webarena" not in raw:
         cfg.pop("webarena", None)
+    if "harbor" not in raw:
+        cfg.pop("harbor", None)
     if "skillsbench_images" not in raw:
         cfg.pop("skillsbench_images", None)
     if "cancellation" not in raw["execution"]:

@@ -28,18 +28,18 @@ def _selection_from_tasks(catalog: Catalog, task_ids=(), partition=None, cfg=Non
     from core.backends import identity
     benchmark = identity(cfg or {})[0]
     revision = None
-    if benchmark in {"skillsbench", "webarena_verified"}:
+    if benchmark in {"skillsbench", "webarena_verified", "swebench_pro_v2", "terminalbench_2_1"}:
         ref = (cfg or {}).get("benchmark", {}).get("snapshot_ref")
         if not ref:
             raise ValueError(f"{benchmark} requires benchmark.snapshot_ref")
         revision = read_json(Path(cfg["project_root"]) / ref)["revision"]
     selection = catalog.select_tasks(partition=partition, task_ids=task_ids,
                                      benchmark=benchmark, revision=revision)
-    if benchmark == "webarena_verified":
+    if benchmark in {"webarena_verified", "swebench_pro_v2", "terminalbench_2_1"}:
         snapshot_tasks = read_json(Path(cfg["project_root"]) / ref)["tasks"]
         selected = {key: task for key, task in selection["tasks"].items() if key in snapshot_tasks}
         if task_ids and {task["instance_id"] for task in selected.values()} != set(task_ids):
-            raise ValueError("Requested WebArena tasks are outside the frozen benchmark snapshot")
+            raise ValueError("Requested WebArena/Harbor tasks are outside the frozen benchmark snapshot")
         selection["tasks"], selection["task_keys"] = selected, sorted(selected)
 
     tasks = selection["tasks"]
@@ -189,6 +189,12 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
         cfg = copy.deepcopy(cfg)
         cfg["execution_context"] = context
         cfg["config_hash"] = hash_json({k: v for k, v in cfg.items() if k != "config_hash"})
+    # New runs bind the runtime/driver/evaluator explicitly. Loading legacy runs
+    # derives this in memory and never changes their original snapshot hashes.
+    from runtime.backends.registry import resolve as resolve_execution
+    cfg = copy.deepcopy(cfg)
+    cfg["execution_binding"] = resolve_execution(cfg, selection["tasks"]).as_dict()
+    cfg["config_hash"] = hash_json({k: v for k, v in cfg.items() if k != "config_hash"})
     run = snapshot(cfg, run_id, selection)
 
     if parallel_input is not None:
@@ -382,6 +388,8 @@ def load_plan(root, run_id):
     plan["plan_sha256"] = expected
 
     cfg = load_snapshot(root, run_id)
+    from runtime.backends.registry import from_snapshot
+    from_snapshot(cfg, cfg["selection"]["tasks"])
 
     if cfg.get("run_id") != run_id or cfg.get("operation") != plan["operation"]:
 

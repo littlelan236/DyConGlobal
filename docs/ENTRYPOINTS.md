@@ -1172,3 +1172,13 @@ digests. Changed quotas/source/platform require a new store.
 This stage prepares shared site image bytes only. Browser agent image, Wikipedia ZIM,
 Map baseline tar files/volumes, environment reset/login, run/Catalog integration and
 official evaluation are separate capabilities and are not declared ready here.
+
+## Backend registry 与 Harbor adapter（2026-10-31）
+
+`runtime/backends/registry.py` 根据冻结的 `benchmark.backend` 与 `agent.backend` 解析唯一 execution binding。支持的 Harbor benchmark 是 `swebench_pro_v2/openhands` 和 `terminalbench_2_1/openhands`；不支持的交叉组合在 run 创建或 config-check 阶段拒绝。SDK 不在 registry import 时加载。
+
+Harbor 的 runtime publication、task schema probe、task import、image preparation、profile、preflight 和 oracle/no-op controls 统一走 `dycon harbor ...`。实际 rollout 仍使用 `run create/start/wait/status/report/artifact verify`；Harbor worker 只在隔离解释器中运行，不能从主 runner 直接 import Harbor SDK。
+
+Harbor attempt 的 subject/evaluation 语义必须按 benchmark 区分：Pro 保存精确 patch subject 并使用官方 replay；Terminal 保存 verifier reward/exception 和 live-state proof，不能把不完整 workspace 当成可复评 patch。rootless CPU quota 偏差、模型 phase 网络限制、image lease 和 cleanup receipt 必须写入运行证据。
+
+新增 backend 的完整职责和验收边界见 [后端与 adapter 重构说明](BACKEND-ADAPTER-REFACTOR-CN.md)。

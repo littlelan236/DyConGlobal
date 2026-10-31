@@ -101,7 +101,6 @@
     "click==8.5.0",
     "compact-json==1.8.1",
     "decorator==5.3.1",
-    "dycon-global==0.1.0",
     "flexcache==0.3",
     "flexparser==0.4",
     "future==1.0.0",
@@ -151,5 +150,5 @@
   ],
   "evaluator_checksum": "35c3385b1db4b3378657589f95f50defd4234bd36e5b93d44733fd561b01db4e",
   "created_at": "2026-10-31T10:03:38.742094+08:00",
-  "identity_sha256": "bfa8752e7eeff6e68b44c7bc304570b1a0802a292b130c8f69d07fb87495e698"
+  "identity_sha256": "49139e15f90f8ec685779f137c1dd390bde5c52ff6c72611ccb879529eec6962"
 }

@@ -10,9 +10,9 @@ import traceback
 from collections import deque
 from pathlib import Path
 
-from core.cancellation import CURRENT, Cancelled, CompletionWake, cancellable_run, request_for, policy
 from application.execution.evidence import RunEvidence
 from application.execution.run_plan import create_run, load_plan
+from core.cancellation import CURRENT, Cancelled, CompletionWake, cancellable_run, policy, request_for
 from core.io import identifier, now, read_json, sha256, update_status, write_json
 from core.locking import exclusive_run, file_lock
 from rollout.artifacts import import_rollout
@@ -77,6 +77,8 @@ def _recover_capture_status(cfg, run, session_id, rid, digest):
 def _finish_attempt(cfg, run_id, task, sample, context, out, runtime, state,
                     capture_client=None, capture_session_id=None, recovering=False):
     """The sole canonical import/finalize path, also used after a crash."""
+    from runtime.backends.registry import adapter_for
+    adapter = adapter_for(cfg, {"attempt": task})
     root = Path(cfg['project_root'])
     run = root / 'runs' / run_id
     path = out / 'raw.traj.json'
@@ -103,20 +105,11 @@ def _finish_attempt(cfg, run_id, task, sample, context, out, runtime, state,
         for kind in artifact_kinds(row):
             if sha256(root / row[kind + '_path']) != row[kind + '_sha256']:
                 raise ValueError('Recovered canonical bytes changed')
-        if task.get('benchmark') == 'webarena_verified':
-            from application.execution.subject import verify_subject
-            verify_subject(root, row)
+        adapter.verify_subject(root, row)
         if path.exists() and sha256(path) != row['trajectory_sha256']:
             raise ValueError('Recovered raw and canonical bytes disagree')
     else:
-        subject_spec = {}
-        if task.get('benchmark') == 'webarena_verified':
-            subject_path = out / 'web-subject' / 'subject.json'
-            if not subject_path.exists():
-                from runtime.agents.webarena import finalize_subject
-                subject_path, _ = finalize_subject(task, out, context, None, '',
-                                                   state.get('agent_exit_status', 'Unknown'))
-            subject_spec = {'subject': str(subject_path), 'subject_sha256': sha256(subject_path)}
+        subject_spec = adapter.subject_spec(task, out, context, state)
         rid = import_rollout(root, {
             'source': str(path), 'task': task, 'run_id': run_id,
             'attempt_id': context['attempt_id'], 'purposes': ['baseline'],
@@ -173,9 +166,7 @@ def _finish_attempt(cfg, run_id, task, sample, context, out, runtime, state,
         status = 'CleanupError'
     if state.get('stats_error'):
         status = 'StatisticsError'
-    if task.get('benchmark') == 'webarena_verified' and (
-            state.get('web_subject_error') or state.get('web_subject_errors') or
-            (state['agent_exit_status'] == 'Submitted' and not read_json(root / row['subject_path'])['complete'])):
+    if adapter.subject_failed(root, row, state):
         status = 'WebTraceError'
     timings = state.setdefault('timings', {})
     timings['capture_finalize_seconds'] = time.monotonic() - stamp
@@ -198,20 +189,20 @@ def _finish_attempt(cfg, run_id, task, sample, context, out, runtime, state,
 
 def _execute_attempt(cfg, run_id, task, factory, runtime, sample, context, out):
     """One clean environment, agent, model and capture session per attempt."""
-    if task.get("benchmark") == "skillsbench":
-        from runtime.agents.skillsbench import execute_attempt
+    from runtime.backends.contracts import AttemptBinding
+    from runtime.backends.registry import adapter_for
+    adapter = adapter_for(cfg, {"attempt": task})
+    run_context = adapter.open_run(cfg, run_id, factory=factory)
+    return adapter.execute_attempt(run_context, AttemptBinding(task, sample, context, out, runtime))
 
-        return execute_attempt(cfg, run_id, task, runtime, sample, context, out, factory)
-    webarena = task.get('benchmark') == 'webarena_verified'
+
+def _execute_mini_attempt(cfg, run_id, task, factory, runtime, sample, context, out, adapter):
+    """The single mini loop, parameterized by explicit benchmark hooks."""
     from hidden.backends.vllm.online import CaptureClient, capture_request_metadata
-    from rollout.agent import DurableAgent
     from rollout.model import make_model
     from runtime.containers.factory import TaskContext
-    if webarena:
-        from runtime.containers.webarena_adapter import WebArenaEnvironment
-        RolloutEnvironment = WebArenaEnvironment
-    else:
-        from runtime.containers.rollout_adapter import RolloutEnvironment
+    RolloutEnvironment = adapter.environment_class()
+    DurableAgent = adapter.agent_class()
 
     run = Path(cfg['project_root']) / 'runs' / run_id
     path = out / 'raw.traj.json'
@@ -271,14 +262,8 @@ def _execute_attempt(cfg, run_id, task, factory, runtime, sample, context, out):
                 capture_context = False
                 capture_status = 'failed'
                 capture_failure(exc)
-        agent_cfg = cfg['agent']
-        if webarena:
-            from runtime.agents.webarena import WebArenaAgent
-            DurableAgent = WebArenaAgent
-            profile = cfg['execution_context']['profile']
-            agent_cfg = {**agent_cfg, **{key: profile[key] for key in (
-                'system_template', 'instance_template', 'observation_template', 'format_error_template')}}
-            local_cfg['agent'] = agent_cfg
+        agent_cfg = adapter.agent_config(cfg)
+        local_cfg['agent'] = agent_cfg
         agent = DurableAgent(
             make_model(local_cfg, factory.deadline, capture_context, runtime), env,
             system_template=agent_cfg['system_template'], instance_template=agent_cfg['instance_template'],
@@ -288,7 +273,7 @@ def _execute_attempt(cfg, run_id, task, factory, runtime, sample, context, out):
             output_path=path)
         _phase(runtime, sample, 'agent')
         stage_start = time.monotonic()
-        info = agent.run(task['instance']['intent'] if webarena else task['instance']['problem_statement'])
+        info = agent.run(adapter.prompt(task))
         status, patch = info.get('exit_status', 'Unknown'), info.get('submission', '')
     except Exception as exc:
         if agent is not None and getattr(exc, 'response_message', None) is not None:
@@ -310,16 +295,14 @@ def _execute_attempt(cfg, run_id, task, factory, runtime, sample, context, out):
                 agent.save(path, extra)
             elif not path.exists():
                 write_json(path, {**extra, 'messages': []})
-            if webarena:
-                try:
-                    from runtime.agents.webarena import finalize_subject
-                    subject_path, subject_errors = finalize_subject(
-                        task, out, context, env, patch, status)
-                    if subject_errors:
-                        state['web_subject_errors'] = subject_errors
+            try:
+                subject_path, subject_errors = adapter.finalize_subject(task, out, context, env, patch, status)
+                if subject_errors:
+                    state['web_subject_errors'] = subject_errors
+                if subject_path is not None:
                     state['subject_path'] = str(subject_path)
-                except Exception as exc:
-                    state['web_subject_error'] = repr(exc)
+            except Exception as exc:
+                state['web_subject_error'] = repr(exc)
             stamp = time.monotonic()
             if counts_recorded(run):
                 try:
@@ -374,6 +357,10 @@ def _execute_attempt(cfg, run_id, task, factory, runtime, sample, context, out):
 
 def _recover_attempt(cfg, run_id, task, sample, context, out, runtime):
     """Recover confirmed saved agent output without another model call."""
+    from runtime.backends.registry import adapter_for
+    adapter = adapter_for(cfg, {"attempt": task})
+    if adapter.binding.backend_family == "harbor":
+        return adapter.recover_attempt(cfg, run_id, task, sample, context, out, runtime)
     run = Path(cfg['project_root']) / 'runs' / run_id
     path = out / 'raw.traj.json'
     if not path.exists():
@@ -602,25 +589,8 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
 @exclusive_run
 @cancellable_run
 def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_only=False):
-    from core.backends import identity
-    skillsbench = identity(cfg) == ("skillsbench", "openhands")
-    webarena = identity(cfg) == ("webarena_verified", "minisweagent")
-    if not skillsbench:
-        os.environ["MSWEA_GLOBAL_CONFIG_DIR"] = str(Path(cfg["project_root"]) / "state/miniswe-config")
-        os.environ["MSWEA_SILENT_STARTUP"] = "1"
-        if (Path(os.environ["MSWEA_GLOBAL_CONFIG_DIR"]) / ".env").exists():
-            raise ValueError(
-                "mini-swe-agent .env overrides are disabled; use config.yaml and API-key environment"
-            )
     from core.model_identity import verify_model
-    if skillsbench:
-        from runtime.agents.skillsbench import SkillsBenchFactory
-        ContainerFactory = SkillsBenchFactory
-    elif webarena:
-        from runtime.containers.webarena_adapter import WebArenaFactory
-        ContainerFactory = WebArenaFactory
-    else:
-        from runtime.containers.factory import ContainerFactory
+    from runtime.backends.registry import adapter_for
     from runtime.serving.manager import ServingManager
 
     root = Path(cfg["project_root"])
@@ -639,6 +609,13 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
     from core.config import assert_frozen
 
     assert_frozen(cfg)
+    # Select only after the immutable run config has replaced the caller's YAML.
+    adapter = adapter_for(cfg, selection["tasks"])
+    if adapter.binding.agent == "minisweagent":
+        os.environ["MSWEA_GLOBAL_CONFIG_DIR"] = str(root / "state/miniswe-config")
+        os.environ["MSWEA_SILENT_STARTUP"] = "1"
+        if (Path(os.environ["MSWEA_GLOBAL_CONFIG_DIR"]) / ".env").exists():
+            raise ValueError("mini-swe-agent .env overrides are disabled; use config.yaml and API-key environment")
     run = root / 'runs' / run_id
     CURRENT.get().start()
     if counts_recorded(run) or enabled(cfg):
@@ -686,24 +663,14 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
     verify_model(cfg)
     run = root / "runs" / run_id
     write_json(run / "process.json", {"pid": os.getpid(), "supervisor_pid": os.getppid()})
-    factory = factory or (ContainerFactory(cfg, run_id) if skillsbench else
-                          ContainerFactory(cfg, run_id) if webarena else ContainerFactory(cfg))
+    backend_context = adapter.open_run(cfg, run_id, factory=factory)
+    factory = backend_context.factory
     outcomes = dict(settled)
     update_status(run / "status.json", "rollout")
     try:
-        factory.lock_images([t["instance"] for t in selection["tasks"].values()])
-        if skillsbench:
-            from runtime.agents.skillsbench import preflight
-            checked = preflight(root, run_id, workers=min(8, cfg['execution']['rollout_workers']))
-            write_json(run / 'validation/startup-preflight.json', checked)
-            if checked['blockers']:
-                raise ValueError('SkillsBench preflight rejected run: ' + '; '.join(checked['blockers']))
-        elif webarena:
-            from runtime.containers.webarena_adapter import preflight
-            checked = preflight(root, run_id, factory=factory, tasks=list(selection['tasks'].values()))
-            write_json(run / 'validation/webarena-preflight.json', checked)
-            if not checked.get('passed'):
-                raise ValueError('WebArena preflight rejected run: ' + '; '.join(map(str, checked.get('blockers', []))))
+        checked = adapter.preflight(backend_context, selection["tasks"])
+        if not checked.passed:
+            raise ValueError(adapter.binding.adapter + ' preflight rejected run: ' + '; '.join(checked.blockers))
         sharded = cfg['serving'].get('trajectory_sharding', 'none') == 'per_gpu_tp1'
         if sharded:
             from runtime.serving.pool import ServingPool
@@ -743,14 +710,18 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
                 threading.Thread(target=control, name='dycon-cancel-control', daemon=True).start()
             cancellation.add_callback(cancel_runtime)
             runtime["validation_mixed"] = check_only
-            if not skillsbench:
-                from runtime.serving.startup import check_tool_chain
-                startup_task = next(iter(selection['tasks'].values()))
-                if sharded:
-                    for worker in serving.workers:
-                        check_tool_chain(worker.cfg, run_id, startup_task, factory, {**runtime, **worker.runtime()})
-                else:
-                    check_tool_chain(cfg, run_id, startup_task, factory, runtime)
+            startup_task = next(iter(selection['tasks'].values()))
+            if sharded:
+                for worker in serving.workers:
+                    adapter.startup(backend_context, worker.cfg, startup_task, {**runtime, **worker.runtime()})
+            else:
+                adapter.startup(backend_context, cfg, startup_task, runtime)
+            # Resolve lazy native driver imports before worker admission. This
+            # keeps the scheduler's first concurrent attempts from serializing
+            # on Python module initialization.
+            if hasattr(adapter, "agent_class"):
+                adapter.agent_class()
+                adapter.environment_class()
             if check_only:
                 update_status(run / "status.json", "validated")
                 return {"startup": "passed"}
@@ -881,11 +852,7 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
         update_status(run / "status.json", "failed", error=repr(exc))
         raise
     finally:
-        cancellation = CURRENT.get()
-        if cancellation is not None and cancellation.event.is_set() and hasattr(factory, 'cleanup_cancelled'):
-            factory.cleanup_cancelled(run_id)
-        else:
-            factory.cleanup_owned(run_id)
+        adapter.close_run(backend_context, CURRENT.get())
 
 
 def admitted_task(cfg, run_id, key, task, factory, runtime, sample=None):

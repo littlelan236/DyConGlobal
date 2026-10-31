@@ -594,3 +594,24 @@ digests. Changed quotas/source/platform require a new store.
 This stage prepares shared site image bytes only. Browser agent image, Wikipedia ZIM,
 Map baseline tar files/volumes, environment reset/login, run/Catalog integration and
 official evaluation are separate capabilities and are not declared ready here.
+
+## 后端/adapter 重构后的最小验收
+
+在运行 Harbor benchmark 前，先固定 worker publication、task snapshot、OpenHands profile 和 image references，再执行：
+
+```bash
+.venvs/runner/bin/dycon config-check
+.venvs/runner/bin/dycon catalog-check
+.venvs/runner/bin/dycon harbor runtime-verify PUBLICATION.json
+.venvs/runner/bin/dycon harbor schema-probe --runtime ... --task-path ...
+.venvs/runner/bin/dycon harbor preflight RUN_ID
+.venvs/runner/bin/dycon run create RUN_ID --operation rollout --task-id TASK_ID
+.venvs/runner/bin/dycon run start RUN_ID --detach
+.venvs/runner/bin/dycon run wait RUN_ID
+.venvs/runner/bin/dycon report run RUN_ID
+.venvs/runner/bin/dycon artifact verify RUN_ID
+```
+
+`harbor preflight` 只验证环境、ACP 初始化、工具、网络策略、镜像身份和 cleanup，不代表真实 agent baseline 通过。真实 baseline、capture、parallel、官方评分和取消/恢复必须分别登记。一次 `reasoning_loop`、模型超时或 verifier infra error 不能被改写为 benchmark 失败或成功。
+
+现有 SkillsBench、SWE 和 WebArena run 继续使用各自冻结 snapshot；重构不会为旧 run 添加字段或重算 hash。需要比较或恢复时，先读取 run snapshot 再选择 adapter，不能使用当前根 config 漂移后的 benchmark/agent 组合。

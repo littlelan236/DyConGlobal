@@ -54,7 +54,7 @@ class RunEvidence:
             if key in data["tasks"] and data["tasks"][key] != task:
                 raise ValueError("Conflicting run task definition")
             data["tasks"][key] = task
-            if row.get("evaluation_subject", {}).get("kind") in {"workspace", "web_trace"}:
+            if row.get("evaluation_subject", {}).get("kind") in {"workspace", "web_trace", "live_state"}:
                 data["schema_version"] = 2
             data["rollouts"][rollout_id] = row
 

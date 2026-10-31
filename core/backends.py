@@ -26,6 +26,8 @@ CAPABILITIES = {
     ("swebench", "minisweagent"): {"subject": "patch", "action_analysis": True},
     ("skillsbench", "openhands"): {"subject": "workspace", "action_analysis": False},
     ("webarena_verified", "minisweagent"): {"subject": "web_trace", "action_analysis": False},
+    ("swebench_pro_v2", "openhands"): {"subject": "patch", "action_analysis": False},
+    ("terminalbench_2_1", "openhands"): {"subject": "live_state", "action_analysis": False},
 }
 
 
@@ -46,9 +48,18 @@ def capabilities(cfg, operation=None):
     return result
 
 
+def execution_binding(cfg, tasks=None):
+    """Resolve the explicit runtime without importing any third-party SDK."""
+    from runtime.backends.registry import from_snapshot
+    return from_snapshot(cfg, tasks)
+
+
 def execution_context(cfg, tasks):
     capabilities(cfg)
     benchmark, agent = identity(cfg)
+    if benchmark in {"swebench_pro_v2", "terminalbench_2_1"}:
+        from catalog.harbor import execution_context as harbor_context
+        return harbor_context(cfg, tasks)
     if benchmark in {"swebench", "webarena_verified"}:
         expected = "swebench" if benchmark == "swebench" else "webarena_verified"
         if any(benchmark_family(t["benchmark"]) != expected for t in tasks.values()):

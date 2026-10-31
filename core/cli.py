@@ -15,6 +15,38 @@ def main(argv=None):
     parser.add_argument("--set", action="append", default=[])
     parser.add_argument("--run-id", dest="analysis_run_id", help="Bind an analysis command to a frozen run")
     sub = parser.add_subparsers(dest="command", required=True)
+    harbor = sub.add_parser("harbor", help="Pinned Harbor task/runtime integration")
+    hb_sub = harbor.add_subparsers(dest="harbor_command", required=True)
+    hb = hb_sub.add_parser("runtime-prepare", help="Publish a pinned isolated worker and hashed dependency lock")
+    hb.add_argument("publication_id")
+    hb.add_argument("--source", type=Path, required=True)
+    hb.add_argument("--uv", type=Path, required=True)
+    hb.add_argument("--python", type=Path, required=True)
+    hb = hb_sub.add_parser("runtime-verify", help="Verify the worker publication without importing Harbor")
+    hb.add_argument("publication", type=Path)
+    hb = hb_sub.add_parser("schema-probe", help="Parse task and single-trial schemas in the isolated worker")
+    hb.add_argument("--runtime", type=Path, required=True)
+    hb.add_argument("--task-path", type=Path, action="append", required=True)
+    hb = hb_sub.add_parser("import", help="Freeze explicit official task packages with evaluator separation")
+    hb.add_argument("snapshot_id")
+    hb.add_argument("--source", type=Path, required=True)
+    hb.add_argument("--benchmark", choices=["swebench_pro_v2", "terminalbench_2_1"], required=True)
+    hb.add_argument("--task-id", action="append", required=True)
+    hb.add_argument("--runtime", type=Path, required=True)
+    hb.add_argument("--partition", choices=["train", "val", "test"], default="train")
+    hb = hb_sub.add_parser("images-prepare", help="Prepare only frozen task images through the existing NAS store")
+    hb.add_argument("snapshot", type=Path)
+    hb = hb_sub.add_parser("profile", help="Publish a framework-independent fixed ACP driver profile")
+    hb.add_argument("profile_id")
+    hb.add_argument("--dependency-snapshot", type=Path, required=True)
+    hb.add_argument("--bridge-address", default="127.0.0.1")
+    hb = hb_sub.add_parser("preflight", help="Run real ACP/tool/network/cleanup checks without a model request")
+    hb.add_argument("run_id")
+    hb = hb_sub.add_parser("controls", help="Run immutable official oracle/nop or exact fresh-replay controls")
+    hb.add_argument("run_id")
+    hb.add_argument("--control-id", required=True)
+    hb.add_argument("--agent", choices=["oracle", "nop", "gold-replay", "empty-replay"], required=True)
+    hb.add_argument("--task-id", action="append", default=[])
     webarena = sub.add_parser("webarena", help="WebArena Verified import, runtime and frozen-run preflight")
     wa_sub = webarena.add_subparsers(dest="webarena_command", required=True)
     wa = wa_sub.add_parser("import", help="Import public tasks and isolate pinned official evaluation definitions")
@@ -568,6 +600,7 @@ def main(argv=None):
                     or (a.command in run_commands and not (
                         a.command == "artifact" and getattr(a, "scope", "run") != "run"))
                     or (a.command == "webarena" and a.webarena_command == "preflight")
+                    or (a.command == "harbor" and a.harbor_command in {"preflight", "controls"})
                     or a.analysis_run_id is not None
                     or (a.command in {"enrich", "token-trace", "trajectory-token-audit", "hidden", "dataset-index", "token-join"} and explicit_run is not None))
     if use_snapshot:
@@ -580,6 +613,35 @@ def main(argv=None):
         # create_run; the current root may use an entirely different topology.
         cloning = a.command == "run" and a.run_command == "create" and a.from_run is not None
         cfg = resolve(a.config, () if cloning else a.set)
+    if a.command == "harbor":
+        if a.set or a.analysis_run_id:
+            parser.error("harbor registry commands use the root configuration")
+        from runtime.backends.harbor.dependencies import prepare_runtime, probe_schemas, verify_runtime
+        if a.harbor_command == "runtime-prepare":
+            result = prepare_runtime(cfg, a.publication_id, a.source, a.uv, a.python)
+        elif a.harbor_command == "runtime-verify":
+            result = verify_runtime(a.publication)
+        elif a.harbor_command == "schema-probe":
+            result = probe_schemas(cfg, a.runtime, a.task_path)
+        elif a.harbor_command == "import":
+            from catalog.harbor import import_tasks
+            result = import_tasks(cfg, a.snapshot_id, a.source, a.benchmark, a.task_id, a.runtime, a.partition)
+        elif a.harbor_command == "images-prepare":
+            from runtime.images.harbor import prepare
+            result = prepare(cfg, a.snapshot)
+        elif a.harbor_command == "profile":
+            from runtime.backends.harbor.operations import create_profile
+            result = create_profile(cfg, a.profile_id, a.dependency_snapshot, a.bridge_address)
+        elif a.harbor_command == "preflight":
+            from runtime.backends.harbor.operations import preflight
+            result = preflight(cfg["project_root"], a.run_id)
+        else:
+            from runtime.backends.harbor.operations import controls
+            result = controls(cfg["project_root"], a.run_id, a.control_id, a.agent, a.task_id)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if a.harbor_command == "preflight" and not result["passed"]:
+            raise SystemExit(2)
+        return
     if a.command == "webarena":
         if a.set or a.analysis_run_id:
             parser.error("webarena uses root configuration for registry operations and frozen configuration for preflight")

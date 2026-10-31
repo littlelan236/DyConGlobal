@@ -18,6 +18,9 @@ def prepare(root, run_id, rollout_ids=(), source_run=None, incremental=False):
         return prepare_webarena(root, run_id, rollout_ids, source_run, incremental)
     if loaded['config'].get('benchmark',{}).get('backend')=='skillsbench':
         raise ValueError('SkillsBench uses the live official verifier before sandbox cleanup; exported files are not a complete state snapshot for post-hoc re-evaluation')
+    if loaded['config'].get('benchmark', {}).get('backend') in {'swebench_pro_v2', 'terminalbench_2_1'}:
+        from application.execution.harbor_harness import prepare as prepare_harbor
+        return prepare_harbor(root, run_id, rollout_ids, source_run, incremental)
     root = Path(root).resolve()
     source_run = source_run or run_id
     target = loaded["run"] / "harness/selection.json"
@@ -118,6 +121,9 @@ def run(root, run_id, eval_id, gold=False, incremental=False):
         return run_webarena(root, run_id, eval_id, gold, incremental)
     if loaded['config'].get('benchmark',{}).get('backend')=='skillsbench':
         raise ValueError('SkillsBench post-hoc re-evaluation requires a qualified complete state snapshot; run the live verifier within the original attempt')
+    if loaded['config'].get('benchmark', {}).get('backend') in {'swebench_pro_v2', 'terminalbench_2_1'}:
+        from application.execution.harbor_harness import run as run_harbor
+        return run_harbor(root, run_id, eval_id, gold, incremental)
     selection = read_json(loaded["run"] / "harness" / "selection.json")
     receipt = read_json(loaded["run"] / "harness/selection-receipt.json")
     if hash_json(selection) != receipt["selection_sha256"]:

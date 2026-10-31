@@ -130,12 +130,17 @@ def pinned_official():
         pytest.skip("Run dycon webarena evaluator-prepare for the pinned official fixture tests")
     runtime = read_json(runtime_path)
     source = Path(os.environ.get("DYCON_WEBARENA_EVALUATOR_SOURCE", runtime["source"]))
-    dataset = source / "assets/dataset/webarena-verified.json"
-    if not dataset.is_file() or not (source / "examples/agent_logs/demo/108/network.har").is_file():
+    source_dataset = source / "assets/dataset/webarena-verified.json"
+    if not source_dataset.is_file() or not (source / "examples/agent_logs/demo/108/network.har").is_file():
         pytest.skip("Pinned official source fixture checkout is unavailable")
     directory = root / "temp/webarena-offline-evaluator-tests"
     directory.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=directory) as scratch:
+        # The production evaluator accepts only run-owned paths. Keep the
+        # separately published source checkout external, but stage the frozen
+        # dataset bytes inside this test run before constructing its config.
+        dataset = Path(scratch) / "webarena-verified.json"
+        shutil.copyfile(source_dataset, dataset)
         cfg = {"project_root": str(root), "webarena": {"evaluator_python": runtime["python"]},
                "timeouts": {"evaluation_seconds": 120}, "execution_context": {
                    "evaluator": {"path": dataset.relative_to(root).as_posix(), "sha256": sha256(dataset),

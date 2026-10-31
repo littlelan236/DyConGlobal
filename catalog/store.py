@@ -29,6 +29,13 @@ class Task(Strict):
 
     @model_validator(mode="after")
     def consistent_instance(self):
+        if self.benchmark in {"swebench_pro_v2", "terminalbench_2_1"}:
+            if self.repo is not None or self.base_commit is not None:
+                raise ValueError("Harbor tasks must not contain legacy SWE repository placeholders")
+            from catalog.harbor import validate_payload
+            validate_payload(self.instance, self.instance_id, self.revision, self.benchmark)
+            identifier(self.instance_id)
+            return self
         if self.benchmark == "webarena_verified":
             if self.repo is not None or self.base_commit is not None:
                 raise ValueError("WebArena tasks must not contain SWE repository placeholders")
@@ -54,7 +61,7 @@ class Task(Strict):
     @model_serializer(mode="wrap")
     def preserve_swe_shape(self, handler):
         value = handler(self)
-        if self.benchmark in {"skillsbench", "webarena_verified"}:
+        if self.benchmark in {"skillsbench", "webarena_verified", "swebench_pro_v2", "terminalbench_2_1"}:
             value.pop("repo", None)
             value.pop("base_commit", None)
         return value
