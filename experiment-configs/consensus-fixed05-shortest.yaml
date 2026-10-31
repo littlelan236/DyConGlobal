@@ -1,0 +1,8 @@
+schema_version: 1
+enabled: true
+mode: parallel_consensus
+fallback_policy: stop
+consensus:
+  representative_policy: min_step_tokens
+  min_retained_branches: 2
+  retention_ratio: 0.5

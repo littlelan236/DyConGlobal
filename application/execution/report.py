@@ -29,4 +29,7 @@ def report(root, run_id):
     result['environment_failures'] = failure_status(root, run_id)
     from .supervisor import cancellation_status
     result["cancellation"] = cancellation_status(run)
+    workers = run / "serving/worker-pool.json"
+    if workers.exists():
+        result["serving_workers"] = read_json(workers)
     return result

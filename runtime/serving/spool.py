@@ -159,6 +159,8 @@ class CaptureSpool:
         self.lock = threading.RLock()
         self.condition = threading.Condition(self.lock)
         self.pending, self.failures, self.members = {}, [], {}
+        self._session_metadata_hints = {}
+        self._published_cleanup_paths = {}
         self.closed = False
 
     def key(self, relative):
@@ -268,49 +270,88 @@ class CaptureSpool:
             with self.budget.condition:
                 self.budget.condition.notify_all()
 
+    def bind_session_metadata(self, session, request_ids, sample_ids):
+        """Build a session-only publication snapshot without holding the writer lock."""
+        published = {str(p.relative_to(self.root))
+                     for p in (self.root / 'sessions' / session).rglob('*.json')}
+        cleanup = set(published)
+        for rid in request_ids:
+            relative = 'requests/' + hash_json(rid) + '.json'
+            if (self.root / relative).exists():
+                published.add(relative)
+                cleanup.add(relative)
+        for sid in sample_ids:
+            relative = 'index/' + sid + '.json'
+            path = self.root / relative
+            if not path.exists():
+                continue
+            cleanup.add(relative)
+            value = read_json(path)
+            shard = (value.get('tensor_locator') or {}).get('shard') if isinstance(value, dict) else None
+            if shard:
+                index = 'index/shard-' + Path(shard).stem + '.json'
+                if (self.root / index).exists():
+                    published.add(index)
+                    cleanup.add(index)
+        with self.lock:
+            self._session_metadata_hints[session] = (published, cleanup)
+
     def publish_session(self, session, timeout):
         self.seal(session)
         deadline = time.monotonic() + timeout
         with self.condition:
             if not self.condition.wait_for(
-                lambda: not any(j["session_id"] == session for j in self.pending.values()), timeout
-            ):
+                lambda: not any(j['session_id'] == session for j in self.pending.values()),
+                max(0, deadline-time.monotonic())):
                 return False
-            if any(j["session_id"] == session for j in self.failures):
+            if any(j['session_id'] == session for j in self.failures):
                 return False
-            files = {}
-            for pattern in (f"sessions/{session}/**/*.json", "requests/*.json", "index/*.json"):
+            hints = getattr(self, '_session_metadata_hints', {}).get(session)
+        # These reads and hashes must not stop add()/seal() for other sessions.
+        files, cleanup = {}, set()
+        if hints is not None:
+            published, cleanup = hints
+            for relative in sorted(published):
+                path = self.root / relative
+                if path.exists():
+                    files[relative] = sha256(path)
+        else:
+            # Compatibility for recovery of old sessions lacking a live index.
+            for pattern in (f'sessions/{session}/**/*.json', 'requests/*.json', 'index/*.json'):
                 for path in self.root.glob(pattern):
                     value = read_json(path)
-                    if pattern == "index/*.json":
-                        if isinstance(value, list) and value and value[0]["session_id"] == session:
-                            files[str(path.relative_to(self.root))] = sha256(path)
-                        continue
-                    if isinstance(value, list) or value.get("session_id", session) == session:
-                        files[str(path.relative_to(self.root))] = sha256(path)
-            session_path = self.root / "sessions" / session / "session.json"
-            if session_path.exists():
-                session_info = read_json(session_path)
-                config_ref = session_info.get("capture_config_ref", "capture-config.json")
-                config_path = owned_path(self.root, config_ref)
-                if config_path.exists():
-                    expected_config = session_info.get("capture_config_sha256")
-                    if expected_config and hash_json(read_json(config_path)) != expected_config:
-                        raise ValueError("Session capture configuration hash mismatch")
-                    files[config_ref] = sha256(config_path)
-                elif config_ref != "capture-config.json":
-                    raise FileNotFoundError(config_path)
-            for name in ("inventory.json", "capture-config.json"):
-                if (self.root / name).exists():
-                    files[name] = sha256(self.root / name)
-            key = hash_json({"session": session, "files": files})
-            job = {"key": key, "session_id": session, "files": files, "release": [], "state": "sealed"}
-            self.write_json(f"uploads/{key}.json", job)
+                    sid = value[0].get('session_id') if isinstance(value, list) and value else value.get('session_id') if isinstance(value, dict) else None
+                    if pattern.startswith('sessions/') or sid == session:
+                        relative = str(path.relative_to(self.root))
+                        cleanup.add(relative)
+                        if pattern != 'index/*.json' or isinstance(value, list):
+                            files[relative] = sha256(path)
+        session_path = self.root / 'sessions' / session / 'session.json'
+        if session_path.exists():
+            info = read_json(session_path)
+            ref = info.get('capture_config_ref', 'capture-config.json')
+            config = owned_path(self.root, ref)
+            if config.exists():
+                expected = info.get('capture_config_sha256')
+                if expected and hash_json(read_json(config)) != expected:
+                    raise ValueError('Session capture configuration hash mismatch')
+                files[ref] = sha256(config)
+            elif ref != 'capture-config.json':
+                raise FileNotFoundError(config)
+        for name in ('inventory.json', 'capture-config.json'):
+            if (self.root / name).exists():
+                files[name] = sha256(self.root / name)
+        key = hash_json({'session': session, 'files': files})
+        job = {'key': key, 'session_id': session, 'files': files, 'release': [], 'state': 'sealed'}
+        with self.condition:
+            if not hasattr(self, '_published_cleanup_paths'):
+                self._published_cleanup_paths = {}
+            self._published_cleanup_paths[session] = set(cleanup)
+            self.write_json(f'uploads/{key}.json', job)
             self._submit(job)
             return self.condition.wait_for(
-                lambda: not any(j["session_id"] == session for j in self.pending.values()),
-                max(0, deadline - time.monotonic()),
-            ) and not any(j["session_id"] == session for j in self.failures)
+                lambda: not any(j['session_id'] == session for j in self.pending.values()),
+                max(0, deadline-time.monotonic())) and not any(j['session_id'] == session for j in self.failures)
 
     def recover(self):
         """Re-submit incomplete jobs; a rename without ACK is safe to retry."""
@@ -364,24 +405,21 @@ class CaptureSpool:
         return jobs
 
     def release_session_metadata(self, session):
-        """Publication ACK already verified these exact bytes; keep small jobs."""
+        """Delete only ACK-covered session metadata, outside the writer lock."""
         with self.lock:
-            paths = list((self.root / "sessions" / session).rglob("*.json"))
-            for pattern in ("requests/*.json", "index/*.json"):
+            paths = getattr(self, '_published_cleanup_paths', {}).pop(session, None)
+            getattr(self, '_session_metadata_hints', {}).pop(session, None)
+        if paths is None:
+            paths = {str(p.relative_to(self.root)) for p in (self.root/'sessions'/session).rglob('*.json')}
+            for pattern in ('requests/*.json', 'index/*.json'):
                 for path in self.root.glob(pattern):
                     value = read_json(path)
-                    sid = (
-                        value[0]["session_id"]
-                        if isinstance(value, list) and value
-                        else value.get("session_id")
-                        if isinstance(value, dict)
-                        else None
-                    )
+                    sid = value[0].get('session_id') if isinstance(value,list) and value else value.get('session_id') if isinstance(value,dict) else None
                     if sid == session:
-                        paths.append(path)
-            for path in paths:
-                path.unlink(missing_ok=True)
-                self.budget.release(self.key(str(path.relative_to(self.root))))
+                        paths.add(str(path.relative_to(self.root)))
+        for relative in paths:
+            (self.root / relative).unlink(missing_ok=True)
+            self.budget.release(self.key(relative))
 
     def close(self, timeout):
         try:

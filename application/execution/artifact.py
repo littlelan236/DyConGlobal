@@ -1,8 +1,9 @@
 """Verify run-local receipts, canonical bytes and external capture references."""
 from pathlib import Path
 from application.execution.evidence import RunEvidence
-from core.io import hash_json, owned_path, read_json, sha256, write_json
+from core.io import artifact_reference, hash_json, owned_path, read_json, sha256, write_json
 from .run_plan import load_plan
+from application.execution.subject import artifact_kinds
 
 
 def capture_publication(root, run_id):
@@ -33,16 +34,16 @@ def refresh(root,run_id):
     evidence = RunEvidence(root, run_id)
     if evidence.path.exists():
         rows.append({'kind':'run-evidence', 'artifact_id':'evidence',
-                     'local_locator':str(evidence.path.relative_to(Path(root))),
+                     'local_locator':artifact_reference(root,evidence.path),
                      'content_sha256':sha256(evidence.path)})
     for path in sorted(run.rglob('*receipt.json')):
         if path.is_file():
             rows.append({'kind':'receipt','artifact_id':str(path.relative_to(run)),
-                         'local_locator':str(path.relative_to(Path(root))), 'content_sha256':sha256(path)})
+                         'local_locator':artifact_reference(root,path), 'content_sha256':sha256(path)})
     data=RunEvidence(root,run_id).read()
     for rid,row in data['rollouts'].items():
         if row['run_id']==run_id:
-            for kind in ('trajectory','patch'):
+            for kind in artifact_kinds(row):
                 rows.append({'kind':kind,'artifact_id':rid+':'+kind,
                              'local_locator':row[kind+'_path'],'content_sha256':row[kind+'_sha256']})
     write_json(run/'artifacts.json',{'schema_version':1,'run_id':run_id,'artifacts':rows})
@@ -59,6 +60,24 @@ def show(root,run_id):
 def verify(root,run_id):
     loaded=load_plan(root,run_id);run=loaded['run'];checked=0;receipts=0;external=0
     RunEvidence(root,run_id).verify()
+    from rollout.consensus import consensus_options, validate_consensus_evidence
+
+    for row in RunEvidence(root, run_id).read()['rollouts'].values():
+        if row.get('run_id') != run_id:
+            continue
+        trajectory = read_json(owned_path(root, row['trajectory_path']))
+        for message in trajectory.get('messages', []):
+            summary = (message.get('extra') or {}).get('dycon_parallel')
+            if not isinstance(summary, dict):
+                continue
+            if (summary.get('selection_mode') == 'parallel_enthophy' or
+                    'representative_policy' in (summary.get('consensus_config') or {})):
+                validate_consensus_evidence(summary, consensus_options(loaded['config']['parallel']))
+                proof = loaded['config'].get('parallel_policy')
+                if proof and (summary.get('policy_binding') != {
+                        key: proof[key] for key in ('input_sha256', 'effective_sha256')}):
+                    raise ValueError('Parallel decision policy binding differs from frozen run')
+                checked += 1
     for row in read_json(run/'artifacts.json').get('artifacts',[]):
         if sha256(owned_path(root,row['local_locator']))!=row['content_sha256']:
             raise ValueError('Artifact checksum mismatch: '+row['artifact_id'])
@@ -90,7 +109,7 @@ def verify(root,run_id):
         proof=read_json(run/'harness/selection-receipt.json')
         if hash_json(selection)!=proof['selection_sha256']:raise ValueError('Harness selection changed')
         for row in selection['rollouts'].values():
-            for kind in ('trajectory','patch'):
+            for kind in artifact_kinds(row):
                 if sha256(owned_path(root,row[kind+'_path']))!=row[kind+'_sha256']:
                     raise ValueError('Selected canonical artifact changed')
                 checked+=1

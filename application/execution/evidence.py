@@ -5,8 +5,9 @@ import copy
 from contextlib import contextmanager
 from pathlib import Path
 
-from core.io import hash_json, identifier, owned_path, read_json, sha256, write_json
+from core.io import artifact_reference, hash_json, identifier, owned_path, read_json, sha256, write_json
 from core.locking import file_lock
+from application.execution.subject import artifact_kinds, subject_digest, verify_subject
 
 
 class RunEvidence:
@@ -24,7 +25,7 @@ class RunEvidence:
         if not self.path.exists():
             return self.empty()
         data = read_json(self.path)
-        if data.get("schema_version") != 1:
+        if data.get("schema_version") not in (1, 2):
             raise ValueError(f"Unsupported run catalog schema: {self.path}")
         self.validate(data)
         return data
@@ -53,24 +54,27 @@ class RunEvidence:
             if key in data["tasks"] and data["tasks"][key] != task:
                 raise ValueError("Conflicting run task definition")
             data["tasks"][key] = task
+            if row.get("evaluation_subject", {}).get("kind") == "workspace":
+                data["schema_version"] = 2
             data["rollouts"][rollout_id] = row
 
     def record_evaluation(self, eval_id, report_path, outcomes, provenance):
         identifier(eval_id)
         report = owned_path(self.root, report_path)
-        if not report.is_relative_to(self.path.parent):
+        if not report.is_relative_to(self.path.parent.resolve()):
             raise ValueError("Evaluation report must live in its owning run")
         with self.transaction() as data:
             if eval_id in data["evaluations"]:
                 raise FileExistsError(eval_id)
             for rid, result in outcomes.items():
                 row = data["rollouts"][rid]
-                if result["patch_sha256"] != row["patch_sha256"]:
-                    raise ValueError("Patch mismatch")
+                digest_key, digest = subject_digest(row)
+                if result.get(digest_key) != digest:
+                    raise ValueError("Evaluation subject mismatch")
                 row.update(evaluation_status=result["status"], resolved=result["resolved"],
                            selected_evaluation_id=eval_id)
             data["evaluations"][eval_id] = {
-                "report_path": str(report.relative_to(self.root)),
+                "report_path": artifact_reference(self.root, report),
                 "report_sha256": sha256(report), "outcomes": outcomes, "provenance": provenance,
             }
 
@@ -88,29 +92,31 @@ class RunEvidence:
             identifier(rid)
             if row["task_key"] not in data["tasks"] or row["run_id"] != self.run_id:
                 raise ValueError("Run rollout/task binding changed")
-            for field in ("trajectory", "patch"):
+            for field in artifact_kinds(row):
                 owned_path(self.root, row[field + "_path"])
             status, resolved = row["evaluation_status"], row["resolved"]
-            if status not in ("not_run", "running", "completed", "infra_error", "ConnectionError"):
+            if status not in ("not_run", "running", "completed", "completed_unknown", "infra_error", "ConnectionError"):
                 raise ValueError("Invalid evaluation status")
-            if (status == "completed") != (type(resolved) is bool):
-                raise ValueError("Only completed evaluation has a boolean resolved outcome")
-            if resolved and row["submission_status"] != "submitted":
+            if status == "completed" and type(resolved) is not bool:
+                raise ValueError("Completed evaluation requires a boolean resolved outcome")
+            if status != "completed" and resolved is not None:
+                raise ValueError("Only completed supported evaluations have a success outcome")
+            if resolved and row["submission_status"] != "submitted" and "subject" not in artifact_kinds(row):
                 raise ValueError("Unsubmitted trajectory cannot be resolved")
             eid = row["selected_evaluation_id"]
             if status == "completed" and not eid:
                 raise ValueError("Completed outcome needs evaluation evidence")
             if eid:
                 outcome = data["evaluations"][eid]["outcomes"][rid]
-                if outcome["patch_sha256"] != row["patch_sha256"]:
-                    raise ValueError("Evaluation must bind the exact rollout patch")
+                if outcome.get(subject_digest(row)[0]) != subject_digest(row)[1]:
+                    raise ValueError("Evaluation must bind the exact rollout subject")
                 if outcome["status"] != status or outcome["resolved"] != resolved:
                     raise ValueError("Rollout outcome disagrees with selected evaluation")
         for evaluation in data["evaluations"].values():
             owned_path(self.root, evaluation["report_path"])
             for rid, outcome in evaluation["outcomes"].items():
-                if rid not in data["rollouts"] or outcome["patch_sha256"] != data["rollouts"][rid]["patch_sha256"]:
-                    raise ValueError("Evaluation outcome binds an unknown rollout or different patch")
+                if rid not in data["rollouts"] or outcome.get(subject_digest(data["rollouts"][rid])[0]) != subject_digest(data["rollouts"][rid])[1]:
+                    raise ValueError("Evaluation outcome binds an unknown rollout or different subject")
 
     def select(self, rollout_ids=(), *, partition=None):
         data = self.read()
@@ -148,9 +154,10 @@ class RunEvidence:
     def verify(self):
         data = self.read()
         for rid, row in data["rollouts"].items():
-            for field in ("trajectory", "patch"):
+            for field in artifact_kinds(row):
                 if sha256(owned_path(self.root, row[field + "_path"])) != row[field + "_sha256"]:
                     raise ValueError(f"Changed {field}: {rid}")
+            verify_subject(self.root, row)
         for evaluation in data["evaluations"].values():
             if sha256(owned_path(self.root, evaluation["report_path"])) != evaluation["report_sha256"]:
                 raise ValueError("Changed evaluation report")

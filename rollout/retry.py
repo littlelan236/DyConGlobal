@@ -9,7 +9,7 @@ from core.locking import file_lock
 RETRY_STATUSES = frozenset({'LimitsExceeded', 'reasoning_loop'})
 SEED_POLICY = 'repetition_round_offset_v1'
 TERMINAL = frozenset({'Submitted', 'reasoning_loop', 'LimitsExceeded',
-                      'ContextWindowExceededError', 'RepeatedFormatError', 'TimeExceeded'})
+                      'ContextWindowExceededError', 'RepeatedFormatError', 'TimeExceeded', 'AgentCompleted', 'AgentTimeout'})
 INFRASTRUCTURE = frozenset({'ContainerCorrupted', 'EnvironmentSetupFailed', 'APIError',
     'Timeout', 'ReadTimeout', 'ConnectError', 'APIConnectionError', 'DockerException',
     'NotFound', 'ConnectionError', 'Interrupted'})
@@ -206,7 +206,9 @@ def verify_final(root, run_id, item, result, evidence):
     if row.get('termination_reason') != result.get('agent_exit_status', result.get('exit_status')):
         raise ValueError('Accepted canonical terminal status changed')
     from core.io import owned_path, sha256
-    for kind in ('trajectory', 'patch'):
+    from application.execution.subject import artifact_kinds, verify_subject
+    verify_subject(root, row)
+    for kind in artifact_kinds(row):
         if sha256(owned_path(root, row[kind + '_path'])) != row[kind + '_sha256']:
             raise ValueError('Completed canonical bytes changed')
     return rid
@@ -298,10 +300,14 @@ def attempt_usage(run):
         for field in ('agent_seconds', 'capture_finalize_seconds'):
             result[field] += record.get('timings', {}).get(field, 0.0)
         usage = record.get('usage')
-        if usage:
+        if usage and usage.get('complete', True):
             result['usage_recorded_attempts'] += 1
             for key in ('cost', 'prompt_tokens', 'completion_tokens'):
-                result[key] += usage.get(key, 0)
+                value = usage.get(key, 0)
+                if value is None:
+                    result[key] = None
+                elif result[key] is not None:
+                    result[key] += value
     result['usage_complete'] = result['usage_recorded_attempts'] == result['physical_attempts']
     if not result['usage_complete']:
         result['known_usage'] = {key: result[key] for key in ('cost', 'prompt_tokens', 'completion_tokens')}

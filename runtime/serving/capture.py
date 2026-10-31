@@ -21,7 +21,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from core.io import hash_json, now, read_json, sha256, write_json
+from core.io import hash_json, now, owned_path, read_json, sha256, write_json
 from core.locking import file_lock
 
 THINK_OPEN_TOKEN_ID = 248068
@@ -556,6 +556,9 @@ class OnlineCaptureController:
         self.decision_deadlines = {}
         self.cancelled_sessions = set()
         self.capture_config_ref = "capture-config.json"
+        self._disk_failure_lock = threading.Lock()
+        self._disk_failure_seen = set()
+        self._disk_failures_by_session = {}
 
     def write_configuration(self):
         """Preserve legacy NAS config bytes and version changed configurations."""
@@ -789,6 +792,8 @@ class OnlineCaptureController:
                 raise KeyError("request has no capture metadata binding")
             session_id, request = binding
             session = self.sessions[session_id]
+            if session.status not in {'active', 'draining'}:
+                raise ValueError('Capture sample arrived after session stop or finalization')
             try:
                 if prompt_token_ids is not None and anchor == "think_open":
                     evidence = validate_anchor(prompt_token_ids, anchor, token_ids=token_ids)
@@ -932,12 +937,12 @@ class OnlineCaptureController:
                 position,
                 metadata.get("token_id"),
             ]
-        try:
-            with np.load(candidate, allow_pickle=False) as archive:
-                tensors = {name: np.asarray(archive[name]) for name in archive.files}
-            return self.record(request_id, tensors, **metadata)
-        finally:
+        with np.load(candidate, allow_pickle=False) as archive:
+            tensors = {name: np.asarray(archive[name]) for name in archive.files}
+        result = self.record(request_id, tensors, **metadata)
+        if result.get('status') != 'failed':
             candidate.unlink(missing_ok=True)
+        return result
 
     def record_output(self, value):
         request_id = value["request_id"]
@@ -980,7 +985,7 @@ class OnlineCaptureController:
                                       previous_output_sha256=previous["output_sha256"],
                                       actual_output_sha256=record["output_sha256"])
                 raise ValueError("Conflicting native output receipt")
-            if self.sessions[session_id].status != "active":
+            if self.sessions[session_id].status not in {"active", "draining"}:
                 self._receipt_failure(request, "output_after_session_stop", raw_output=value)
                 raise ValueError("Native output arrived after capture session stopped")
             if request.decision_id is not None:
@@ -1039,8 +1044,32 @@ class OnlineCaptureController:
                 raise ValueError("Ambiguous native output receipt")
             return dict(rows[0])
 
-    def record_decision(self, decision, timeout=30):
-        """Freeze branch outputs and selection before any tool is executed."""
+    def _disk_failure_records(self, session_id, decision_id=None):
+        """Parse new failures once outside the shared controller lock; keep small refs."""
+        if not hasattr(self, '_disk_failure_lock'):
+            self._disk_failure_lock = threading.Lock()
+            self._disk_failure_seen = set()
+            self._disk_failures_by_session = {}
+        with self._disk_failure_lock:
+            for path in (self.export_root/'failures').glob('*.json'):
+                key = str(path)
+                if key in self._disk_failure_seen:
+                    continue
+                try:
+                    value = read_json(path)
+                except (OSError, ValueError):
+                    continue
+                self._disk_failure_seen.add(key)
+                if not isinstance(value, dict):
+                    continue
+                entry = {k: value[k] for k in ('session_id','decision_id','branch_id','api_attempt_id','step_id','reason') if k in value}
+                entry['source_path'] = key
+                self._disk_failures_by_session.setdefault(value.get('session_id'), []).append(entry)
+            return [dict(v) for v in self._disk_failures_by_session.get(session_id, ())
+                    if decision_id is None or v.get('decision_id') == decision_id]
+
+    def prepare_decision(self, decision, timeout=30):
+        """Bind native receipts before selection or publication using one validator."""
         import copy
 
         sid, did = decision["session_id"], decision["decision_id"]
@@ -1069,16 +1098,10 @@ class OnlineCaptureController:
                     and r.get("branch_id") == row["branch_id"]
                     and r.get("api_attempt_id") == row["api_attempt_id"]]
 
+        persisted_control_errors = self._disk_failure_records(sid, did)
+        session_control_errors = self._disk_failure_records(sid)
         with self._output_condition:
             key = (sid, did)
-            persisted_control_errors = []
-            for path in (self.export_root / "failures").glob("*.json"):
-                try:
-                    error = read_json(path)
-                except (OSError, ValueError):
-                    continue
-                if isinstance(error, dict) and error.get("session_id") == sid and error.get("decision_id") == did:
-                    persisted_control_errors.append(error)
             if persisted_control_errors:
                 self.decision_failures.setdefault(key, {
                     "reason": "capture_control_unavailable", "errors": persisted_control_errors})
@@ -1109,13 +1132,7 @@ class OnlineCaptureController:
             def fail(reason):
                 session = self.sessions.get(sid)
                 capture_errors = list(session.options.get("failures", [])) if session else []
-                for path in (self.export_root / "failures").glob("*.json"):
-                    try:
-                        error = read_json(path)
-                        if error.get("session_id") == sid:
-                            capture_errors.append(error)
-                    except (OSError, ValueError):
-                        continue
+                capture_errors.extend(session_control_errors)
                 value["receipt_diagnostics"] = {"reason": reason, "branches": diagnostics,
                     "wait_completed": completed, "wait_seconds": time.monotonic() - started,
                     "deadline_unix": deadline, "capture_errors": capture_errors,
@@ -1139,6 +1156,13 @@ class OnlineCaptureController:
                         else "no_receipt"))
                 if receipts:
                     receipt = receipts[0]
+                    expected_native = {
+                        "completion_tokens": len(receipt["output_token_ids"]),
+                        "output_sha256": receipt["output_sha256"],
+                        "ledger_ref": receipt["ledger_ref"], "ledger_sha256": receipt["ledger_sha256"],
+                    }
+                    if any(key in row and row[key] != expected for key, expected in expected_native.items()):
+                        fail("native_length_or_output_conflict")
                     if receipt["request_id"] in native_requests:
                         fail("shared_native_request")
                     native_requests.add(receipt["request_id"])
@@ -1163,8 +1187,30 @@ class OnlineCaptureController:
                                prompt_tokens=len(receipt["prompt_token_ids"]),
                                completion_tokens=len(receipt["output_token_ids"]))
                     row["selected"] = row["branch_id"] == value["selected_branch_id"]
+                    if (decision.get("length_policy") == "min_step_tokens" or
+                            (decision.get("consensus_config") or {}).get("representative_policy") == "min_step_tokens"):
+                        billed = ((row.get("response") or {}).get("usage") or {}).get("completion_tokens")
+                        if billed is not None and (type(billed) is not int or billed != row["completion_tokens"]):
+                            fail("completion_usage_native_conflict")
+                        row["length_source"] = "native_receipt_output_token_ids"
             if len(native_prompt_hashes) > 1:
                 fail("different_native_token_prompts")
+            return value
+
+    def record_decision(self, decision, timeout=30):
+        """Recheck receipt bindings, audit new policies, then freeze the winner."""
+        with self._output_condition:
+            value = self.prepare_decision(decision, timeout)
+            sid, did = value["session_id"], value["decision_id"]
+            if (value.get("selection_mode") == "parallel_enthophy" or
+                    "representative_policy" in (value.get("consensus_config") or {})):
+                from rollout.consensus import validate_consensus_evidence
+
+                try:
+                    validate_consensus_evidence(value)
+                except ValueError as exc:
+                    self._write_failure_artifact(f"sessions/{sid}/parallel/failed-{did}.json", value, immutable=True)
+                    raise ValueError("Parallel selection evidence validation failed: " + str(exc)) from exc
             self._write(f"sessions/{sid}/parallel/decisions/{did}.json", value, immutable=True)
             # Full candidate text is durable on disk; keep only small identities
             # in memory until this session is finalized.
@@ -1237,9 +1283,7 @@ class OnlineCaptureController:
         return coverage
 
     def finalize(self, session_id, *, rollout_id, trajectory_path, trajectory_sha256, model_fingerprint):
-        path = Path(trajectory_path).resolve()
-        if not path.is_relative_to(self.project_root):
-            raise ValueError("Finalized trajectory is outside the project")
+        path = owned_path(self.project_root, str(Path(trajectory_path).resolve()))
         if sha256(path) != trajectory_sha256:
             raise ValueError("Finalized trajectory checksum mismatch")
         source = read_json(path)
@@ -1251,6 +1295,13 @@ class OnlineCaptureController:
         ]
         with self._lock:
             session = self.sessions[session_id]
+            previous = session.finalization
+            if previous is not None and session.status in {'complete', 'not_exported'}:
+                if any(previous.get(k) != v for k, v in {
+                        'rollout_id': rollout_id, 'trajectory_sha256': trajectory_sha256,
+                        'model_fingerprint': model_fingerprint}.items()):
+                    raise ValueError('Conflicting repeated capture finalization')
+                return {**previous, 'capture_status': session.status, 'idempotent': True}
             if self.config.get("model_fingerprint") not in {None, model_fingerprint}:
                 raise ValueError("Finalized trajectory checkpoint mismatch")
             for row, native_id in zip(assistant, native_ids, strict=True):
@@ -1320,6 +1371,9 @@ class OnlineCaptureController:
         if not self.export_enabled:
             session.status = "not_exported"
         elif self.spool:
+            if hasattr(self.spool, 'bind_session_metadata'):
+                self.spool.bind_session_metadata(session_id, list(session.requests),
+                    [s['sample_id'] for s in session.samples if s.get('sample_id')])
             published = self.spool.publish_session(
                 session_id, self.config.get("export", {}).get("upload_max_elapsed_seconds", 600)
             )
@@ -1341,9 +1395,7 @@ class OnlineCaptureController:
         """One bounded join before canonical import; includes FormatError responses."""
         from hidden.artifacts import response_records
 
-        path = Path(trajectory_path).resolve()
-        if not path.is_relative_to(self.project_root):
-            raise ValueError("Trajectory escapes project")
+        path = owned_path(self.project_root, str(Path(trajectory_path).resolve()))
         source = read_json(path)
         rows = list(response_records(source))
 
@@ -1419,32 +1471,41 @@ class OnlineCaptureController:
             return entry
 
     def stop(self, session_id: str):
-        self.queue.drain_session(session_id, self.config.get("finalize_seconds", 120))
+        with self._output_condition:
+            session = self.sessions.get(session_id)
+            if session is None:
+                raise KeyError(session_id)
+            if session.status in {'stopped', 'complete', 'partial', 'not_exported'}:
+                return self.status(session_id)
+            session.status = 'draining'
+            required_requests = {rid for rid, request in session.requests.items()
+                                 if 'think_close' in (request.anchors or [])}
+            if not self._output_condition.wait_for(
+                    lambda: not (required_requests - self.request_outputs.keys()),
+                    timeout=self.config.get('finalize_seconds', 120)):
+                missing = sorted(required_requests - self.request_outputs.keys())
+                self.failure(session_id, 'native_output_drain_timeout', missing_request_ids=missing)
+                raise TimeoutError('Native output drain incomplete: ' + ','.join(missing))
+        self.queue.drain_session(session_id, self.config.get('finalize_seconds', 120))
         with self._lock:
             session = self.sessions.get(session_id)
             if session is None:
                 raise KeyError(session_id)
-            session.status = "stopped"
+            session.status = 'stopped'
             for sample in session.samples:
-                if sample.get("status") in {"queued", "captured"}:
-                    sample["session_status"] = "stopped"
-            if session.samples:
-                self._record_manifests(session_id, session.samples[0], session_status="stopped")
-            self._write(
-                f"sessions/{session_id}/receipt.json",
-                {
-                    "session_id": session_id,
-                    "status": session.status,
-                    "metadata": self._request_summary(session.default_request),
-                    "samples": len(session.samples),
-                    "metrics": dict(session.metrics),
-                    "export": self.queue.status(),
-                    "files": {
-                        "queue.jsonl": sha256(self.queue.journal) if self.queue.journal.exists() else None
-                    },
-                },
-            )
-            return self.status(session_id)
+                if sample.get('status') in {'queued','captured'}:
+                    sample['session_status'] = 'stopped'
+            metadata = dict(session.samples[0]) if session.samples else None
+            value = {'session_id':session_id,'status':session.status,
+                'metadata':self._request_summary(session.default_request),
+                'samples':len(session.samples),'metrics':dict(session.metrics)}
+        # Global manifest locks, journal hashing and fsync must not block bind/output.
+        if metadata is not None:
+            self._record_manifests(session_id, metadata, session_status='stopped')
+        value.update(export=self.queue.status(), files={
+            'queue.jsonl':sha256(self.queue.journal) if self.queue.journal.exists() else None})
+        self._write(f'sessions/{session_id}/receipt.json', value)
+        return self.status(session_id)
 
     def status(self, session_id: str | None = None):
         with self._lock:

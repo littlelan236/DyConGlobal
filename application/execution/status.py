@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from core.io import now, read_json, write_json
+from pathlib import Path
 from core.locking import file_lock
 from uuid import uuid4
 
-from .run_plan import load_plan
+from .run_plan import load_plan, list_runs, run_path
 
 
 def run_status(root, run_id):
@@ -38,6 +39,9 @@ def run_status(root, run_id):
     result['environment_failures'] = failure_status(root, run_id)
     from .supervisor import cancellation_status
     result["cancellation"] = cancellation_status(run)
+    workers = run / "serving/worker-pool.json"
+    if workers.exists():
+        result["serving_workers"] = read_json(workers)
     return result
 
 
@@ -79,3 +83,61 @@ def reconcile_run(root, run_id):
         "task_count": len(loaded["tasks"]["tasks"]),
         "cancellation": cancellation,
     }
+def active_run_statuses(root):
+    """Return compact summaries for live and queued runs."""
+    import subprocess
+    from collections import Counter
+    from runtime.containers.dependencies import failure_status
+    root = Path(root).resolve()
+    active = []
+    processes = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True, check=False).stdout
+    terminal = {"complete", "failed", "cancelled", "validated"}
+    for run_id in list_runs(root):
+        run = run_path(root, run_id)
+        status_path = run / "status.json"
+        if not status_path.exists():
+            continue
+        status = read_json(status_path)
+        if status.get("stage") in terminal or "application.execution.supervisor" not in processes or run_id not in processes:
+            continue
+        loaded = load_plan(root, run_id)
+        progress_path = run / "progress.json"
+        progress = read_json(progress_path) if progress_path.exists() else {}
+        samples = progress.get("samples") or {}
+        exit_counts = Counter(str(x.get("exit_status", "unknown")) for x in samples.values())
+        disposition_counts = Counter(str(x.get("disposition", "unknown")) for x in samples.values())
+        task_count = len(loaded["tasks"]["tasks"])
+        completed = sum(exit_counts.get(x, 0) for x in ("Submitted", "Resolved", "Complete", "completed"))
+        failure_statuses = {"failed", "Failure", "ConnectionError", "ParallelSelectionError",
+                            "ContextWindowExceededError", "LimitsExceeded", "infra_error", "error"}
+        error_samples = sum(1 for sample in samples.values() if sample.get("error"))
+        capture_error_samples = sum(1 for sample in samples.values() if sample.get("capture_errors"))
+        failure_counts = {key: count for key, count in exit_counts.items() if key in failure_statuses}
+        environment = failure_status(root, run_id)
+        environment_count = int(environment.get("count", 0)) if isinstance(environment, dict) else 0
+        anomaly = {
+            "detected": bool(failure_counts or error_samples or capture_error_samples or environment_count),
+            "failure_status_counts": dict(sorted(failure_counts.items())),
+            "sample_error_count": error_samples,
+            "capture_error_sample_count": capture_error_samples,
+            "environment_failure_count": environment_count,
+        }
+        active.append({"run_id": run_id, "operation": loaded["plan"].get("operation"), "task_count": task_count,
+                       "status": status, "progress_updated_at": progress.get("updated_at"), "sample_count": len(samples),
+                       "completed_count": completed, "pending_count": max(task_count-completed, 0),
+                       "exit_status_counts": dict(sorted(exit_counts.items())),
+                       "disposition_counts": dict(sorted(disposition_counts.items())), "anomalies": anomaly})
+    queued = []
+    queue_root = root / "state" / "run-resume-queue"
+    if queue_root.exists():
+        for status_path in sorted(queue_root.glob("*/status.json")):
+            try:
+                qs = read_json(status_path); stage = qs.get("stage")
+                if stage not in {"queued", "waiting_gpu_exit", "launching"}: continue
+                rp = status_path.parent / "request.json"; req = read_json(rp) if rp.exists() else {}
+                queued.append({"request_id": qs.get("request_id") or req.get("request_id"), "run_id": req.get("run_id"),
+                               "after_run": req.get("after_run"), "stage": stage,
+                               "queued_at": qs.get("queued_at") or req.get("queued_at"), "updated_at": qs.get("at")})
+            except (OSError, ValueError, TypeError):
+                continue
+    return {"schema_version": 2, "count": len(active), "runs": active, "queued_count": len(queued), "queued_runs": queued}

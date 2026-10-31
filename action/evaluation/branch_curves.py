@@ -24,17 +24,19 @@ METRICS = (
     ("delta_winner_support", "筛选影响 Δq"),
     ("delta_winner_uncertainty", "筛选影响 ΔU"),
     ("delta_winner_surprisal", "筛选影响 ΔI"),
+    ("branches", "分支数量（all：生成分支；retained：已记录筛选保留分支）"),
 )
 
 TRAJECTORY_METRICS = ("entropy", "normalized_entropy", "action_types",
                       "effective_action_count", "winner_uncertainty")
 
 
-def resolve_line_metrics(rows, mode, requested=()):
+def resolve_line_metrics(rows, mode, requested=(), *, include_branch_counts=False):
     """Select chart panels without changing computed statistics."""
     if isinstance(requested, str):
         requested = [requested]
-    available = {metric for _, metric, _ in metric_columns(rows[0])} if rows else set()
+    available = {metric for row in rows for _, metric, _ in
+                 metric_columns(row, include_branch_counts=include_branch_counts)}
     selected = list(dict.fromkeys(requested)) if requested else (
         list(TRAJECTORY_METRICS) if mode == "per-trajectory" else [m for m, _ in METRICS if m in available])
     missing = set(selected) - available
@@ -43,7 +45,7 @@ def resolve_line_metrics(rows, mode, requested=()):
     return selected
 
 
-def build_trajectory_curves(rows):
+def build_trajectory_curves(rows, *, include_branch_counts=False):
     """Preserve every observation's run/rollout identity and original step value."""
     result, seen = [], set()
     for row in sorted(rows, key=lambda r: (r["source_run_id"], r["rollout_id"], r["assistant_index"])):
@@ -51,7 +53,7 @@ def build_trajectory_curves(rows):
         if key in seen:
             raise ValueError("Duplicate trajectory assistant step in per-trajectory curves")
         seen.add(key)
-        for column, metric, scope in metric_columns(row):
+        for column, metric, scope in metric_columns(row, include_branch_counts=include_branch_counts):
             result.append({"source_run_id": row["source_run_id"], "rollout_id": row["rollout_id"],
                            "instance_id": row.get("instance_id"), "metric": metric, "scope": scope,
                            "axis": "assistant_step", "x": row["assistant_index"] + 1,
@@ -69,16 +71,48 @@ def trajectory_plot_index(trajectories, analysis):
                         "parallel_steps": source["parallel_steps"],
                         "status": "plotted" if source["parallel_steps"] else "no_parallel_steps",
                         "metrics": analysis["line_metrics"], "axis": "assistant_step",
-                        "files": [f"plots/per-trajectory/{run}/{rid}.{ext}" for ext in analysis["formats"]]})
+                        "files": ([f"plots/per-trajectory/{run}/{rid}/{metric}.{ext}"
+                                   for metric in analysis["line_metrics"] for ext in analysis["formats"]]
+                                  if analysis.get("plot_layout") == "separate" else
+                                  [f"plots/per-trajectory/{run}/{rid}.{ext}" for ext in analysis["formats"]])})
     if len({(e["source_run_id"], e["rollout_id"]) for e in entries}) != len(entries):
         raise ValueError("Duplicate trajectory plot identity")
     return {"schema_version": 1, "unit": "source_run_id + rollout_id; never grouped by task",
             "trajectory_count": len(entries), "entries": entries}
 
 
-def metric_columns(row):
+def separate_plot_index(trajectories, analysis):
+    """Freeze the complete metric-by-unit file set for one batch invocation."""
+    runs = sorted({t["source_run_id"] for t in trajectories})
+    mode = analysis["line_mode"]
+    units = []
+    if mode == "per-trajectory":
+        for source in sorted(trajectories, key=lambda t: (t["source_run_id"], t["rollout_id"])):
+            run, rid = identifier(source["source_run_id"]), identifier(source["rollout_id"])
+            units.append(("per-trajectory", [run], rid,
+                          "plotted" if source["parallel_steps"] else "no_parallel_steps",
+                          f"plots/per-trajectory/{run}/{rid}"))
+    if mode in {"per-run", "both"}:
+        for run in runs:
+            status = "plotted" if any(t["parallel_steps"] for t in trajectories
+                                     if t["source_run_id"] == run) else "no_parallel_steps"
+            units.append(("per-run", [run], None, status, f"plots/per-run/{identifier(run)}"))
+    if mode in {"all-runs", "both"}:
+        units.append(("all-runs", runs, None, "plotted", "plots/all-runs-normalized"))
+    entries = [{"mode": unit, "source_run_ids": selected_runs, "rollout_id": rid,
+                "metric": metric, "status": status,
+                "axis": "assistant_step" if unit == "per-trajectory" else "normalized_progress",
+                "files": [f"{prefix}/{identifier(metric)}.{ext}" for ext in analysis["formats"]]}
+               for unit, selected_runs, rid, status, prefix in units for metric in analysis["line_metrics"]]
+    return {"schema_version": 1, "plot_layout": "one_metric_per_figure", "entries": entries,
+            "figure_count": len(entries), "file_count": sum(len(e["files"]) for e in entries)}
+
+
+def metric_columns(row, *, include_branch_counts=False):
     columns = []
     for metric, _ in METRICS:
+        if metric == "branches" and not include_branch_counts:
+            continue
         if metric.startswith("delta_"):
             if metric in row:
                 columns.append((metric, metric, "delta"))
@@ -120,12 +154,15 @@ def interpolate_at(points, x):
     return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
 
 
-def build_curve_tables(rows, trajectories, progress_points=101):
+def build_curve_tables(rows, trajectories, progress_points=101, *, include_branch_counts=False,
+                       metric_specs=None):
     if type(progress_points) is not int or not 2 <= progress_points <= 1001:
         raise ValueError("progress-points must be an integer in [2, 1001]")
     if not rows:
         return [], []
-    columns = metric_columns(rows[0])
+    columns = list(metric_specs) if metric_specs is not None else (list(dict.fromkeys(column for row in rows for column in
+                                 metric_columns(row, include_branch_counts=True)))
+               if include_branch_counts else metric_columns(rows[0]))
     totals = defaultdict(int)
     metadata = {}
     for t in trajectories:
@@ -193,8 +230,9 @@ def render_line_plots(directory, raw_curves, normalized_curves, analysis,
     if not panels:
         raise ValueError("No line metrics available for plotting")
 
-    def render(table, filename, selected_runs, normalized, trajectory=None):
-        count = len(panels)
+    def render(table, filename, selected_runs, normalized, trajectory=None, one_metric=None):
+        selected_panels = [p for p in panels if one_metric is None or p[0] == one_metric]
+        count = len(selected_panels)
         ncols = min(3, count)
         nrows = math.ceil(count / ncols)
         width = 10 if ncols == 1 else 12 if ncols == 2 else 16
@@ -202,7 +240,7 @@ def render_line_plots(directory, raw_curves, normalized_curves, analysis,
         top = 0.75 if trajectory is not None and nrows == 1 else 0.80 if nrows <= 2 else 0.86
         fig.subplots_adjust(left=0.065, right=0.98, top=top,
                             bottom=0.17 if nrows <= 2 else 0.10, wspace=0.25, hspace=0.50)
-        for ax, (metric, label) in zip(axes.flat, panels):
+        for ax, (metric, label) in zip(axes.flat, selected_panels):
             subset = [r for r in table if r["metric"] == metric and r["source_run_id"] in selected_runs]
             for ri, run in enumerate(selected_runs):
                 for scope in ("all", "retained", "delta"):
@@ -230,7 +268,7 @@ def render_line_plots(directory, raw_curves, normalized_curves, analysis,
             ax.grid(axis="y", alpha=0.18)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
-            if metric == panels[0][0] or metric == "delta_entropy":
+            if metric == selected_panels[0][0] or metric == "delta_entropy":
                 handles, _ = ax.get_legend_handles_labels()
                 if handles:
                     ax.legend(fontsize=8, frameon=False)
@@ -265,6 +303,24 @@ def render_line_plots(directory, raw_curves, normalized_curves, analysis,
         plt.close(fig)
 
     with plt.rc_context(plot_style()):
+        if analysis.get("plot_layout") == "separate":
+            index = separate_plot_index(trajectories, analysis)
+            sources = {(t["source_run_id"], t["rollout_id"]): t for t in trajectories}
+            for entry in index["entries"]:
+                source = None
+                table = normalized_curves
+                if entry["mode"] == "per-trajectory":
+                    key = (entry["source_run_ids"][0], entry["rollout_id"])
+                    source = sources[key]
+                    table = [r for r in trajectory_curves
+                             if (r["source_run_id"], r["rollout_id"]) == key]
+                filename = directory.parent / entry["files"][0].rsplit(".", 1)[0]
+                render(table, filename, entry["source_run_ids"], source is None,
+                       source, one_metric=entry["metric"])
+            write_json(directory / "plot-index.json", index)
+            if mode == "per-trajectory":
+                write_json(directory / "trajectory-index.json", trajectory_plot_index(trajectories, analysis))
+            return
         if mode == "per-trajectory":
             grouped = defaultdict(list)
             for row in trajectory_curves:

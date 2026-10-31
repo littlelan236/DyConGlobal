@@ -1,0 +1,20 @@
+#!/bin/sh
+case "$*" in
+  *astral.sh/uv/*|*github.com/astral-sh/uv/releases/download/*)
+    if printf '%s' "$*" | grep -q -- "-o "; then
+      # The official uv bootstrap asks for an archive only after its installer
+      # script; the local bootstrap below makes that network hop unnecessary.
+      exit 0
+    fi
+    cat <<'EOF'
+#!/bin/sh
+mkdir -p "$HOME/.local/bin"
+cp /root/.local/bin/uv "$HOME/.local/bin/uv"
+cp /root/.local/bin/uvx "$HOME/.local/bin/uvx"
+printf '%s\n' 'export PATH=$HOME/.local/bin:/opt/dycon-wheels:$PATH' > "$HOME/.local/bin/env"
+chmod 755 "$HOME/.local/bin/uv" "$HOME/.local/bin/uvx"
+EOF
+    exit 0
+    ;;
+esac
+exec /usr/bin/curl "$@"

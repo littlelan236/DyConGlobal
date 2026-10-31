@@ -1,5 +1,30 @@
 # 重复 rollout 成功次数与预测 / 真实剩余量对照
 
+## 显式轨迹：包含未成功的正常结束样本（2026-10-31）
+
+沿用同一入口，显式指定一条或多条 canonical rollout，不要求 resolved=true：
+
+```bash
+.venvs/analysis/bin/dycon difficulty-plot-trajectories SOURCE_RUN NEW_PLOT_ID \
+  --attempt-id FITTED_RIDGE_ATTEMPT \
+  --rollout-list path/to/sha-bound-rollouts.json \
+  --target submission_remaining_reasoning_tokens_log1p
+```
+
+也可重复使用 `--rollout-id ID`。列表格式复用 difficulty 的 JSON ID 列表或
+`[{"rollout_id":"ID","trajectory_sha256":"SHA256"}]`；未知、重复、隔离或 SHA 不匹配的轨迹拒绝。
+显式模式读取 run 原始 NAS publication，复用 canonical/native 绑定、tensor 完整性和 Ridge 预测逻辑；
+不需要创建训练标签数据集，也不与 `--dataset-id`、`--repair-id`、`--reuse-predictions-id` 混用。
+默认不指定 rollout 的模式仍要求 dataset，并保留原有 resolved 筛选。
+
+显式模式每条图及 CSV 单列 resolved、evaluation_status 和 termination_reason。
+绿线来自 native exact 后缀，表示 **到本次 agent 结束的实际剩余量**，
+`truth_endpoint=observed_agent_terminal`；未成功轨迹不冒充成功剩余量或成功概率。
+缺 hidden 留预测断线，缺完整 native 后缀留实际量断线，不重建 token、不补零。
+训练是否重叠未审计时 used_in_fit=null、split=not_audited。
+SkillsBench 的 workspace subject 及导出文件通过既有 verify_subject 校验并绑定新 receipt。
+生成后仍使用 `dycon artifact verify NEW_PLOT_ID --scope difficulty-evaluation`。
+
 从项目根目录使用 analysis 环境的统一入口，不启动模型服务、不训练新模型：
 
     .venvs/analysis/bin/dycon difficulty-plot-trajectories SOURCE_RUN NEW_PLOT_ID \

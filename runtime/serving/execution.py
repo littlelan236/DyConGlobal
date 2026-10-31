@@ -16,6 +16,7 @@ class ExecutionLane:
     def __init__(self, name, workers, capacity):
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix=name)
         self.capacity = capacity
+        self.workers = workers
         self._lock = threading.Lock()
         self._outstanding = 0
         self._running = 0
@@ -53,7 +54,7 @@ class ExecutionLane:
 
     def status(self):
         with self._lock:
-            return {'outstanding': self._outstanding, 'capacity': self.capacity,
+            return {'workers': self.workers, 'outstanding': self._outstanding, 'capacity': self.capacity,
                     'running': self._running, 'queued': self._outstanding - self._running, 'closed': self.closed}
 
     def close(self):

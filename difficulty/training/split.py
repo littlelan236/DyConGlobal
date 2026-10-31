@@ -5,6 +5,7 @@ import math
 from collections import Counter, defaultdict
 
 from core.io import hash_json
+from difficulty.datasets.identity import task_descriptor, task_group, validate_same_task
 
 
 def rollout_roles(split):
@@ -18,7 +19,7 @@ def inherit_task_split(rollouts, samples, parent, validation_tasks, seed):
         raise ValueError("Duplicate parent task or split seed mismatch")
     by_task = defaultdict(list)
     for row in rollouts:
-        by_task[row["repo"] + "::" + row["instance_id"]].append(row)
+        by_task[task_group(row)].append(row)
     if set(by_task) != set(parents):
         raise ValueError("Expanded task set must exactly match parent task set")
     expanded = []
@@ -28,10 +29,11 @@ def inherit_task_split(rollouts, samples, parent, validation_tasks, seed):
                    r["trajectory_sha256"] == original["trajectory_sha256"] for r in rows):
             raise ValueError("Original parent rollout must remain unchanged")
         for row in sorted(rows, key=lambda r: r["rollout_id"]):
-            if row["base_commit"] != original["base_commit"]:
-                raise ValueError("Task base_commit differs from parent")
-            expanded.append({"task_group": key, "repo": row["repo"], "instance_id": row["instance_id"],
-                             "base_commit": row["base_commit"], "source_kind": row["source_kind"],
+            descriptor = task_descriptor(row)
+            for field in ("benchmark", "revision", "repo", "instance_id", "base_commit", "task_package_sha256"):
+                if field in descriptor and original.get(field) != descriptor[field]:
+                    raise ValueError("Task " + field + " differs from parent split")
+            expanded.append({**descriptor, "source_kind": row["source_kind"],
                              "rollout_id": row["rollout_id"], "trajectory_sha256": row["trajectory_sha256"],
                              "split": original["split"]})
     roles = {r["rollout_id"]: r["split"] for r in expanded}
@@ -59,10 +61,12 @@ def inherit_task_split(rollouts, samples, parent, validation_tasks, seed):
 def make_split(rollouts, samples, validation_tasks=48, seed=42):
     by_task = {}
     for row in rollouts:
-        key = row["repo"] + "::" + row["instance_id"]
+        key = task_group(row)
         if key in by_task:
             raise ValueError("Input must have exactly one rollout per logical task")
         by_task[key] = row
+    if any(row.get("benchmark", "swebench") == "skillsbench" for row in rollouts):
+        raise ValueError("Repo/source quota split is not defined for SkillsBench datasets")
     by_repo = defaultdict(list)
     for key, row in sorted(by_task.items()):
         by_repo[row["repo"]].append(key)
@@ -97,8 +101,7 @@ def make_split(rollouts, samples, validation_tasks=48, seed=42):
                 by_task[key]["instance_id"],
             ))
             validation.update(candidates[:n])
-    tasks = [{"task_group": key, "repo": row["repo"], "instance_id": row["instance_id"],
-              "base_commit": row["base_commit"], "source_kind": row["source_kind"],
+    tasks = [{**task_descriptor(row), "source_kind": row["source_kind"],
               "rollout_id": row["rollout_id"], "trajectory_sha256": row["trajectory_sha256"],
               "split": "validation" if key in validation else "train"}
              for key, row in sorted(by_task.items())]
@@ -191,12 +194,11 @@ def make_task_threeway_split(rollouts, samples, validation_fraction=0.2, test_fr
         raise ValueError("Task split requires valid fractions and non-empty inputs")
     by_task = defaultdict(list)
     for row in rollouts:
-        by_task[row["repo"] + "::" + row["instance_id"]].append(row)
+        by_task[task_group(row)].append(row)
     if len({r["rollout_id"] for r in rollouts}) != len(rollouts):
         raise ValueError("Duplicate rollout ID")
     for rows in by_task.values():
-        if len({r["base_commit"] for r in rows}) != 1:
-            raise ValueError("Same task has conflicting base commits")
+        validate_same_task(rows)
     n_test = round(len(by_task) * test_fraction)
     n_val = round(len(by_task) * validation_fraction)
     if min(n_test, n_val, len(by_task) - n_test - n_val) < 1:
@@ -228,8 +230,7 @@ def make_task_threeway_split(rollouts, samples, validation_fraction=0.2, test_fr
     task_rows, rollout_rows = [], []
     for key, rows in sorted(by_task.items()):
         first = rows[0]
-        task_rows.append({"task_group": key, "repo": first["repo"], "instance_id": first["instance_id"],
-                          "base_commit": first["base_commit"], "split": task_roles[key],
+        task_rows.append({**task_descriptor(first), "split": task_roles[key],
                           "source_kinds": sorted({r["source_kind"] for r in rows}),
                           "rollout_ids": sorted(r["rollout_id"] for r in rows)})
         for row in sorted(rows, key=lambda r: r["rollout_id"]):

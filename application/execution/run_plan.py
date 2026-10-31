@@ -15,6 +15,7 @@ from __future__ import annotations
 
 
 from pathlib import Path
+import copy
 
 
 
@@ -26,7 +27,7 @@ from catalog.store import Catalog
 
 from core.config import load_snapshot, snapshot
 
-from core.io import artifact_roots, hash_json, identifier, now, read_json, run_path, write_json
+from core.io import artifact_roots, hash_json, identifier, now, read_json, run_path, sha256, write_json
 
 from rollout.sampling import load_work_items, make_work_items, write_work_items
 
@@ -34,9 +35,18 @@ from rollout.sampling import load_work_items, make_work_items, write_work_items
 
 
 
-def _selection_from_tasks(catalog: Catalog, task_ids=(), partition=None):
+def _selection_from_tasks(catalog: Catalog, task_ids=(), partition=None, cfg=None):
 
-    selection = catalog.select_tasks(partition=partition, task_ids=task_ids)
+    from core.backends import identity
+    benchmark = identity(cfg or {})[0]
+    revision = None
+    if benchmark == "skillsbench":
+        ref = (cfg or {}).get("benchmark", {}).get("snapshot_ref")
+        if not ref:
+            raise ValueError("SkillsBench requires benchmark.snapshot_ref")
+        revision = read_json(Path(cfg["project_root"]) / ref)["revision"]
+    selection = catalog.select_tasks(partition=partition, task_ids=task_ids,
+                                     benchmark=benchmark, revision=revision)
 
     tasks = selection["tasks"]
 
@@ -60,7 +70,9 @@ def _selection_from_tasks(catalog: Catalog, task_ids=(), partition=None):
 
 
 
-def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partition=None, repeat_count=1):
+def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partition=None, repeat_count=1,
+               from_run=None, clone_overrides=(), parallel_config=None,
+               reverse_task_order=False):
 
     run_id = identifier(run_id)
 
@@ -76,9 +88,79 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
 
         raise ValueError("repeat_count is only configurable for rollout runs")
 
+    if parallel_config is not None and operation != "rollout":
+        raise ValueError("--parallel-config is only configurable for rollout runs")
+
     root = Path(cfg["project_root"])
 
+    if reverse_task_order and from_run is None:
+        raise ValueError("--reverse-task-order requires --from-run")
+
     catalog = Catalog(root)
+    clone_receipt = None
+    frozen_selection = None
+    if from_run is not None:
+        if tasks_file or task_ids or partition is not None:
+            raise ValueError('A frozen clone retains its complete source task selection')
+        source = load_plan(root, identifier(from_run))
+        if operation != 'rollout' or source['plan']['operation'] != operation:
+            raise ValueError('Frozen cloning requires a rollout source and destination')
+        if repeat_count != source['plan']['repeat_count']:
+            raise ValueError('Frozen cloning retains source repeat_count')
+        allowed = {'serving.gpus', 'serving.tensor_parallel_size', 'serving.base_url',
+                   'serving.gpu_memory_utilization', 'serving.max_model_len',
+                   'serving.max_num_seqs', 'serving.max_num_batched_tokens',
+                   'serving.trajectory_sharding', 'serving.replica_base_urls',
+                   'serving.max_cpu_workers_per_gpu',
+                   'generation.max_tokens', 'generation.thinking_token_budget',
+                   'generation.require_reasoning_close',
+                   'parallel.estimator_ref', 'paths.artifact_roots'}
+        cfg = copy.deepcopy(source['config'])
+        frozen_selection = copy.deepcopy(cfg.pop('selection'))
+        cfg.pop('selection_sha256', None)
+        for key in ['run_id', 'operation']:
+            cfg.pop(key, None)
+        changes = []
+        for override in clone_overrides:
+            dotted, value = override.split("=", 1)
+            if dotted not in allowed:
+                raise ValueError("Unsupported frozen-clone override: " + dotted)
+            section, field = dotted.split(".", 1)
+            parsed = yaml.safe_load(value)
+            changes.append({"path": dotted, "before": cfg[section].get(field), "after": parsed})
+            cfg[section][field] = parsed
+        if reverse_task_order:
+            frozen_selection["task_keys"].reverse()
+        from core.config import Paths, Serving, validate_generation_contract
+        Paths.model_validate(cfg['paths'])
+        artifact_roots(cfg, 'run')
+        Serving.model_validate(cfg['serving'])
+        # Rebuild the derived context below; never carry the source budget.
+        cfg.pop('execution_context', None)
+        validate_generation_contract(cfg)
+        if cfg.get('parallel', {}).get('enabled'):
+            from runtime.serving.parallel import artifact_contract
+            contract = artifact_contract(cfg['parallel']['estimator_ref'],
+                model_fingerprint=cfg['model']['fingerprint'])
+            if list(contract['sites']) != list(cfg['parallel']['save_sites']):
+                raise ValueError('Estimator public sites differ from the frozen capture/scoring sites')
+            cfg['parallel']['estimator_sha256'] = sha256(cfg['parallel']['estimator_ref'])
+        source_dir = run_path(root, from_run)
+        cfg['config_source'] = str(source_dir / 'config.yaml')
+        cfg['config_source_sha256'] = sha256(source_dir / 'config.yaml')
+        cfg['overrides'] = list(clone_overrides)
+        cfg['config_hash'] = hash_json({k: v for k, v in cfg.items() if k != 'config_hash'})
+        clone_receipt = {'source_run_id': from_run, 'source_config_hash': source['config']['config_hash'],
+            'source_plan_sha256': source['plan']['plan_sha256'],
+            'source_selection_sha256': source['plan']['selection_sha256'],
+            'source_tasks_sha256': source['plan']['tasks_sha256'], 'overrides': changes,
+            'task_order': 'reversed' if reverse_task_order else 'source',
+            'created_at': now()}
+
+    from core.parallel_policy import apply_run_parallel
+
+    cfg, parallel_input = apply_run_parallel(
+        cfg, parallel_config, from_run=from_run, overrides=clone_overrides or cfg.get("overrides", ()))
 
     if tasks_file:
 
@@ -100,13 +182,23 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
 
         raise ValueError("Duplicate task IDs")
 
-    selection = _selection_from_tasks(catalog, task_ids=task_ids, partition=partition)
+    selection = frozen_selection if frozen_selection is not None else _selection_from_tasks(
+        catalog, task_ids=task_ids, partition=partition, cfg=cfg)
 
     if not selection["task_keys"]:
 
         raise ValueError("Run task selection is empty")
 
+    from core.backends import execution_context
+    context = execution_context(cfg, selection["tasks"])
+    if context is not None:
+        cfg = copy.deepcopy(cfg)
+        cfg["execution_context"] = context
+        cfg["config_hash"] = hash_json({k: v for k, v in cfg.items() if k != "config_hash"})
     run = snapshot(cfg, run_id, selection)
+
+    if parallel_input is not None:
+        (run / "parallel-config.yaml").write_bytes(parallel_input)
 
     frozen = read_json(run / "resolved-config.json")
 
@@ -133,6 +225,10 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
             target = target[key]
 
         target[keys[-1]] = yaml.safe_load(raw_value)
+
+    if cfg.get("parallel_policy"):
+        effective_config["parallel"] = {
+            k: v for k, v in cfg["parallel"].items() if k != "estimator_sha256"}
 
     (run / "config.yaml").write_text(
 
@@ -236,6 +332,10 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
 
     })
 
+    if clone_receipt is not None:
+        clone_receipt.update(new_run_id=run_id, new_config_hash=frozen['config_hash'])
+        write_json(run / 'cloned-from.json', clone_receipt)
+        write_json(run / 'events' / 'cloned-from.json', {'event': 'run.cloned', **clone_receipt})
     return run
 
 

@@ -19,6 +19,7 @@ import time
 from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 from starlette.requests import Request
@@ -26,6 +27,7 @@ from starlette.requests import Request
 STREAM = "tact_states"
 LOG = logging.getLogger("dycon.capture")
 REQUEST_CONTEXT = ContextVar("dycon_capture_request", default=None)
+OWNER_CONTEXT = ContextVar("dycon_request_owner", default=None)
 LOOP_CONTEXT = ContextVar("dycon_reasoning_loop_request", default=None)
 NATIVE_CONTEXT = ContextVar("dycon_native_request", default=None)
 CONTROL_DEADLINE = ContextVar("dycon_control_deadline", default=None)
@@ -39,6 +41,7 @@ class DyConCapturePlugin:
         self.engine = None
         self.task: asyncio.Task | None = None
         self.control_url = os.environ.get("DYCON_CAPTURE_CONTROL_URL")
+        self.control_only = os.environ.get('DYCON_REQUEST_CONTROL_ONLY') == '1'
         self.staging = Path(os.environ.get("DYCON_CAPTURE_STAGING_ROOT", "hidden/online/staging"))
         self.layers = json.loads(os.environ.get("DYCON_CAPTURE_LAYERS", "[]"))
         self.select = json.loads(os.environ.get("DYCON_CAPTURE_SELECT", "{}"))
@@ -65,9 +68,13 @@ class DyConCapturePlugin:
         self.export_options = json.loads(os.environ.get("DYCON_CAPTURE_EXPORT_OPTIONS", "{}"))
         self.budget = None
         self.parallel_options = json.loads(os.environ.get("DYCON_PARALLEL_OPTIONS", "{}"))
+        self.reasoning_loop_options = json.loads(os.environ.get('DYCON_REASONING_LOOP_OPTIONS', '{}'))
+        self.request_receipt_root = Path(os.environ.get('DYCON_REQUEST_RECEIPT_ROOT', str(self.staging.parent / 'request-terminals')))
         self.scoring = None
         self.cancelled_run = False
         self.cancelled_decisions = set()
+        self.cancelled_sessions = set()
+        self.native_changed = asyncio.Event()
         self.native_requests = {}
         self.cancel_token = os.environ.get("DYCON_CANCEL_TOKEN", "")
         self.owner_run = os.environ.get("DYCON_CANCEL_OWNER_RUN")
@@ -81,7 +88,11 @@ class DyConCapturePlugin:
             raise ValueError("Capture receipt workers must be in [1, 128]")
         self.receipt_lane = ExecutionLane("dycon-receipt", self.receipt_workers, max(capacity, self.receipt_workers))
         self.publish_lane = ExecutionLane("dycon-publish", 1, 4)
-        self.control_lane = ExecutionLane("dycon-control", 2, capacity)
+        self.control_workers = int(os.environ.get("DYCON_CAPTURE_CONTROL_WORKERS", "2"))
+        self.result_workers = int(self.parallel_options.get("result_workers", 16))
+        self.control_lane = ExecutionLane("dycon-control", self.control_workers, capacity)
+        self.result_lane = ExecutionLane("dycon-results", self.result_workers, capacity)
+        self.failure_lane = ExecutionLane("dycon-diagnostics", 4, capacity)
         if self.export_options.get("enabled", True) and self.export_options.get("spool_root"):
             from core.disk_budget import DiskBudget
 
@@ -94,17 +105,25 @@ class DyConCapturePlugin:
             )
 
     def _check_cancelled(self, metadata):
-        if self.cancelled_run or (metadata and metadata.get("decision_id") in self.cancelled_decisions):
+        if (self.cancelled_run or (metadata and metadata.get("decision_id") in self.cancelled_decisions)
+                or (metadata and metadata.get("session_id") in self.cancelled_sessions)):
             from core.cancellation import Cancelled
             raise Cancelled("Native request cancelled")
 
-    async def cancel_native(self, decision_id=None):
-        if decision_id is None:
+    async def cancel_native(self, decision_id=None, session_id=None, wait_seconds=0):
+        if session_id is not None:
+            self.cancelled_sessions.add(session_id)
+        elif decision_id is None:
             self.cancelled_run = True
         else:
             self.cancelled_decisions.add(decision_id)
         if self.scoring is not None and hasattr(self.scoring, "cancel"):
-            await self.control_lane.run(self.scoring.cancel, decision_id)
+            decisions = ({state['metadata'].get('decision_id') for state in self.native_requests.values()
+                          if state['metadata'].get('session_id') == session_id}
+                         if session_id is not None else {decision_id})
+            for owned_decision in decisions:
+                if owned_decision is not None or session_id is None:
+                    await self.control_lane.run(self.scoring.cancel, owned_decision)
         requested, errors, aborts = [], [], []
         async def abort_one(native_id):
             try:
@@ -114,16 +133,31 @@ class DyConCapturePlugin:
             except Exception as exc:
                 errors.append({"native_request_id": native_id, "error": repr(exc)})
         for native_id, state in list(self.native_requests.items()):
+            if session_id is not None and state["metadata"].get("session_id") != session_id:
+                continue
             if decision_id is not None and state["metadata"].get("decision_id") != decision_id:
                 continue
             state["cancel_requested"] = True
             if state["phase"] in {"submitting", "running"}:
                 aborts.append(abort_one(native_id))
         await asyncio.gather(*aborts)
+        def pending():
+            return [key for key, state in self.native_requests.items() if state.get('cancel_requested')
+                    and (session_id is None or state['metadata'].get('session_id') == session_id)
+                    and (decision_id is None or state['metadata'].get('decision_id') == decision_id)]
+        if wait_seconds:
+            deadline = asyncio.get_running_loop().time() + min(float(wait_seconds), 30.0)
+            while pending():
+                self.native_changed.clear()
+                if not pending():
+                    break
+                try:
+                    await asyncio.wait_for(self.native_changed.wait(), max(0.001, deadline - asyncio.get_running_loop().time()))
+                except TimeoutError:
+                    break
         return {"cancel_requested": True, "abort_requested_ids": requested,
-                "pending_native_ids": [key for key, state in self.native_requests.items()
-                                       if state.get("cancel_requested")], "errors": errors,
-                "abort_completed": not any(state.get("cancel_requested") for state in self.native_requests.values())}
+                "pending_native_ids": pending(), "errors": errors, "session_id": session_id,
+                "abort_completed": not pending()}
 
     async def _receipt_post(self, route, value, metadata):
         deadline = CONTROL_DEADLINE.set(time.monotonic() + self.control_seconds)
@@ -140,7 +174,7 @@ class DyConCapturePlugin:
             failure = {**{k: metadata[k] for k in ('session_id', 'decision_id', 'branch_id', 'api_attempt_id', 'step_id') if k in metadata},
                        'reason': route + ': capture control total deadline exceeded', 'payload': value}
             self.failures.append(failure)
-            await self.control_lane.run(write_json, self.staging.parent / 'failures' / (hash_json(failure) + '.json'), failure)
+            await self.failure_lane.run(write_json, self.staging.parent / 'failures' / (hash_json(failure) + '.json'), failure)
             return None
         finally:
             CONTROL_DEADLINE.reset(deadline)
@@ -152,6 +186,11 @@ class DyConCapturePlugin:
                 return await call_next(request)
             body = await request.json()
             metadata = body.pop("dycon_capture", None)
+            owner = body.pop('dycon_request_owner', None)
+            if owner is not None and (owner.get('run_id') != self.owner_run
+                    or owner.get('execution_attempt_id') != self.owner_attempt):
+                from starlette.responses import JSONResponse
+                return JSONResponse({'error': 'request_owner_mismatch'}, status_code=403)
             body.pop("capture_select", None)
             if metadata is not None:
                 metadata = dict(metadata)
@@ -159,10 +198,12 @@ class DyConCapturePlugin:
                 metadata["message_index"] = len(body.get("messages", []))
             request._body = json.dumps(body).encode()
             context = REQUEST_CONTEXT.set(metadata)
+            owner_context = OWNER_CONTEXT.set(owner)
             try:
                 return await call_next(request)
             finally:
                 REQUEST_CONTEXT.reset(context)
+                OWNER_CONTEXT.reset(owner_context)
 
         def authorized(request, value):
             return (bool(self.cancel_token) and
@@ -176,7 +217,20 @@ class DyConCapturePlugin:
             value = await request.json()
             if not authorized(request, value):
                 return JSONResponse({"error": "cancel_scope_or_token_mismatch"}, status_code=403)
-            return await self.cancel_native(value.get("decision_id"))
+            return await self.cancel_native(value.get("decision_id"), value.get("session_id"), value.get("wait_seconds", 0))
+
+        @app.post('/dycon/capture/engine/request-terminal')
+        async def request_terminal(request: Request):
+            from starlette.responses import JSONResponse
+            from core.io import hash_json, read_json
+            value = await request.json()
+            if not authorized(request, value):
+                return JSONResponse({'error': 'request_terminal_scope_or_token_mismatch'}, status_code=403)
+            key = hash_json([value.get('session_id'), value.get('api_attempt_id')])
+            path = self.request_receipt_root / (key + '.json')
+            if not path.exists():
+                return JSONResponse({'error': 'native_terminal_receipt_pending'}, status_code=409)
+            return await self.control_lane.run(read_json, path)
 
         @app.post("/dycon/parallel/{action}")
         async def parallel(action: str, request: Request):
@@ -200,12 +254,10 @@ class DyConCapturePlugin:
                 if action == "branch-release":
                     return await self.control_lane.run(self.scoring.release_branch, value, value.get("native_request_id"), value.get("reason", "client_release"))
                 if action == "results":
-                    # A completed generate can reach this endpoint before the
-                    # periodic drain loop has published its close row. Drain
-                    # once synchronously so scoring observes the native event
-                    # without increasing the model request or GPU wait.
-                    await self.drain_once()
-                    return await self.wait_lane.run(self.scoring.results, value["decision_id"], value["timeout"])
+                    # Results must not queue behind long branch admission or
+                    # synchronously drain another session's tensor I/O. The
+                    # periodic drain notifies the scorer; clients may poll pending.
+                    return await self.result_lane.run(self.scoring.results, value["decision_id"], value["timeout"])
                 if action == "release":
                     return await self.control_lane.run(self.scoring.release, value["decision_id"])
                 return JSONResponse({"error": "unknown_parallel_action"}, status_code=404)
@@ -218,9 +270,21 @@ class DyConCapturePlugin:
                 return JSONResponse({"error": str(exc)}, status_code=400)
 
         @app.post("/dycon/capture/engine/flush")
-        async def flush():
+        async def flush(request: Request):
+            body = await request.body()
+            value = json.loads(body) if body else {}
+            sid = value.get("session_id")
+            pending = [key for key, state in self.native_requests.items()
+                       if sid is None or state['metadata'].get('session_id') == sid]
+            if pending:
+                from starlette.responses import JSONResponse
+                return JSONResponse({'error': 'native_generation_still_in_flight', 'pending_native_ids': pending}, status_code=409)
             await self.drain_once()
-            return {"rows_published": self.rows_published, "failures": self.failures}
+            failures = [f for f in self.failures if sid is None or
+                        (isinstance(f, dict) and f.get("session_id") == sid)]
+            unscoped = [f for f in self.failures if not isinstance(f, dict) or f.get('session_id') is None]
+            return {"rows_published": self.rows_published, "failures": failures,
+                    'unscoped_failures': unscoped, 'session_id': sid}
 
         @app.post("/dycon/capture/engine/mode")
         async def mode(request: Request):
@@ -280,9 +344,12 @@ class DyConCapturePlugin:
                 "rows_published": self.rows_published,
                 "control_seconds": self.control_seconds,
                 "receipt_workers": self.receipt_workers,
+                "control_workers": self.control_workers,
+                "result_workers": self.result_workers,
                 "filtered_events": self.filtered_events,
                 "execution_lanes": {"wait": self.wait_lane.status(), "receipt": self.receipt_lane.status(),
-                                    "publish": self.publish_lane.status(), "control": self.control_lane.status()},
+                                    "publish": self.publish_lane.status(), "control": self.control_lane.status(),
+                                    "results": self.result_lane.status(), "diagnostics": self.failure_lane.status()},
                 "native_lifecycle": {key: state["phase"] for key, state in self.native_requests.items()},
                 "cancelling": self.cancelled_run,
                 "failures": self.failures,
@@ -296,6 +363,10 @@ class DyConCapturePlugin:
             return {"recorded": True, "failures": len(self.behavior_failures)}
 
     async def init_state(self, engine_client, state, args):
+        if self.control_only and engine_client is not None:
+            self.engine = engine_client
+            self._attach_admission()
+            return
         if not self.control_url or engine_client is None:
             return
         if not self.layers:
@@ -331,6 +402,9 @@ class DyConCapturePlugin:
         self.staging.mkdir(parents=True, exist_ok=True)
         self._attach_admission()
         self.task = asyncio.create_task(self._drain_loop(), name="dycon-capture-drain")
+        await self._warmup_capture_graphs()
+
+    async def _warmup_capture_graphs(self):
         # Initialize the native capture graphs with a dedicated request before
         # rollout traffic. Normal multi-token prefill initializes model state.
         from vllm import SamplingParams
@@ -338,11 +412,14 @@ class DyConCapturePlugin:
 
         from hidden.backends.vllm.online import capture_request_metadata
 
+        # All serving replicas share one controller; each engine and restart
+        # must own a distinct diagnostic session and request identity.
+        session_id = "engine-warmup-" + uuid4().hex
         metadata = capture_request_metadata(
+            session_id,
             "engine-warmup",
             "engine-warmup",
-            "engine-warmup",
-            "engine-warmup",
+            session_id,
             0,
             ["reasoning_newline", "think_close"],
             newline_token_ids=sorted(self.newline_ids),
@@ -359,13 +436,13 @@ class DyConCapturePlugin:
                 SamplingParams(
                     temperature=0, max_tokens=1, ignore_eos=True, output_kind=RequestOutputKind.FINAL_ONLY
                 ),
-                "engine-warmup",
+                session_id,
             ):
                 pass
             await self.drain_once()
         finally:
             REQUEST_CONTEXT.reset(token)
-        await self.receipt_lane.run(self._post, "/dycon/capture/session/engine-warmup/stop", {})
+        await self.receipt_lane.run(self._post, f"/dycon/capture/session/{session_id}/stop", {})
 
     def _post(self, route, value):
         import requests
@@ -436,6 +513,23 @@ class DyConCapturePlugin:
             metadata = REQUEST_CONTEXT.get()
             # Keep provenance separate from the native stream-wide selector.
             request = original_process(*args, **kwargs)
+            owner = OWNER_CONTEXT.get()
+            if owner and request.sampling_params is not None:
+                required = owner.get('required_max_tokens')
+                if required is not None and (len(request.prompt_token_ids or []) + required > owner['max_model_len']
+                        or request.sampling_params.max_tokens != required):
+                    raise ValueError('ContextWindowExceeded: rendered prompt plus frozen output budget exceeds context; output budget cannot be silently reduced')
+            if metadata is None and not self.control_only:
+                # Missing provenance must not inherit the enabled stream's
+                # selector (e.g. OpenHands condensation and warmup calls).
+                # An empty mapping inherits it, and None disables a filter,
+                # not capture. Native SelectSpec exclusions override includes
+                # for both phases and remain local to this request.
+                request.capture_select = {STREAM: {
+                    "prompt": "all", "generation": "all",
+                    "exclude_prompt_window": [0, None],
+                    "exclude_generation_window": [0, None],
+                }}
             if metadata is not None and request.sampling_params is not None:
                 if metadata.get("replay"):
                     # Native input admission owns prompt-target cache policy.
@@ -457,7 +551,8 @@ class DyConCapturePlugin:
         @wraps(original_add)
         async def add(request, *args, **kwargs):
             metadata = REQUEST_CONTEXT.get()
-            self._check_cancelled(metadata)
+            owner = OWNER_CONTEXT.get()
+            self._check_cancelled(metadata or owner)
             native_state = NATIVE_CONTEXT.get()
             loop_state = LOOP_CONTEXT.get()
             if loop_state is not None:
@@ -486,7 +581,18 @@ class DyConCapturePlugin:
                 )
                 self._check_cancelled(metadata)
                 self.native_requests[request.request_id]["phase"] = "submitting"
+            if metadata is None and owner is not None:
+                self.native_requests[request.request_id] = {
+                    'metadata': dict(owner), 'phase': 'submitting', 'cancel_requested': False}
+                native_state.update(native_request_id=request.request_id)
             result = await original_add(request, *args, **kwargs)
+            if metadata is None and owner is not None:
+                self.native_requests[request.request_id]['phase'] = 'running'
+                try:
+                    self._check_cancelled(owner)
+                except BaseException:
+                    await self.engine.abort(request.request_id, internal=True)
+                    raise
             if metadata is not None:
                 state = self.native_requests[request.request_id]
                 state["phase"] = "running"
@@ -498,15 +604,17 @@ class DyConCapturePlugin:
         @wraps(original_generate)
         async def generate(*args, **kwargs):
             metadata = REQUEST_CONTEXT.get()
+            owner = OWNER_CONTEXT.get()
             final = None
             generated = []
             branch_released = False
             params = args[1] if len(args) > 1 else kwargs["sampling_params"]
             if metadata is not None and metadata.get("decision_id") and params.n != 1:
                 raise ValueError("Parallel transport requires native n=1 for exact capture identity")
-            options = self.parallel_options.get("reasoning_loop", {})
-            guarded = bool(options.get("enabled") and metadata and metadata.get("decision_id")
-                           and not metadata.get("replay"))
+            options = self.parallel_options.get('reasoning_loop') or self.reasoning_loop_options
+            guarded = bool(options.get('enabled') and not (metadata or {}).get('replay')
+                           and ((metadata and metadata.get('decision_id'))
+                                or (owner and owner.get('request_role') == 'agent_decision')))
             state, detector = {}, None
             if guarded:
                 from vllm.sampling_params import RequestOutputKind
@@ -523,10 +631,26 @@ class DyConCapturePlugin:
                 else:
                     kwargs = {**kwargs, "sampling_params": params}
             context = LOOP_CONTEXT.set(state if guarded else None)
-            native_state = {} if metadata is not None else None
+            native_state = {} if metadata is not None or owner is not None else None
             native_context = NATIVE_CONTEXT.set(native_state)
             stream = original_generate(*args, **kwargs)
             output_published = False
+            owner_published = False
+            async def publish_owner():
+                nonlocal owner_published
+                if owner_published or owner is None or final is None:
+                    return
+                from core.io import hash_json, now, write_json
+                loop = state.get('reasoning_loop')
+                if loop is not None:
+                    loop.update(final_output_tokens=len(generated),
+                                abort_completed=final.outputs[0].finish_reason == 'abort')
+                value = {'schema_version': 1, 'owner': owner, 'native_request_id': (native_state or {}).get('native_request_id'),
+                         'prompt_token_ids': list(final.prompt_token_ids or []), 'output_token_ids': list(generated),
+                         'finish_reason': final.outputs[0].finish_reason, 'reasoning_loop': loop, 'finished_at': now()}
+                key = hash_json([owner.get('session_id'), owner.get('api_attempt_id')])
+                await self.failure_lane.run(write_json, self.request_receipt_root / (key + '.json'), value)
+                owner_published = True
             async def publish_output():
                 nonlocal branch_released, output_published
                 if output_published or metadata is None or final is None:
@@ -579,8 +703,8 @@ class DyConCapturePlugin:
                         if hit is not None:
                             native_id = state["native_request_id"]
                             state["reasoning_loop"] = {
-                                **hit, **{k: metadata[k] for k in (
-                                    "session_id", "decision_id", "branch_id", "api_attempt_id")},
+                                **hit, **{k: (metadata or owner or {})[k] for k in (
+                                    "session_id", "decision_id", "branch_id", "api_attempt_id") if k in (metadata or owner or {})},
                                 "native_request_id": native_id,
                                 "observed_at_output_tokens": len(generated),
                                 "abort_requested": True,
@@ -588,8 +712,10 @@ class DyConCapturePlugin:
                             await self.engine.abort(native_id, internal=True)
                     if output.finished:
                         await publish_output()
+                        await publish_owner()
                     yield output
                 await publish_output()
+                await publish_owner()
             finally:
                 try:
                     await stream.aclose()
@@ -600,6 +726,7 @@ class DyConCapturePlugin:
                             self.scoring.release_branch(metadata, native_id, "stream_exit")
                     if native_state is not None and native_state.get("native_request_id"):
                         self.native_requests.pop(native_state["native_request_id"], None)
+                        self.native_changed.set()
                     LOOP_CONTEXT.reset(context)
                     NATIVE_CONTEXT.reset(native_context)
 
@@ -644,6 +771,7 @@ class DyConCapturePlugin:
         # Native streams can be fetched in batches.  Sort only the small event
         # metadata here; tensor rows remain indexed by the original row number.
         events.sort(key=lambda row: (row[0], int(row[1]), row[3]))
+        prepared = []
         for request_id, position, token_id, row_number in events:
             if token_id in self.open_ids:
                 anchor = "think_open"
@@ -664,10 +792,17 @@ class DyConCapturePlugin:
                 self.scoring.submit(self.request_metadata.get(request_id, {}), request_id,
                                     int(position), int(token_id), sample)
             execution = execution_at(self.execution_intervals, request_id, int(position))
+            prepared.append((request_id, position, token_id, anchor, sample, execution))
+        # Publish all scoring features before a slow per-point disk/HTTP handoff.
+        self._publish_prepared(prepared)
+
+    def _publish_prepared(self, prepared):
+        for request_id, position, token_id, anchor, sample, execution in prepared:
             fd, name = tempfile.mkstemp(prefix=".dycon-", suffix=".npz", dir=self.staging)
             os.close(fd)
             path = Path(name)
-            reservation = "handoff:" + str(path)
+            reservation = "retained-handoff:" + str(path)
+            confirmed = False
             try:
                 if self.budget:
                     self.budget.acquire(reservation, sum(v.nbytes + 4096 for v in sample.values()) + 4096)
@@ -692,15 +827,20 @@ class DyConCapturePlugin:
                 if not response.ok:
                     LOG.error("DyCon capture control rejected staged row: %s", response.text[:500])
                 response.raise_for_status()
+                acknowledgment = response.json()
+                if isinstance(acknowledgment, dict) and acknowledgment.get('status') == 'failed':
+                    raise RuntimeError('Capture controller did not accept the staged sample')
                 LOG.info(
                     "DyCon capture staged anchor=%s request=%s position=%s", anchor, request_id, position
                 )
+                confirmed = True
                 self.rows_published += 1
             except Exception as exc:
                 failure = {
                     "request_id": request_id,
                     "reason": repr(exc),
                     "session_id": self.request_metadata.get(request_id, {}).get("session_id"),
+                    "retained_staging_path": str(path), "reservation_key": reservation,
                 }
                 self.failures.append(failure)
                 from core.io import hash_json, write_json
@@ -712,9 +852,10 @@ class DyConCapturePlugin:
                 if self.failure_policy == "block_rollout":
                     raise
             finally:
-                path.unlink(missing_ok=True)
-                if self.budget:
-                    self.budget.release(reservation)
+                if confirmed:
+                    path.unlink(missing_ok=True)
+                    if self.budget:
+                        self.budget.release(reservation)
 
     def _accept_reasoning_event(self, request_id, position, token_id, anchor):
         """Filter answer/prompt events before allocating an export handoff."""
@@ -741,12 +882,12 @@ class DyConCapturePlugin:
             if self.task is not None:
                 self.task.cancel()
                 await self.task
-            if self.engine is not None:
+            if self.engine is not None and self.control_url:
                 async with asyncio.timeout(self.control_seconds):
                     await self.drain_once()
                     await self.engine.collective_rpc("stop_capture", args=(STREAM,), kwargs={})
         finally:
-            for lane in (self.wait_lane, self.receipt_lane, self.publish_lane, self.control_lane):
+            for lane in (self.wait_lane, self.receipt_lane, self.publish_lane, self.control_lane, self.result_lane, self.failure_lane):
                 lane.close()
 
 

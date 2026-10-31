@@ -81,3 +81,24 @@ def exclusive_artifact(owner, parameter):
         return wrapped
 
     return decorate
+
+
+def exclusive_evaluation(function):
+    """Serialize one harness evaluation without blocking rollout for its run."""
+    import inspect
+
+    signature = inspect.signature(function)
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        from core.io import identifier
+
+        run_name = identifier(Path(bound.arguments["run"]).name)
+        eval_id = identifier(bound.arguments["eval_id"])
+        cfg = bound.arguments["cfg"]
+        lock = Path(cfg["project_root"]) / "state/harness-locks" / run_name / (eval_id + ".lock")
+        with file_lock(lock, nonblocking=True):
+            return function(*args, **kwargs)
+
+    return wrapped

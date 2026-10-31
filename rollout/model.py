@@ -3,9 +3,21 @@
 import copy
 import os
 import time
+import json
+from pathlib import Path
+from functools import lru_cache
 
 from hidden.backends.vllm.online import build_capture_select
 from runtime.steering.easysteer.payload import steering_payload
+
+
+@lru_cache(maxsize=32)
+def _reasoning_marker_ids(model_path, model_fingerprint):
+    config=json.loads((Path(model_path)/'tokenizer_config.json').read_text())
+    markers={v.get('content'):int(k) for k,v in config.get('added_tokens_decoder',{}).items()}
+    if '<think>' not in markers or '</think>' not in markers:
+        raise ValueError('Native close grammar requires registered single-token thinking markers')
+    return markers['<think>'],markers['</think>']
 
 
 def model_config(cfg, capture_context=None, sample=None):
@@ -20,6 +32,14 @@ def model_config(cfg, capture_context=None, sample=None):
     }
     if g.get("thinking_token_budget") is not None:
         extra_body["thinking_token_budget"] = g["thinking_token_budget"]
+    if g.get('require_reasoning_close'):
+        if s.get('reasoning_parser')!='qwen3':
+            raise ValueError('Native reasoning-close grammar is qualified only for the qwen3 reasoning protocol')
+        opening,closing=_reasoning_marker_ids(cfg['model']['path'],cfg['model']['fingerprint'])
+        if capture_context and list(capture_context.get('close_token_ids') or [])!=[closing]:
+            raise ValueError('Native grammar close token differs from the captured tokenizer inventory')
+        extra_body['structured_outputs']={
+            'grammar':f'root ::= [^<]* Token({closing}) ExcludeToken({opening})*'}
     # Ordinary rollout requests keep their exact historical body.  Metadata is
     # opt-in and is consumed only by the managed online capture plane.
     if cfg.get("capture", {}).get("enabled") and capture_context is not False:

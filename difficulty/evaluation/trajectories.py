@@ -12,9 +12,11 @@ import numpy as np
 from action.datasets.trajectories import read_actions
 from application.execution.evidence import RunEvidence
 from application.execution.run_plan import load_plan
+from application.execution.subject import artifact_kinds, verify_subject
 from core.io import artifact_dir, identifier, owned_path, read_json, sha256, write_json
 from core.locking import exclusive_artifact
 from difficulty.datasets.submission import load_selection, prepare_cache
+from difficulty.datasets.selection import select_run
 from difficulty.models.ridge_grid import load_model, predict_model
 from difficulty.receipts import verify_receipt
 from difficulty.evaluation.visualize import plot_trajectory
@@ -99,17 +101,18 @@ def build_html(task_rows, trajectories, output, summary):
              '<p>来源 run：' + esc(summary['run_id']) + '<br>模型：' + esc(summary['attempt_id']) +
              '<br>目标：' + esc(summary['target']) + '</p>',
              '<p>' + esc(summary['selected_rollouts']) + ' 条有最终结果的独立 repetition；' +
-             esc(summary['resolved_rollouts']) + ' 条 resolved；' + esc(summary['plotted_with_predictions']) +
+             esc(summary['resolved_rollouts']) + ' 条 resolved；绘制 ' + esc(summary.get('plotted_rollouts', summary['resolved_rollouts'])) + ' 条；' + esc(summary['plotted_with_predictions']) +
              ' 条有可用预测，' + esc(summary['without_predictions']) + ' 条无可用预测。</p>',
              '<p class="warning">缺少最终结果的 repetition：' + esc(summary.get('pending_repetitions', 0)) +
              '。未评测/基础设施故障不伪造失败评测。historical_attempt 为历史尝试；最终成功次数与全部成功轨迹分别统计。</p>',
-             '<p class="warning">诊断视图：模型训练使用了本 run 的部分样本；不能将这些曲线当作独立泛化评估。'
+             '<p class="warning">诊断视图：' + esc(summary.get('interpretation', '训练重叠情况见 CSV')) + '。'
              '样本 split 见 CSV。预测与真值分别筛选：有 hidden 可预测，缺真值不删除预测。'
              'identity-only 点单列为预测证据，不冒充 native exact token 标签。真实 reasoning tokens 仅采用已验证 native 标签；缺失值保留断线。'
              '横轴为原始 0-based assistant step；close 时当前 action 尚未执行，剩余 steps=T−s。'
              '同 task 共用坐标范围；每条轨迹单独绘图，不平均、不平滑、不截断负预测。</p>',
              '<label>筛选 task：<input id="filter" placeholder="输入 task 名称"></label>',
-             '<p>同一 task 的全部成功轨迹位于同一行，可横向滚动。此 HTML 已嵌入全部图像，可单独复制打开。</p>',
+             '<p>同一 task 的所选轨迹位于同一行，可横向滚动。显式轨迹视图的绿线是到本次 agent 结束的实际剩余量，'
+             '不代表到成功解题的剩余量；评测状态独立显示。此 HTML 已嵌入全部图像，可单独复制打开。</p>',
              '<details><summary>全部 task 的 resolved 次数</summary><table><thead><tr>'
              '<th>Task</th><th>最终 resolved</th><th>Unresolved</th><th>未评测/故障</th><th>已完成</th>'
              '<th>计划次数</th><th>缺最终结果</th><th>全部成功轨迹</th>'
@@ -129,10 +132,11 @@ def build_html(task_rows, trajectories, output, summary):
             parts.append('<figure><img loading="lazy" alt="' + esc(row['rollout_id']) +
                          '" src="data:image/svg+xml;base64,' + data + '"><figcaption>' +
                          esc(row['repetition_id']) + ' | ' + esc(row.get('selection_role', 'final')) + ' | ' + esc(row['rollout_id']) + '<br>' +
+                         'resolved=' + esc(row.get('resolved', 'unknown')) + ' | ' + esc(row.get('termination_reason', '')) + '<br>' +
                          str(row['predicted_points']) + '/' + str(row['total_steps']) +
                          ' steps 有预测；真值 ' + str(row.get('true_points', 0)) + '/' + str(row['total_steps']) + '；' + esc(row['coverage_status']) + '</figcaption></figure>')
         if not by_task[task['task_id']]:
-            parts.append('<p>本 task 无 resolved 轨迹。</p>')
+            parts.append('<p>本 task 无符合本次选择的轨迹。</p>')
         parts.append('</div></section>')
     parts.append('<script>document.getElementById("filter").addEventListener("input",function(){'
                  'const q=this.value.toLowerCase();document.querySelectorAll("section[data-task]")'
@@ -141,18 +145,26 @@ def build_html(task_rows, trajectories, output, summary):
 
 
 @exclusive_artifact('difficulty-evaluation', 'plot_id')
-def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id, target, repair_id=None, reuse_predictions_id=None):
+def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id=None, target, repair_id=None, reuse_predictions_id=None,
+                           rollout_ids=(), rollout_list=None):
     """Reuse strict dataset/cache/model readers; publish one immutable report."""
     if target not in TARGETS:
         raise ValueError('Unsupported trajectory target')
     root = Path(cfg['project_root'])
-    for value in (run_id, plot_id, attempt_id, dataset_id):
+    explicit = bool(rollout_ids) or rollout_list is not None
+    if not explicit and not dataset_id:
+        raise ValueError('Default resolved view requires --dataset-id')
+    if explicit and (dataset_id or repair_id or reuse_predictions_id):
+        raise ValueError('Explicit trajectory view uses original native publications; omit dataset/repair/cache options')
+    for value in (run_id, plot_id, attempt_id):
         identifier(value)
+    if dataset_id:
+        identifier(dataset_id)
     out = artifact_dir(cfg, 'difficulty', plot_id, 'evaluations')
     if out.exists():
         raise FileExistsError(out)
     attempt_dir = artifact_dir(cfg, 'difficulty', attempt_id, 'checkpoints')
-    dataset_dir = artifact_dir(cfg, 'difficulty', dataset_id, 'datasets')
+    dataset_dir = artifact_dir(cfg, 'difficulty', dataset_id, 'datasets') if dataset_id else None
     verify_receipt(root, attempt_dir)
     attempt = read_json(attempt_dir / 'attempt.json')
     if attempt.get('mode') != 'fit':
@@ -174,25 +186,42 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id, targ
         raise ValueError('Checkpoint hidden/model contract mismatch')
     evidence = RunEvidence(root, run_id)
     catalog = evidence.read()
+    physical_rollout_count = len(catalog['rollouts'])
     selection, final_sources, work_items, pending = final_selection(root, run_id, catalog)
-    tasks = summarize_repetitions(catalog['tasks'], selection['rollouts'])
+    requested = select_run(root, run_id, rollout_ids, rollout_list) if explicit else None
+    if requested:
+        # Freeze only the requested cohort for native loading, while retaining
+        # the independent full-run final-result counts above.
+        catalog['rollouts'] = requested['rollouts']
+    tasks = summarize_repetitions(catalog['tasks'], requested['rollouts'] if requested else selection['rollouts'])
+    if requested:
+        tasks = [task for task in tasks if task['selected_rollouts']]
     for task in tasks:
         task['expected_rollouts'] = sum(i['instance_id'] == task['task_id'] for i in work_items)
         task['pending'] = sum(i['instance_id'] == task['task_id'] for i in pending)
-    dataset_receipt = sha256(dataset_dir / 'receipt.json')
-    dataset_rollouts = read_json(dataset_dir / 'rollouts.json')['rollouts']
-    sample_count = sum(bool(line.strip()) for line in (dataset_dir / 'samples.jsonl').read_text().splitlines())
-    settings = SimpleNamespace(dataset_id=dataset_id, dataset_receipt_sha256=dataset_receipt,
-        expected_tasks=len({(r['repo'], r['instance_id']) for r in dataset_rollouts}),
-        expected_rollouts=len(dataset_rollouts), expected_samples=sample_count)
-    _, samples, _ = load_selection(cfg, settings)
+    samples, dataset_receipt = [], None
+    if dataset_dir:
+        dataset_receipt = sha256(dataset_dir / 'receipt.json')
+        dataset_rollouts = read_json(dataset_dir / 'rollouts.json')['rollouts']
+        sample_count = sum(bool(line.strip()) for line in (dataset_dir / 'samples.jsonl').read_text().splitlines())
+        settings = SimpleNamespace(dataset_id=dataset_id, dataset_receipt_sha256=dataset_receipt,
+            expected_tasks=len({(r['repo'], r['instance_id']) for r in dataset_rollouts}),
+            expected_rollouts=len(dataset_rollouts), expected_samples=sample_count)
+        _, samples, _ = load_selection(cfg, settings)
     model = load_model(model_path)
     layer = selected['layer']
     field, logarithmic = TARGETS[target]
     true_map = {(s['rollout_id'], s['agent_step']): s[field] for s in samples}
     training_by_step = {(s['rollout_id'], s['agent_step']): s for s in samples}
     coverage_sources, coverage_audit = {}, {}
-    if repair_id:
+    if explicit:
+        action_map = {rid: read_actions(root, dict(row, rollout_id=rid)) for rid, row in catalog['rollouts'].items()}
+        original, observed, coverage_audit = extend_original_publications(
+            cfg, run_id, catalog, {}, action_map, {}, model, layer, coverage_sources)
+        if field == 'remaining_reasoning_tokens_to_submission':
+            true_map.update(observed)
+        scored = list(original.values())
+    elif repair_id:
         repaired, coverage_sources, coverage_audit, action_map = predict_repaired(
             cfg, run_id, repair_id, catalog, model, layer, cache_id=reuse_predictions_id, model_path=model_path, target=target)
         missing_training = set(training_by_step) - set(repaired)
@@ -242,7 +271,7 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id, targ
                           added_prediction_points=len(sample_map)-len(samples),
                           independent_truth_points=len(true_map))
     roles = {}
-    if dataset_id == attempt['dataset_id']:
+    if dataset_dir and dataset_id == attempt['dataset_id']:
         split_path = dataset_dir / 'splits' / attempt['split_id'] / 'split.json'
         split = read_json(split_path)
         if sha256(split_path) != attempt['split_sha256']:
@@ -252,28 +281,32 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id, targ
     resolved = {rid: row for rid, row in catalog['rollouts'].items()
                 if row['evaluation_status'] == 'completed' and row['resolved'] is True
                 and not row.get('provenance', {}).get('quarantined')}
+    plotted = catalog['rollouts'] if explicit else resolved
     for task in tasks:
         task['all_resolved_attempts'] = sum(catalog['tasks'][r['task_key']]['instance_id'] == task['task_id']
                                              for r in resolved.values())
     grouped, curves, manifests = defaultdict(list), [], []
     source_files = {str(attempt_dir / 'receipt.json'): sha256(attempt_dir / 'receipt.json'),
-                    str(dataset_dir / 'receipt.json'): dataset_receipt,
                     str(model_path): sha256(model_path), str(metadata_path): sha256(metadata_path),
                     **final_sources, **coverage_sources}
-    snapshots = {'run_evidence': catalog, 'selection': selection, 'pending_work_items': pending}
-    for rid, row in sorted(resolved.items(), key=lambda item: (
+    if dataset_dir:
+        source_files[str(dataset_dir / 'receipt.json')] = dataset_receipt
+    if rollout_list:
+        source_files[str(Path(rollout_list).resolve())] = sha256(rollout_list)
+    snapshots = {'run_evidence': catalog, 'selection': selection, 'pending_work_items': pending,
+                 'explicit_selection': requested}
+    for rid, row in sorted(plotted.items(), key=lambda item: (
             catalog['tasks'][item[1]['task_key']]['instance_id'], item[1].get('repetition_id', ''), item[0])):
         task = catalog['tasks'][row['task_key']]['instance_id']
         source = {**row, 'rollout_id': rid}
         actions = read_actions(root, source)
-        patch = owned_path(root, row['patch_path'])
-        if sha256(patch) != row['patch_sha256']:
-            raise ValueError('Scored patch changed')
-        eid = row['selected_evaluation_id']
-        report = catalog['evaluations'][eid]
-        if sha256(owned_path(root, report['report_path'])) != report['report_sha256']:
-            raise ValueError('Selected evaluation report changed')
-        source_files[str(owned_path(root, report['report_path']))] = report['report_sha256']
+        verify_subject(root, row)
+        eid = row.get('selected_evaluation_id')
+        if eid:
+            report = catalog['evaluations'][eid]
+            if sha256(owned_path(root, report['report_path'])) != report['report_sha256']:
+                raise ValueError('Selected evaluation report changed')
+            source_files[str(owned_path(root, report['report_path']))] = report['report_sha256']
         points = []
         for step in range(len(actions)):
             found = sample_map.get((rid, step))
@@ -286,18 +319,23 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id, targ
                 truth = len(actions) - step
             score_log = score if logarithmic else (float(np.log1p(prediction)) if prediction is not None and prediction > -1 else None)
             points.append(dict(task_id=task, rollout_id=rid, step_id=step, sample_id=sample.get('sample_id'),
+                               resolved=row.get('resolved'), evaluation_status=row.get('evaluation_status'),
+                               truth_endpoint='observed_agent_terminal' if explicit else 'successful_submission',
                                target=truth, prediction=prediction, prediction_transformed=score,
                                prediction_log1p=score_log,
                                capture_source=sample.get('capture_source', 'pointwise_repair') if found else None,
                                prediction_binding=sample.get('prediction_binding', 'training_native_exact') if found else None,
                                truth_available=truth is not None,
                                hidden_available=found is not None,
-                               used_in_fit=(roles.get(sample.get('sample_id')) in
+                               used_in_fit=None if explicit else (roles.get(sample.get('sample_id')) in
                                             ({'train', 'validation'} if metadata.get('fit_scope') == 'train_validation' else {'train'})) if found and roles else None,
-                               split=roles.get(sample.get('sample_id'), 'unavailable' if not found else 'not_in_training_dataset'),
+                               split='not_audited' if explicit else roles.get(sample.get('sample_id'), 'unavailable' if not found else 'not_in_training_dataset'),
                                remaining_steps_true=len(actions)-step))
         curves.extend(points)
         manifest = dict(task_id=task, rollout_id=rid, repetition_id=row.get('repetition_id', ''),
+                        resolved=row.get('resolved'), evaluation_status=row.get('evaluation_status'),
+                        termination_reason=row.get('termination_reason'),
+                        truth_endpoint='observed_agent_terminal' if explicit else 'successful_submission',
                         selection_role='final' if rid in selection['rollouts'] else 'historical_attempt',
                         trajectory_sha256=row['trajectory_sha256'], selected_evaluation_id=eid,
                         total_steps=len(actions), predicted_points=sum(p['prediction'] is not None for p in points),
@@ -311,11 +349,18 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id, targ
         manifests.append(manifest)
         grouped[task].append((manifest, points))
         source_files[str(owned_path(root, row['trajectory_path']))] = row['trajectory_sha256']
-        source_files[str(patch)] = row['patch_sha256']
+        for kind in artifact_kinds(row):
+            subject_path = owned_path(root, row[kind + '_path'])
+            source_files[str(subject_path)] = row[kind + '_sha256']
+            if kind == 'subject':
+                for output in read_json(subject_path)['outputs']:
+                    source_files[str(owned_path(subject_path.parent, output['path']))] = output['sha256']
     summary = dict(run_id=run_id, attempt_id=attempt_id, dataset_id=dataset_id, target=target,
                    model=str(model_path), fit_scope=metadata.get('fit_scope'), tasks=len(tasks),
-                   selected_rollouts=len(selection['rollouts']), physical_rollouts=len(catalog['rollouts']),
+                   selected_rollouts=len(plotted) if explicit else len(selection['rollouts']), physical_rollouts=physical_rollout_count,
                    resolved_rollouts=len(resolved), plotted_with_predictions=sum(m['predicted_points'] > 0 for m in manifests),
+                   plotted_rollouts=len(plotted), selection_mode='explicit' if explicit else 'resolved',
+                   truth_endpoint='observed_agent_terminal' if explicit else 'successful_submission',
                    final_resolved_rollouts=sum(t['resolved'] for t in tasks),
                    expected_repetitions=len(work_items), pending_repetitions=len(pending),
                    without_predictions=sum(m['predicted_points'] == 0 for m in manifests),
@@ -327,7 +372,9 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id, targ
                    repair_id=repair_id, reuse_predictions_id=reuse_predictions_id, coverage_policy='independent_prediction_and_truth',
                    added_prediction_points=len(sample_map)-len(samples),
                    success_histogram=dict(sorted(Counter(t['resolved'] for t in tasks).items())),
-                   interpretation='diagnostic; includes training samples, not independent generalization',
+                   interpretation=('Explicit native trajectories; observed termination is not successful completion; '
+                                   'training task overlap not audited' if explicit else
+                                   'diagnostic; includes training samples, not independent generalization'),
                    negative_predictions_preserved=True, missing_values='null; no interpolation')
     out.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix='.' + plot_id + '-', dir=out.parent) as staging:
@@ -343,14 +390,15 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id, targ
                 plot_trajectory(points, staged / manifest['plot'], title=task + '\n' + manifest['repetition_id'],
                                 ylabel=target.replace('submission_remaining_', '').replace('_log1p', '').replace('_linear', ''),
                                 comparison=True, xlim=(-0.5, max(0.5, xmax+0.5)), ylim=limits, logylim=loglimits,
-                                note=manifest['coverage_status'])
+                                note=manifest['coverage_status'] + ' | resolved=' + str(manifest['resolved']),
+                                truth_label='Observed to agent termination' if explicit else 'True remaining')
             print('plotted ' + task, flush=True)
         write_json(staged / 'summary.json', summary)
         write_json(staged / 'coverage-audit.json', coverage_audit)
         write_json(staged / 'selection.json', snapshots)
         write_json(staged / 'trajectories.json', manifests)
         write_csv(staged / 'task-resolved-counts.csv', tasks, list(tasks[0]))
-        write_csv(staged / 'curves.csv', curves, ['task_id','rollout_id','step_id','sample_id','target',
+        write_csv(staged / 'curves.csv', curves, ['task_id','rollout_id','step_id','sample_id','resolved','evaluation_status','truth_endpoint','target',
                   'prediction','prediction_transformed','prediction_log1p','split','used_in_fit','remaining_steps_true','prediction_binding','truth_available','hidden_available','capture_source'])
         write_csv(staged / 'trajectories.csv', manifests, list(manifests[0]) if manifests else ['task_id','rollout_id'])
         build_html(tasks, manifests, staged, summary)

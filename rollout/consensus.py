@@ -8,6 +8,23 @@ from types import SimpleNamespace
 
 from core.action_identity import ActionIdentityUnavailable, canonical_action
 from core.io import hash_json
+from rollout.entropy import entropy_retention
+
+CONSENSUS_MODES = {"parallel_consensus", "parallel_enthophy"}
+
+
+def consensus_options(parallel):
+    """Only append new fields when the run explicitly freezes the new policies."""
+    source = parallel.get("consensus") or {}
+    options = {"retention_ratio": source.get("retention_ratio", 0.5),
+               "min_retained_branches": source.get("min_retained_branches", 2),
+               "rule": source.get("rule", "exact_action"),
+               "tie_policy": source.get("tie_policy", "estimator_score")}
+    if "representative_policy" in source:
+        options["representative_policy"] = source["representative_policy"]
+    if parallel.get("mode") == "parallel_enthophy":
+        options["retention_rule"] = parallel["entropy"]["retention_rule"]
+    return options
 
 
 def select_consensus(
@@ -16,6 +33,10 @@ def select_consensus(
     retention_ratio=0.5,
     min_retained_branches=2,
     tie_policy="estimator_score",
+    *,
+    representative_policy=None,
+    retention_rule=None,
+    token_lengths=None,
 ):
     """Select one exact-action representative and return auditable metadata."""
     if not 0 < float(retention_ratio) <= 1:
@@ -24,6 +45,8 @@ def select_consensus(
         raise ValueError("min_retained_branches must be at least 2")
     if tie_policy != "estimator_score":
         raise ValueError("Unsupported consensus tie policy")
+    if representative_policy not in {None, "estimator_score", "min_step_tokens"}:
+        raise ValueError("Unsupported representative_policy")
 
     eligible = []
     branch_meta = {}
@@ -53,8 +76,34 @@ def select_consensus(
             continue
         eligible.append((candidate, score))
 
+    identities = {}
+    entropy_meta = None
+    if retention_rule is not None:
+        valid = []
+        histogram = defaultdict(list)
+        for candidate, score in eligible:
+            try:
+                message = candidate.response.model_dump(mode="json")["choices"][0]["message"]
+                action_hash, action = canonical_action(message)
+            except (ActionIdentityUnavailable, IndexError, KeyError, TypeError, ValueError) as exc:
+                branch_meta[candidate.branch_id] = {
+                    "branch_id": candidate.branch_id, "score": score, "retained": False,
+                    "identity_status": "unavailable", "exclusion_reason": "action_identity_unavailable",
+                    "identity_reason": str(exc)}
+                continue
+            identities[candidate.branch_id] = (action_hash, action)
+            histogram[action_hash].append(candidate.branch_id)
+            valid.append((candidate, score))
+        eligible = valid
+        entropy_meta = entropy_retention([len(ids) for ids in histogram.values()],
+                                         int(min_retained_branches), retention_rule, float(retention_ratio))
+        entropy_meta["candidate_branch_ids"] = sorted(identities)
+        entropy_meta["groups"] = [
+            {"action_hash": key, "action": identities[ids[0]][1], "branch_ids": sorted(ids), "count": len(ids)}
+            for key, ids in sorted(histogram.items())]
     eligible.sort(key=lambda item: (item[1], item[0].branch_id))
-    keep_count = max(int(min_retained_branches), math.ceil(float(retention_ratio) * len(eligible)))
+    keep_count = (entropy_meta["keep_count"] if entropy_meta is not None else
+                  max(int(min_retained_branches), math.ceil(float(retention_ratio) * len(eligible))))
     retained = eligible[: min(keep_count, len(eligible))]
     retained_ids = {candidate.branch_id for candidate, _ in retained}
 
@@ -67,6 +116,9 @@ def select_consensus(
             "identity_status": "pending" if candidate.branch_id in retained_ids else "not_evaluated",
             "exclusion_reason": None if candidate.branch_id in retained_ids else "estimator_filtered",
         }
+        if candidate.branch_id in identities:
+            action_hash, action = identities[candidate.branch_id]
+            branch_meta[candidate.branch_id].update(identity_status="available", action_hash=action_hash, action=action)
 
     groups = defaultdict(list)
     unavailable = []
@@ -98,6 +150,10 @@ def select_consensus(
         "votes": [],
         "tie_break": None,
     }
+    if entropy_meta is not None:
+        entropy_meta["cutoff_score"] = retained[-1][1] if retained else None
+        entropy_meta["cutoff_branch_id"] = retained[-1][0].branch_id if retained else None
+        base_meta["entropy"] = entropy_meta
     if len(eligible) < min_retained_branches or sum(len(rows) for rows in groups.values()) < min_retained_branches:
         return None, {**base_meta, "status": "insufficient_branches" if eligible else "no_eligible_branch"}
     if not groups:
@@ -128,10 +184,23 @@ def select_consensus(
             min(vote["branch_ids"]),
         ),
     )
-    winner = min(
-        (candidate for candidate, _, _ in groups[winner_vote["action_hash"]]),
-        key=lambda candidate: (float(scores[candidate.branch_id]), candidate.branch_id),
-    )
+    winner_candidates = [candidate for candidate, _, _ in groups[winner_vote["action_hash"]]]
+    lengths = token_lengths or {}
+    length_missing = (sorted(candidate.branch_id for candidate in winner_candidates
+                             if type(lengths.get(candidate.branch_id)) is not int or lengths[candidate.branch_id] < 0)
+                      if representative_policy == "min_step_tokens" else [])
+    def comparison(candidate):
+        key = (float(scores[candidate.branch_id]), candidate.branch_id)
+        return (lengths[candidate.branch_id], *key) if representative_policy == "min_step_tokens" else key
+    winner = min(winner_candidates, key=comparison) if not length_missing else None
+    if representative_policy is not None:
+        base_meta["representative"] = {
+            "policy": representative_policy, "missing_length_branch_ids": length_missing,
+            "comparison_keys": [{"branch_id": c.branch_id, "score": float(scores[c.branch_id]),
+                                  **({"completion_tokens": lengths.get(c.branch_id)}
+                                     if representative_policy == "min_step_tokens" else {})}
+                                 for c in sorted(winner_candidates, key=lambda c: c.branch_id)],
+            "selected_branch_id": winner.branch_id if winner else None}
     tie_break = None
     status = "reached"
     if len(tied) > 1:
@@ -154,7 +223,7 @@ def select_consensus(
     valid_count = sum(vote["count"] for vote in votes)
     return winner, {
         **base_meta,
-        "status": status,
+        "status": "token_length_unavailable" if length_missing else status,
         "votes": sorted(votes, key=lambda vote: (-vote["count"], vote["best_score"], vote["action_hash"])),
         "consensus_action_hash": winner_vote["action_hash"],
         "consensus_action": winner_vote["action"],
@@ -171,13 +240,15 @@ def validate_consensus_evidence(decision, options=None):
     from rollout.loop_escape import validate_loop_escape_evidence
 
     validate_loop_escape_evidence(decision)
-    if decision.get("selection_mode") != "parallel_consensus":
+    if decision.get("selection_mode") not in CONSENSUS_MODES:
         return
     config = decision.get("consensus_config")
     if not isinstance(config, dict):
         raise ValueError("Consensus config is missing")
     if options is not None and config != options:
         raise ValueError("Consensus config differs from frozen run")
+    if (decision["selection_mode"] == "parallel_enthophy") != ("retention_rule" in config):
+        raise ValueError("Entropy mode and retention rule disagree")
     candidates, scores = [], {}
     for row in decision["candidates"]:
         if row["status"] != "eligible":
@@ -199,12 +270,24 @@ def validate_consensus_evidence(decision, options=None):
         candidates.append(SimpleNamespace(branch_id=row["branch_id"], message={},
                           response=SimpleNamespace(model_dump=lambda mode="json", value=response: value)))
         scores[row["branch_id"]] = score
-    winner, expected = select_consensus(candidates, scores, config["retention_ratio"],
-                                        config["min_retained_branches"], config["tie_policy"])
+    lengths = {row["branch_id"]: row.get("completion_tokens") for row in decision["candidates"]}
+    winner, expected = select_consensus(
+        candidates, scores, config["retention_ratio"], config["min_retained_branches"], config["tie_policy"],
+        representative_policy=config.get("representative_policy"),
+        retention_rule=config.get("retention_rule"), token_lengths=lengths)
     if winner is None and not candidates:
         # Non-action format/limit responses retain the existing retry contract.
         if decision.get("consensus", {}).get("status") != "no_eligible_branch":
             raise ValueError("Consensus empty-candidate status differs")
+        if decision["selection_mode"] == "parallel_enthophy":
+            if hash_json(decision.get("consensus")) != hash_json(expected):
+                raise ValueError("Consensus empty-pool entropy evidence differs")
+            selected = decision.get("selected_branch_id")
+            if selected is not None:
+                corrective = [r["branch_id"] for r in decision["candidates"] if r.get("reason") == "FormatError"]
+                if (decision.get("fallback_reason") != "all_branches_format_error" or
+                        not corrective or selected != min(corrective)):
+                    raise ValueError("Consensus empty pool cannot select an action winner")
         return
     actual = decision.get("consensus")
     if not isinstance(actual, dict) or hash_json(actual) != hash_json(expected):

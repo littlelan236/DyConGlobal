@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def plot_trajectory(rows, output, *, title="remaining workload", ylabel="remaining workload",
-                    comparison=False, xlim=None, ylim=None, logylim=None, note=""):
+                    comparison=False, xlim=None, ylim=None, logylim=None, note="", truth_label="True remaining"):
     """Plot explicit predictions and truth; None creates gaps, never a zero label.
 
     comparison=True adds native log1p scores and log1p truth in a second panel.
@@ -39,7 +39,7 @@ def plot_trajectory(rows, output, *, title="remaining workload", ylabel="remaini
     FigureCanvasAgg(fig)
     axes = fig.subplots(2 if comparison else 1, 1, squeeze=False).ravel()
     def panel(ax, y, p, label):
-        ax.plot(x, y, color='#15803d', linewidth=1.7, label='True remaining', marker='.', markersize=3)
+        ax.plot(x, y, color='#15803d', linewidth=1.7, label=truth_label, marker='.', markersize=3)
         ax.plot(x, p, color='#2563eb', linewidth=1.2, label='Predicted remaining', marker='.', markersize=3)
         ax.set(xlabel='Canonical assistant step (0-based)', ylabel=label)
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))

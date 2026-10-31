@@ -57,12 +57,40 @@ class Serving(Strict):
     python: str
     gpus: list[int | str]
     tensor_parallel_size: int = Field(gt=0)
-
+    trajectory_sharding: Literal["none", "per_gpu_tp1"] = "none"
+    replica_base_urls: list[str] = Field(default_factory=list)
+    max_cpu_workers_per_gpu: int = Field(default=1, gt=0)
+    allow_mig_sharing: bool = False
     @model_validator(mode="after")
     def validate_devices(self):
         from runtime.serving.resources import normalize_devices
 
         devices = normalize_devices(self.gpus)
+        if self.trajectory_sharding == "per_gpu_tp1":
+            if self.tensor_parallel_size != 1:
+                raise ValueError("per_gpu_tp1 serving requires tensor_parallel_size=1")
+            if self.management != "managed":
+                raise ValueError("per_gpu_tp1 serving requires managed serving")
+            if len(self.replica_base_urls) != len(devices):
+                raise ValueError("per_gpu_tp1 requires one replica_base_urls entry per GPU")
+            if len(set(self.replica_base_urls)) != len(self.replica_base_urls):
+                raise ValueError("per_gpu_tp1 replica_base_urls must be unique")
+            ports = set()
+            for url in self.replica_base_urls:
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                if (parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}
+                        or not parsed.port or parsed.path != "/v1" or parsed.query or parsed.fragment
+                        or parsed.username or parsed.password):
+                    raise ValueError("per_gpu_tp1 replica_base_urls must be local HTTP URLs with ports")
+                if parsed.port in ports:
+                    raise ValueError("per_gpu_tp1 replica ports must be unique, including localhost aliases")
+                ports.add(parsed.port)
+            if self.base_url != self.replica_base_urls[0]:
+                raise ValueError("serving.base_url must equal replica_base_urls[0] for per_gpu_tp1")
+            return self
+        if self.replica_base_urls:
+            raise ValueError("replica_base_urls requires trajectory_sharding=per_gpu_tp1")
         if len(devices) != self.tensor_parallel_size:
             raise ValueError(
                 "serving.gpus count must equal serving.tensor_parallel_size"
@@ -93,9 +121,43 @@ class Generation(Strict):
     enable_thinking: bool
     preserve_thinking: bool
     thinking_token_budget: int | None = Field(default=None, ge=0)
+    require_reasoning_close: bool = False
+
+    @model_validator(mode="after")
+    def reasoning_budget(self):
+        if self.thinking_token_budget is not None:
+            if not self.enable_thinking:
+                raise ValueError("thinking_token_budget requires enable_thinking")
+            if self.thinking_token_budget >= self.max_tokens:
+                raise ValueError("thinking_token_budget must be smaller than max_tokens; reserve output for close and action")
+        if self.require_reasoning_close and not self.enable_thinking:
+            raise ValueError("require_reasoning_close requires enable_thinking")
+        return self
+
+
+def validate_generation_contract(cfg):
+    """One contract for create, clone and every SkillsBench startup/request."""
+    Generation.model_validate(cfg["generation"])
+    generation, serving = cfg["generation"], cfg["serving"]
+    if generation["max_tokens"] >= serving["max_model_len"]:
+        raise ValueError("max_tokens leaves no prompt space in frozen max_model_len")
+    if generation.get("require_reasoning_close"):
+        if serving.get("reasoning_parser") != "qwen3":
+            raise ValueError("Explicit reasoning close requires the qualified qwen3 parser")
+        if cfg.get("benchmark", {}).get("backend") == "skillsbench":
+            capture = cfg.get("capture", {})
+            if capture.get("enabled") and not (capture.get("graph_mode") == "FULL"
+                    and "think_close" in capture.get("anchors", [])
+                    and capture.get("export", {}).get("enabled")):
+                raise ValueError("SkillsBench explicit close requires FULL persisted think_close capture")
+    context = cfg.get("execution_context", {})
+    if context and context.get("generation") != generation:
+        raise ValueError("Frozen execution_context.generation differs from effective generation")
 
 
 class Agent(Strict):
+    backend: Literal["minisweagent", "openhands"] = "minisweagent"
+    profile_ref: str | None = None
     step_limit: int = Field(gt=0)
     cost_limit: float = Field(ge=0)
     max_consecutive_format_errors: int = Field(gt=0)
@@ -146,6 +208,7 @@ class Execution(Strict):
     harness_workers: int = Field(gt=0)
     infrastructure_retry_limit: int = Field(ge=0)
     pipeline_wall_seconds: int = Field(ge=0)
+    startup_failure_limit: int | None = Field(default=None, ge=1)
 
 
 class Timeouts(Strict):
@@ -204,6 +267,8 @@ class Hidden(Strict):
 
 
 class Benchmark(Strict):
+    backend: Literal["swebench", "skillsbench"] = "swebench"
+    snapshot_ref: str | None = None
     partition: Literal["train", "val", "test", "excluded"] | None
 
 
@@ -258,6 +323,10 @@ class Capture(Strict):
     control_port: int = Field(default=0, ge=0, le=65535)
     control_seconds: int = Field(default=30, gt=0)
     receipt_workers: int = Field(default=4, ge=1, le=128)
+    control_workers: int = Field(default=2, ge=1, le=128)
+    flush_timeout_seconds: int | None = Field(default=None, gt=0)
+    finalize_request_seconds: int | None = Field(default=None, gt=0)
+    admission_seconds: int | None = Field(default=None, gt=0)
     finalize_seconds: int = Field(default=120, gt=0)
     export: CaptureExport = Field(default_factory=CaptureExport)
 
@@ -317,6 +386,9 @@ class Parallel(Strict):
     dynamic_branch_admission: bool = False
     admission_timeout_seconds: int = Field(default=1800, gt=0, le=28800)
     score_timeout_ms: int = Field(default=200, ge=1, le=30000)
+    control_request_seconds: int | None = Field(default=None, gt=0)
+    results_wait_seconds: int = Field(default=0, ge=0)
+    result_workers: int = Field(default=16, ge=1, le=128)
     decision_ttl_seconds: int = Field(default=28860, gt=0)
     persist_all_branch_close: bool = True
     save_sites: list[int] = []
@@ -404,6 +476,9 @@ class Config(Strict):
 
     @model_validator(mode="after")
     def cross_fields(self):
+        from core.backends import capabilities
+        capabilities(self.model_dump())
+        validate_generation_contract(self.model_dump())
         if self.steering.enabled != bool(self.steering.payload):
             raise ValueError("Enabled steering requires a payload; disabled steering must not have one")
         if self.timeouts.bootstrap_seconds >= self.timeouts.container_lifetime_seconds:
@@ -422,7 +497,9 @@ class Config(Strict):
             raise ValueError("Capture anchors must be nonempty and unique")
         if self.capture.enabled and self.capture.prefill_token_chunk_size != 0:
             raise ValueError("Production online capture requires native prefill_token_chunk_size=0")
-        if self.parallel.enabled and self.parallel.branch_count > 1 and self.parallel.max_inflight_branches < self.parallel.branch_count:
+        if (self.parallel.enabled and self.parallel.branch_count > 1
+                and not self.parallel.dynamic_branch_admission
+                and self.parallel.max_inflight_branches < self.parallel.branch_count):
             raise ValueError("parallel capacity must accommodate one decision")
         if self.parallel.enabled and self.parallel.branch_count > 1 and not self.capture.enabled:
             raise ValueError("parallel rollout requires online capture for branch hidden")
@@ -472,16 +549,30 @@ def resolve(path, overrides=()):
         keys = dotted.split(".")
         for key in keys[:-1]:
             target = target[key]
-        if keys[-1] not in target:
+        allowed_identity_fields = {"benchmark.backend", "benchmark.snapshot_ref",
+                                   "agent.backend", "agent.profile_ref", "serving.allow_mig_sharing"}
+        if keys[-1] not in target and dotted not in allowed_identity_fields:
             raise ValueError(f"Unknown config field: {dotted}")
         target[keys[-1]] = yaml.safe_load(value)
     cfg = Config.model_validate(raw).model_dump()
+    # New serving modes must not change hashes of existing YAML configurations.
+    for field in ("trajectory_sharding", "replica_base_urls", "max_cpu_workers_per_gpu"):
+        if field not in raw["serving"]:
+            cfg["serving"].pop(field, None)
+    for section, fields in (("agent", ("backend", "profile_ref")),
+                            ("benchmark", ("backend", "snapshot_ref"))):
+        for field in fields:
+            if field not in raw[section] and not any(item.startswith(section + "." + field + "=")
+                                                      for item in overrides):
+                cfg[section].pop(field, None)
     if "skillsbench_images" not in raw:
         cfg.pop("skillsbench_images", None)
     if "cancellation" not in raw["execution"]:
         cfg["execution"].pop("cancellation", None)
     if "limits_retry" not in raw["execution"]:
         cfg["execution"].pop("limits_retry", None)
+    if 'startup_failure_limit' not in raw['execution']:
+        cfg['execution'].pop('startup_failure_limit', None)
     # Adding host storage configuration must not alter legacy config identities.
     if "docker_data_root" not in raw["environment"]:
         cfg["environment"].pop("docker_data_root", None)
@@ -588,6 +679,10 @@ def load_snapshot(root, run_id):
         raise ValueError("Run configuration snapshot was modified")
     if hash_json(cfg["selection"]) != cfg["selection_sha256"]:
         raise ValueError("Frozen run selection was modified")
+    if "parallel_policy" in cfg:
+        from core.parallel_policy import validate_policy_snapshot
+
+        validate_policy_snapshot(cfg, run_dir)
     return cfg
 
 

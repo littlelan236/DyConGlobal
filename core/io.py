@@ -124,6 +124,27 @@ def owned_path(root, relative):
     root = Path(root).resolve()
     path = (root / relative).resolve()
     if not path.is_relative_to(root) or path == root:
+        # External runs remain reachable only through a project-owned alias
+        # whose immutable snapshot binds this exact physical run directory.
+        aliases = root / 'runs'
+        if aliases.is_dir():
+            for alias in aliases.iterdir():
+                if not alias.is_symlink():
+                    continue
+                physical = alias.resolve()
+                if not path.is_relative_to(physical):
+                    continue
+                snapshot = physical / 'resolved-config.json'
+                if not snapshot.is_file():
+                    continue
+                cfg = read_json(snapshot)
+                expected = Path(cfg.get('run_storage_root', root)).resolve() / 'runs' / alias.name
+                base = {k: v for k, v in cfg.items()
+                        if k not in {'config_hash', 'selection', 'selection_sha256'}}
+                if (Path(cfg.get('project_root', '.')).resolve() == root
+                        and physical == expected and hash_json(base) == cfg.get('config_hash')
+                        and hash_json(cfg.get('selection')) == cfg.get('selection_sha256')):
+                    return path
         raise ValueError(f"Artifact path escapes project: {relative}")
     return path
 
@@ -140,6 +161,18 @@ def artifact_dir(cfg, module, artifact_id, category="outputs"):
             return owned_path(cfg["project_root"], f"{base}/{rel}")
         return owned_path(cfg["project_root"], f"{base}/{category}/{identifier(artifact_id)}")
     return owned_path(cfg["project_root"], f"{module}/{category}/{identifier(artifact_id)}")
+
+
+def artifact_reference(root, path):
+    """Serialize a validated physical artifact through its logical run alias."""
+    root = Path(root).resolve()
+    path = owned_path(root, path)
+    if path.is_relative_to(root):
+        return path.relative_to(root).as_posix()
+    for alias in (root / 'runs').iterdir():
+        if alias.is_symlink() and path.is_relative_to(alias.resolve()):
+            return (Path('runs') / alias.name / path.relative_to(alias.resolve())).as_posix()
+    raise ValueError('Artifact has no project-owned run reference')
 
 
 def update_status(path, stage, **values):

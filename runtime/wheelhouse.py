@@ -85,7 +85,7 @@ def download_build_tools(destination):
 def build(cfg, publication_id, extra_sources=(), download=False):
     root = Path(cfg['project_root'])
     publication_id = identifier(publication_id)
-    destination = root / 'runtime/cache' / publication_id
+    destination = root / 'runtime/wheelhouse' / publication_id
     staging = root / 'temp/wheelhouse' / publication_id
     with file_lock(root / 'state/wheelhouse' / (publication_id + '.lock'), nonblocking=True):
         if destination.exists() or staging.exists():

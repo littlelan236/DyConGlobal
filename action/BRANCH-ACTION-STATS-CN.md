@@ -1,5 +1,25 @@
 # 分支 action 统计、熵与轨迹进度曲线
 
+## 2026-10-28：统一批量入口，逐指标独立成图
+
+在同一条 `action-branch-stats` 命令中使用 `--plot-layout separate`，即可为所有选中指标分别生成独立图片；重复 `--line-metric` 选择子集，省略时使用当前 line-mode 的默认指标集合。该选项保留原有指标定义和进度算法，不重跑模型。
+
+```bash
+.venvs/analysis/bin/dycon action-branch-stats NEW_ID \
+  --source-run verified80-parallel-reasoning-log1p-20261021 \
+  --branch-scope all --line-mode per-run --plot-layout separate \
+  --progress-points 101 --format png --format svg
+.venvs/analysis/bin/dycon action-branch-stats NEW_ID --check
+```
+
+单 run 图在 `plots/per-run/RUN_ID/METRIC.png|svg`；逐轨迹图在 `plots/per-trajectory/RUN_ID/ROLLOUT_ID/METRIC.png|svg`；跨 run 图在 `plots/all-runs-normalized/METRIC.png|svg`。同一指标的 scope/run 对照可共用一张图，各种指标彼此分图。`plots/plot-index.json` 记录全部应生成图片，CLI 返回清单路径、figure_count 和 image_file_count，`--check` 校验全部文件覆盖。
+
+separate 模式额外支持 `--line-metric branches`，直接读取既有 `branches_all` 和已记录的 `branches_retained`；其中 all 是生成分支 inventory 数量，retained 才是历史实际保留集合的长度。旧版本分析未启用 `branch_count_curves` 时继续按旧列集合重算，旧多面板产物及校验保持。
+
+**历史 run 口径：** `verified80-parallel-reasoning-log1p-20261021` 是 4 分支 argmin run，没有 consensus retained 集合，也没有动态熵规则；必须使用 `--branch-scope all`。可画真实 action 熵、有效 action 分支数和生成分支数，不能把生成数、有效 action 数或最终执行代表数冒充动态 top-k。动态 H/k/N 指标及 metric-set 预设仍是计划功能，本次没有宣称实现。
+
+不指定 `--plot-layout` 时维持现有 panels 布局，避免改变原命令行为；需要一量一图时显式传 separate。
+
 更新：2026-10-27。正式入口：`.venvs/analysis/bin/dycon action-branch-stats`。
 实现：`action/analyzers/branches.py`、`action/evaluation/branch_histograms.py`、
 `action/evaluation/branch_curves.py`。读取现有 canonical trajectory 和 parallel decision；
@@ -269,3 +289,68 @@ action/outputs/consensus32-all-trajectory-average-20261027/
 该示例使用101点、包含0%和100%端点的进度网格；实线为全部分支，虚线为历史estimator保留分支。
 `curves/per-run.csv` 中x为0..1，图中显示0..100%，mean是对应进度的轨迹均值。
 完整口径和已选轨迹应以本分析自身的冻结metadata与selection为准。
+
+## 7. 同一历史候选池的 A/B/C 离线映射与 HTML（2026-10-28）
+
+`action-branch-stats` 对 consensus 来源默认离线计算全部 A/B/C 映射的保留分支数，
+每个量、每种映射独立成图，并将全部图片汇总为内嵌 HTML。
+只需传入新分析 ID 和来源 run；默认使用 `per-run` 与 `separate`，不必额外启用开关。
+不改变源 run 或实际 winner，不启动模型。
+
+```bash
+.venvs/analysis/bin/dycon action-branch-stats NEW_MAPPING_ID \
+  --source-run parallel-consensus32-dynamic-w2-s64-lowreserve-t8h-20261025
+.venvs/analysis/bin/dycon action-branch-stats NEW_MAPPING_ID --check
+```
+
+保留 `--entropy-mapping-comparison` 作为显式启用选项；使用
+`--no-entropy-mapping-comparison` 可关闭离线映射与 HTML，恢复原有绘图模式。
+不指定布局时，关闭映射后恢复 `both/panels` 默认值；要使用 per-trajectory、none、
+all-runs 等既有模式，请同时关闭映射。`--check` 始终读取冻结设置，不允许传入启停开关。
+Python `analyze_branches()` 同样自动解析默认值。
+非 consensus 来源无法重放共识候选池，默认继续使用原分支统计，不伪造映射；显式要求映射则报错。
+
+一次命令为三种生产映射分别生成 H、保留数量 k、筛选前 winner 支持率、筛选后
+winner 支持率、winner 改变率和 score cutoff 六张独立图，共18张映射图。
+不再绘制候选池数量 N，数值仍保留用于审计。所选历史实际指标图及整数直方图也汇总至 `index.html`。
+winner 基准为 estimator top-k 之前候选池的共识 action：先对全池应用同一生产投票及
+平票规则，再对每种动态映射筛选后的集合重放共识。支持率始终统计筛选前 winner 的票数，
+分母分别为筛选前/后的分支数；改变率按 action 身份比较，逐 step 为 0/1。
+无可确定 winner 时用 null，不补0；run 平均使用原有逐轨迹插值/等权规则。
+HTML 内嵌全部图片，可单文件离线打开。PNG/SVG 原图仍分别保存。
+
+候选池按 source run 冻结配置和原始 decision 重放校验后，使用最终状态 eligible、
+有限 score、canonical action 可比较的候选；不使用筛选后集合反推熵。若有 loop escape，
+使用其定案后的候选池。复用 `rollout.entropy.entropy_retention`，不复制公式或重打分。
+每 step 先计算整数 k，按 `(score, branch_id)` 精确保留 k 条，cutoff 为最后一条 score；
+再复用既有进度插值及轨迹等权平均。不得先平均 H 再代入非线性映射。
+
+m 和 r₀ 来自各源 run 的冻结共识配置。`N<m` 的生产返回 k=0；N=0 的 H 为 null。
+三种映射的 H 和筛选前支持率相同，分别展示用于按规则查阅。均值 k 可为小数。
+所有图标注为同一历史池上的离线反事实对照，不声称这些是对应策略真实执行后的轨迹、
+效果或 resolved rate。缺失必要原始候选证据会拒绝分析，不把未知 action 补成新类别。
+
+新增产物：
+
+```text
+index.html
+entropy-mappings/steps.jsonl / steps.csv
+entropy-mappings/per-run.csv / raw-steps.csv
+entropy-mappings/plot-index.json / gallery-index.json
+plots/entropy-mappings/RUN_ID/RETENTION_RULE/METRIC.png|svg
+```
+
+`analysis.json` 显式冻结 feature version、规则和 counterfactual 解释；decision record
+冻结候选池与 score。`--check` 从 SHA 绑定的原始 decision 重新校验输入，再重算所有
+映射数值、曲线、图片清单和内嵌 HTML 内容。旧分析不启用此 feature，仍按旧路径校验。
+
+
+## 固定比例 winner 对照（mapping v4）
+
+`action-branch-stats` 默认在 A/B/C 三种熵映射中分别新增
+`winner_changed_vs_fixed_ratio` 图，并加入内嵌 HTML 与 CSV。
+同一个 post-loop-escape 候选池按 `(score, branch_id)` 排序，以固定比例
+0.5（至少 m 条）的共识 action 为基准，直接比较各熵映射 winner 的
+action 身份，逐 step 不同记 1，相同记 0，任一 winner 缺失记 null。
+沿用逐轨迹进度归一化、插值与等权平均。这不是原有两条改变率相减，
+也不是重新执行 agent 后的实际效果。旧分析保持冻结版本和原文件。

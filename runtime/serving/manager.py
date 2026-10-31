@@ -19,8 +19,10 @@ from runtime.serving.resources import reserve_serving_devices
 
 
 class ServingManager:
-    def __init__(self, cfg, output):
+    def __init__(self, cfg, output, run_id=None, capture_owner=None):
         self.cfg, self.output = cfg, Path(output)
+        self.run_id = run_id or self.output.parent.name
+        self.capture_owner = capture_owner
         self.process = None
         self.log = None
         self.capture_controller = None
@@ -73,6 +75,8 @@ class ServingManager:
         ]
         if s.get("kv_cache_memory_bytes") is not None:
             args += ["--kv-cache-memory-bytes", str(s["kv_cache_memory_bytes"])]
+        if cfg['generation'].get('require_reasoning_close'):
+            args += ['--structured-outputs-config',json.dumps({'backend':'xgrammar','enable_in_reasoning':True})]
         algorithms = set()
         if cfg["steering"]["enabled"]:
             from runtime.steering.easysteer.payload import steering_payload
@@ -173,7 +177,11 @@ class ServingManager:
                 raise ValueError("Current Qwen requires explicit qwen3_xml/qwen3_coder and qwen3 parsers")
             verify = root / "runtime/scripts/verify_easysteer_runtime.py"
             subprocess.run([serving_python, str(verify)], check=True, capture_output=True, text=True)
-            if capture_cfg.get("enabled"):
+            if capture_cfg.get("enabled") and self.capture_owner is not None:
+                self.capture_controller = self.capture_owner.capture_controller
+                self.capture_server = self.capture_owner.capture_server
+                self.capture_token_inventory = self.capture_owner.capture_token_inventory
+            elif capture_cfg.get("enabled"):
                 if not capture_cfg.get("layers"):
                     raise ValueError("Online capture requires capture.layers to be configured")
                 inventory_code = (
@@ -210,7 +218,7 @@ class ServingManager:
                     cfg["project_root"],
                     {
                         **capture_cfg,
-                        "run_id": self.output.parent.name,
+                        "run_id": self.run_id,
                         "nas_root": cfg["paths"]["nas_root"],
                         "reserve_bytes": cfg["images"]["reserve_bytes"],
                         "open_token_ids": self.capture_token_inventory["open_token_ids"],
@@ -227,6 +235,13 @@ class ServingManager:
             env = dict(os.environ)
             env.pop("DYCON_PARALLEL_OPTIONS", None)
             env.pop("DYCON_PARALLEL_MODEL_FINGERPRINT", None)
+            env['DYCON_REASONING_LOOP_OPTIONS'] = json.dumps(cfg.get('parallel', {}).get('reasoning_loop', {}))
+            if cfg.get('agent', {}).get('backend') == 'openhands':
+                env['DYCON_REQUEST_RECEIPT_ROOT'] = str(self.output / 'native-request-receipts')
+                from rollout.model import _reasoning_marker_ids
+                opening, closing = _reasoning_marker_ids(cfg['model']['path'], cfg['model']['fingerprint'])
+                env['DYCON_CAPTURE_OPEN_IDS'] = json.dumps([opening])
+                env['DYCON_CAPTURE_CLOSE_IDS'] = json.dumps([closing])
             if cfg.get("parallel", {}).get("enabled") and cfg["parallel"]["branch_count"] > 1:
                 from runtime.serving.parallel import artifact_contract
 
@@ -248,7 +263,14 @@ class ServingManager:
                 if candidates:
                     env["PATH"] = str(candidates[0].parent) + os.pathsep + env.get("PATH", "")
             env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, s["gpus"]))
-            env["VLLM_PLUGINS"] = "dycon_capture" if capture_cfg.get("enabled") else ""
+            request_control = cfg.get('agent', {}).get('backend') == 'openhands'
+            self.runtime['request_control_enabled'] = request_control
+            env["VLLM_PLUGINS"] = "dycon_capture" if capture_cfg.get("enabled") or request_control else ""
+            if request_control and not capture_cfg.get('enabled'):
+                env['DYCON_REQUEST_CONTROL_ONLY'] = '1'
+                env.pop('DYCON_CAPTURE_CONTROL_URL', None)
+            else:
+                env.pop('DYCON_REQUEST_CONTROL_ONLY', None)
             env["VLLM_USE_V2_MODEL_RUNNER"] = "1"
             env["VLLM_CACHE_ROOT"] = str(root / "runtime/cache/vllm")
             if self.capture_server is not None:
@@ -274,16 +296,17 @@ class ServingManager:
                 env["DYCON_CAPTURE_FLUSH_SECONDS"] = str(capture_cfg["export"]["flush_interval_ms"] / 1000)
                 env["DYCON_CAPTURE_CONTROL_SECONDS"] = str(capture_cfg["control_seconds"])
                 env["DYCON_CAPTURE_RECEIPT_WORKERS"] = str(capture_cfg.get("receipt_workers", 4))
+                env["DYCON_CAPTURE_CONTROL_WORKERS"] = str(capture_cfg.get("control_workers", 2))
                 env["DYCON_CAPTURE_PROJECT"] = str(root)
                 env["DYCON_CAPTURE_EXPORT_OPTIONS"] = json.dumps(capture_cfg["export"])
                 env["DYCON_CAPTURE_RESERVE_BYTES"] = str(cfg["images"]["reserve_bytes"])
                 self.capture_controller._write("inventory.json", self.capture_token_inventory)
                 self.capture_controller.write_configuration()
-                self.runtime = {
+                self.runtime.update({
                     "capture_control_url": self.capture_server.base_url,
                     "capture_token_inventory": self.capture_token_inventory,
                     "capture_controller": self.capture_controller,
-                }
+                })
                 env["DYCON_CAPTURE_NEWLINE_IDS"] = json.dumps(
                     self.capture_token_inventory.get("newline_token_ids", [])
                 )
@@ -292,7 +315,8 @@ class ServingManager:
                 )
                 env["DYCON_CAPTURE_OPEN_IDS"] = json.dumps(self.capture_token_inventory["open_token_ids"])
             self.device_reservation = reserve_serving_devices(
-                root, serving_python, s["gpus"]
+                root, serving_python, s["gpus"],
+                allow_mig_sharing=bool(s.get("allow_mig_sharing", False)),
             )
             self.device_inventory = self.device_reservation.__enter__()
             if self.device_inventory["device_kind"] == "mig":
@@ -316,6 +340,11 @@ class ServingManager:
                         "cache_policy": capture_cfg.get("prefix_cache_policy", "safe_boundary"),
                         "control_seconds": capture_cfg.get("control_seconds", 30),
                         "receipt_workers": capture_cfg.get("receipt_workers", 4),
+                        "runtime_budgets": {k: capture_cfg.get(k) for k in (
+                            "control_seconds", "flush_timeout_seconds", "finalize_seconds",
+                            "finalize_request_seconds", "admission_seconds", "control_workers")},
+                        "parallel_budgets": {k: cfg.get("parallel", {}).get(k) for k in (
+                            "control_request_seconds", "results_wait_seconds", "result_workers", "score_timeout_ms")},
                         "token_inventory": self.capture_token_inventory,
                     },
                 },
@@ -337,7 +366,7 @@ class ServingManager:
             )
             from core.processes import identity
             write_json(self.output / "process.json", {**identity(self.process.pid), "managed": True,
-                       "run_id": self.output.parent.name, "execution_attempt_id": attempt_id})
+                    "run_id": self.run_id, "execution_attempt_id": attempt_id})
         elif cfg["steering"]["enabled"]:
             raise ValueError("Steering requires managed pinned EasySteer provenance")
         session = requests.Session()
@@ -385,7 +414,8 @@ class ServingManager:
                 os.killpg(self.process.pid, signal.SIGKILL)
                 self.process.wait()
         if self.capture_server is not None:
-            self.capture_server.close()
+            if self.capture_owner is None:
+                self.capture_server.close()
             self.capture_server = None
             self.capture_controller = None
         if self.log is not None:

@@ -123,7 +123,7 @@ def inspect_devices(serving_python, devices, *, probe=True):
 
 
 @contextmanager
-def reserve_serving_devices(root, serving_python, devices):
+def reserve_serving_devices(root, serving_python, devices, *, allow_mig_sharing=False):
     """Inspect devices; physical GPU sharing is allowed, MIG remains exclusive."""
     normalized = normalize_devices(devices)
     if normalized[0].startswith("MIG-"):
@@ -135,7 +135,7 @@ def reserve_serving_devices(root, serving_python, devices):
                 stack.enter_context(file_lock(path, nonblocking=True))
                 lock_paths.append(str(path))
             info = inspect_devices(serving_python, devices)
-            if any(row["process_count"] for row in info["device_memory"]):
+            if any(row["process_count"] for row in info["device_memory"]) and not allow_mig_sharing:
                 raise RuntimeError("Requested MIG instance is occupied; choose an idle instance")
             info["lock_paths"] = lock_paths
             yield info

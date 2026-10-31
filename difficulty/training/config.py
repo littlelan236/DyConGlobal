@@ -8,6 +8,7 @@ import yaml
 
 from core.io import identifier, read_json, sha256
 from difficulty.probe_config import MLPProbe, MLPScheduler, RidgeMLPProbe, RidgeProbe, TARGETS
+from difficulty.datasets.identity import task_key
 
 
 class Strict(BaseModel):
@@ -194,7 +195,7 @@ def resolve_settings(root, config):
         raise ValueError('Expected dataset receipt SHA mismatch')
     rows = read_json(source / 'rollouts.json')['rollouts']
     common = dict(dataset_id=config.data.dataset_id, dataset_receipt_sha256=digest,
-                  expected_tasks=len({(r['repo'], r['instance_id']) for r in rows}),
+                  expected_tasks=len({task_key(r) for r in rows}),
                   expected_rollouts=len(rows), expected_samples=sum(bool(s.strip()) for s in
                       (source / 'samples.jsonl').read_text().splitlines()), targets=config.data.targets)
     split = config.data.split

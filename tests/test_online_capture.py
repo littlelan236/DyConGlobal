@@ -184,6 +184,8 @@ def test_async_export_writes_raw_sidecar_and_session_receipt(tmp_path):
     )
     assert result["status"] == "queued"
     controller.queue.queue.join()
+    controller.record_output({'request_id': 'request', 'prompt_token_ids': [1, 248068, 198],
+                              'output_token_ids': [30], 'finish_reason': 'stop'})
     controller.stop("raw-session")
     from core.io import read_json
 

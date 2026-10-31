@@ -132,7 +132,7 @@ def _canonical(root, run_id, sid, rows, evidence, proofs):
         raise ValueError('Missing or ambiguous canonical trajectory: ' + str(len(rows)))
     rid, row = rows[0]
     path = owned_path(root, row['trajectory_path'])
-    if not path.is_relative_to(root / 'runs' / run_id) or row['run_id'] != run_id:
+    if not path.is_relative_to((root / 'runs' / run_id).resolve()) or row['run_id'] != run_id:
         raise ValueError('Canonical trajectory belongs to another run')
     digest = sha256(path)
     if digest != row['trajectory_sha256']:

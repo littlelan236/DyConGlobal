@@ -6,7 +6,7 @@ from pathlib import Path
 
 from catalog.store import Catalog
 from core.config import resolve
-from core.io import read_json
+from core.io import read_json, sha256, write_json
 
 
 def main(argv=None):
@@ -15,6 +15,60 @@ def main(argv=None):
     parser.add_argument("--set", action="append", default=[])
     parser.add_argument("--run-id", dest="analysis_run_id", help="Bind an analysis command to a frozen run")
     sub = parser.add_subparsers(dest="command", required=True)
+    skillsbench = sub.add_parser("skillsbench", help="SkillsBench task import and OpenHands profile checks")
+    sb_sub = skillsbench.add_subparsers(dest="skillsbench_command", required=True)
+    sb = sb_sub.add_parser("import", help="Freeze explicit tasks from the pinned official checkout")
+    sb.add_argument("snapshot_id")
+
+    sb.add_argument("--oracle-only", action="store_true", help="Freeze validation-only tasks without qualifying agent capabilities")
+    sb.add_argument("--task-id", action="append", required=True)
+    sb.add_argument("--partition", choices=["train", "val", "test"], default="train")
+    sb = sb_sub.add_parser("profile", help="Create a pinned, immutable OpenHands profile")
+    sb.add_argument("profile_id")
+    sb.add_argument("--bridge-advertise", required=True)
+    sb.add_argument("--skill-mode", choices=["with-skill", "no-skill"], default="with-skill")
+    sb.add_argument("--network", choices=["public", "none"], default="public")
+    sb.add_argument("--cpu-quota", choices=["strict", "unenforced_with_receipt"], default="strict")
+    sb.add_argument("--output", action="append", default=[], metavar="TASK_ID:/absolute/path")
+    sb.add_argument("--dependency-snapshot", type=Path)
+    proxy = sb.add_mutually_exclusive_group()
+    proxy.add_argument("--use-host-proxy", dest="use_host_proxy", action="store_true")
+    proxy.add_argument("--no-use-host-proxy", dest="use_host_proxy", action="store_false")
+    sb.set_defaults(use_host_proxy=None)
+    sb.add_argument("--condenser-max-tokens", type=int)
+    sb = sb_sub.add_parser("dependencies-build", help="Publish a pinned offline OpenHands closure")
+    sb.add_argument("snapshot_id")
+    sb.add_argument("--wheelhouse", type=Path, required=True)
+    sb.add_argument("--cli-archive", type=Path, required=True)
+    sb.add_argument("--uv", type=Path, required=True)
+    sb.add_argument("--python-runtime", type=Path, help="Bind an existing portable CPython 3.12 prefix into this new publication")
+    sb = sb_sub.add_parser("dependencies-verify", help="Verify every published dependency byte")
+    sb.add_argument("snapshot", type=Path)
+    sb = sb_sub.add_parser("preflight", help="Verify the frozen benchmark/profile/runtime contract")
+    sb.add_argument("run_id")
+    sb.add_argument("--workers", type=int, default=1, help="Bound task sandbox audit concurrency (1-8); no model requests")
+    sb = sb_sub.add_parser("qualify", help="Freeze request-role evidence from a real OpenHands tool probe")
+    sb.add_argument("run_id")
+    sb.add_argument("profile_id")
+    sb.add_argument("--profile-ref", type=Path)
+    sb = sb_sub.add_parser("cleanup-network", help="Reconcile a stopped run owned legacy proxy")
+    sb.add_argument("run_id")
+    sb = sb_sub.add_parser("audit", help="Verify real tools, native capture and winner-only execution")
+    sb.add_argument("run_id")
+    sb.add_argument("--require-resolved", action="store_true")
+    sb.add_argument("--require-parallel", action="store_true")
+    sb.add_argument("--rollout-id", action="append", default=[])
+    sb = sb_sub.add_parser("auxiliary-probe", help="Validate real condenser isolation on the run-owned live model")
+    sb.add_argument("run_id")
+    sb.add_argument("--probe-id", required=True)
+    sb = sb_sub.add_parser("oracle", help="Run the official task oracle and verifier as validation evidence")
+
+    sb.add_argument("run_id")
+    sb.add_argument("--workers", type=int, default=1, help="Bound independent official task lifecycles")
+    sb.add_argument("--task-id", action="append", default=[])
+    sb.add_argument("--retry-failed", action="store_true", help="Preserve failed evidence and create a fresh attempt")
+    sb = sb_sub.add_parser("offline-check", help="Install locked OpenHands and run official oracle/verifier with network disabled")
+    sb.add_argument("run_id")
     run = sub.add_parser("run", help="Create and operate immutable run plans")
     run_sub = run.add_subparsers(dest="run_command", required=True)
     q = run_sub.add_parser("create")
@@ -24,6 +78,11 @@ def main(argv=None):
     q.add_argument("--task-id", action="append", default=[])
     q.add_argument("--partition")
     q.add_argument("--repeat-count", type=int, default=1)
+    q.add_argument("--from-run", help="Clone frozen rollout configuration and full task selection")
+    q.add_argument("--reverse-task-order", action="store_true",
+                   help="Reverse the source task order in a frozen run clone")
+    q.add_argument("--parallel-config", type=Path,
+                   help="Freeze a run-local consensus/entropy policy YAML; never edits root config")
     q = run_sub.add_parser("show")
     q.add_argument("run_id")
     q = run_sub.add_parser("status")
@@ -56,23 +115,57 @@ def main(argv=None):
     q.add_argument("--control-seconds", type=int, required=True)
     q.add_argument("--receipt-workers", type=int, required=True)
     q.add_argument("--reason", required=True)
+    q = run_sub.add_parser("revise-concurrency", help="Audit the bounded 64-concurrency runtime profile")
+    q.add_argument("run_id")
+    q.add_argument("--revision-id", required=True)
+    q.add_argument("--reason", required=True)
+    q = run_sub.add_parser("revise-serving-placement", help="Audit an offline GPU device and serving endpoint move")
+    q.add_argument("run_id")
+    q.add_argument("--revision-id", required=True)
+    q.add_argument("--gpus", type=int, nargs="+", required=True)
+    q.add_argument("--base-url", required=True)
+    q.add_argument("--trajectory-sharding", choices=["per_gpu_tp1"])
+    q.add_argument("--replica-base-urls", nargs="+")
+    q.add_argument("--max-cpu-workers-per-gpu", type=int)
+    q.add_argument("--gpu-memory-utilization", type=float)
+    q.add_argument("--reason", required=True)
+    q = run_sub.add_parser("queue-resume", help="Resume once after another execution's GPU processes exit")
+    q.add_argument("run_id")
+    q.add_argument("--after-run", required=True)
+    q.add_argument("--request-id", required=True)
+    q.add_argument("--reason", required=True)
+    q = run_sub.add_parser("revise-serving-memory", help="Audit an offline executor GPU memory fraction revision")
+    q.add_argument("run_id")
+    q.add_argument("--revision-id", required=True)
+    q.add_argument("--gpu-memory-utilization", type=float, required=True)
+    q.add_argument("--reason", required=True)
     q = run_sub.add_parser("retry-failed", help="Authorize one fresh physical attempt for selected failures")
     q.add_argument("run_id")
     q.add_argument("--request-id", required=True)
     q.add_argument("--exit-status", action="append", required=True)
     q.add_argument("--task-id", action="append", default=[])
     q.add_argument("--reason", required=True)
+    q = run_sub.add_parser("compare", help="Compare physical exits and common final submitted task/repetition pairs")
+    q.add_argument("run_ids", nargs="+", metavar="RUN_ID")
+    q.add_argument("--baseline", help="Reference run, which must occur in RUN_IDs")
+    q.add_argument("--repetition", action="append", default=[], metavar="RUN_ID=REPETITION",
+                   help="Select one repetition per run (zero-based index or rep-000); repeat for each multi-repetition run")
+    q.add_argument("--format", choices=["json", "markdown"], default="json")
+    q.add_argument("--output", type=Path, help="Optional new report file; refuses overwrite")
     run_sub.add_parser("list")
+    run_sub.add_parser("active-status", help="Query all live runs and their progress")
     harness = sub.add_parser("harness", help="Prepare, run and inspect run-local harness results")
     harness_sub = harness.add_subparsers(dest="harness_command", required=True)
     q = harness_sub.add_parser("prepare")
     q.add_argument("run_id")
     q.add_argument("--rollout-id", action="append", default=[])
     q.add_argument("--source-run")
+    q.add_argument("--incremental", action="store_true", help="Add newly submitted trajectories while preserving prior harness results")
     q = harness_sub.add_parser("run")
     q.add_argument("run_id")
     q.add_argument("eval_id")
     q.add_argument("--gold", action="store_true")
+    q.add_argument("--incremental", action="store_true", help="Evaluate newly submitted trajectories and retain prior evaluations")
     q = harness_sub.add_parser("status")
     q.add_argument("run_id")
     q = harness_sub.add_parser("metadata-prefetch", help="Cache exact official requirements before harness execution")
@@ -139,6 +232,10 @@ def main(argv=None):
     p.add_argument("run_id")
     p.add_argument("--session-id", required=True, action="append")
     p.add_argument("--wait-for-run", action="store_true", help=argparse.SUPPRESS)
+    p = sub.add_parser("capture-trace", help="Freeze explicitly sealed successful native sessions")
+    p.add_argument("run_id")
+    p.add_argument("publication_id")
+    p.add_argument("--session-id", action="append", required=True)
     p = sub.add_parser("online-index")
     p.add_argument("--publication-id")
     p.add_argument("run_id")
@@ -246,10 +343,15 @@ def main(argv=None):
     p.add_argument("--termination-reason", help="Optional exact termination reason, e.g. Submitted")
     p.add_argument("--format", dest="formats", choices=["png", "svg"], action="append", default=[])
     p.add_argument("--dpi", type=int, default=180)
-    p.add_argument("--line-mode", choices=["per-run", "all-runs", "both", "none", "per-trajectory"], default="both",
-                   help="Normalized run averages, or one raw-step figure per selected rollout with per-trajectory")
+    p.add_argument("--line-mode", choices=["per-run", "all-runs", "both", "none", "per-trajectory"], default=None,
+                   help="Defaults to per-run with entropy mappings; otherwise both")
     p.add_argument("--line-metric", dest="line_metrics", action="append", default=[], choices=[m for m, _ in METRICS],
                    help="Repeat to choose chart metrics; per-trajectory defaults to H, H/ln(K), K, exp(H), 1-q")
+
+    p.add_argument("--plot-layout", choices=["panels", "separate"], default=None,
+                   help="Defaults to separate with entropy mappings; otherwise panels")
+    p.add_argument("--entropy-mapping-comparison", action=argparse.BooleanOptionalAction, default=None,
+                   help="Defaults on for consensus sources: calculate all A/B/C retained counts offline, plot separately and create HTML; use --no-entropy-mapping-comparison to opt out")
     p.add_argument("--progress-points", type=int, default=101,
                    help="Inclusive 0..1 interpolation grid size (2..1001)")
     p.add_argument("--check", action="store_true", help="Verify existing branch receipt and source checksums")
@@ -287,7 +389,10 @@ def main(argv=None):
     p.add_argument("run_id")
     p.add_argument("plot_id")
     p.add_argument("--attempt-id", required=True)
-    p.add_argument("--dataset-id", required=True)
+    p.add_argument("--dataset-id", help="Frozen label dataset; optional for explicitly selected native trajectories")
+    scope = p.add_mutually_exclusive_group()
+    scope.add_argument("--rollout-id", action="append", default=[], help="Explicit canonical trajectory, including unresolved; repeatable")
+    scope.add_argument("--rollout-list", help="Frozen JSON rollout IDs or SHA-bound entries")
     p.add_argument("--reuse-predictions-id", help="Reuse receipt/model-verified trajectory predictions while extending coverage")
     p.add_argument("--repair-id", help="Use all receipt-bound repaired action-close hidden, independently of GT")
     p.add_argument("--target", required=True, choices=[
@@ -360,14 +465,41 @@ def main(argv=None):
     if a.command == "run" and a.run_command != "create" and a.set:
         parser.error("run status/resume/reconcile accepts only the frozen run plan; use run create for overrides")
     if a.command == "run" and a.run_command == "create":
-        root_only = ("generation.", "agent.", "timeouts.")
-        forbidden = [item.split("=", 1)[0] for item in a.set if item.startswith(root_only)]
+        root_only = ("generation.seed", "timeouts.", "agent.step_limit", "agent.cost_limit",
+                     "agent.loop_", "agent.max_consecutive_format_errors")
+        run_identity = {"agent.backend", "agent.profile_ref", "benchmark.backend", "benchmark.snapshot_ref"}
+        forbidden = [item.split("=", 1)[0] for item in a.set
+                     if item.startswith(root_only) and item.split("=", 1)[0] not in run_identity]
         if forbidden:
             parser.error("generation, agent limits and timeouts belong to root config.yaml: " + ", ".join(forbidden))
     if a.command == "rollout" and a.set:
         parser.error("rollout rejects --set; edit the unique config.yaml or resume its immutable snapshot")
     if a.command == "rollout" and a.resume and a.task_id:
         parser.error("resume uses the immutable task selection")
+    if a.command == "run" and a.run_command == "compare":
+        if a.analysis_run_id:
+            parser.error("run compare takes explicit run IDs; do not pass --run-id")
+        from application.execution.comparison import compare_runs, format_markdown
+        try:
+            repetitions = {}
+            for selector in a.repetition:
+                run_id, separator, repetition = selector.partition("=")
+                if not separator or not run_id or not repetition:
+                    raise ValueError("--repetition requires RUN_ID=INDEX or RUN_ID=rep-000")
+                if run_id in repetitions:
+                    raise ValueError(f"Duplicate repetition selector for run: {run_id}")
+                repetitions[run_id] = repetition
+            result = compare_runs(Path(a.config).resolve().parent, a.run_ids, baseline=a.baseline,
+                                  repetitions=repetitions)
+            rendered = (format_markdown(result) if a.format == "markdown"
+                        else json.dumps(result, ensure_ascii=False, indent=2))
+            if a.output:
+                with a.output.open("x", encoding="utf-8") as stream:
+                    stream.write(rendered + "\n")
+        except (ValueError, OSError) as exc:
+            parser.error(str(exc))
+        print(rendered)
+        return
     explicit_run = a.analysis_run_id or getattr(a, "run_id", None)
     if a.command == "harness" and a.harness_command == "metadata-prefetch":
         if a.analysis_run_id or a.set:
@@ -399,12 +531,12 @@ def main(argv=None):
                                 migration_id=a.migration_id, apply=a.apply)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
-    run_commands = {"rollout", "harness", "capture", "artifact", "report", "capture-recover", "capture-publish", "online-index"}
+    run_commands = {"rollout", "harness", "capture", "artifact", "report", "capture-recover", "capture-publish", "capture-trace", "online-index"}
     if a.command in {"enrich", "token-trace", "trajectory-token-audit", "hidden", "dataset-index", "token-join"}:
         candidate = Path(a.config).resolve().parent / "runs" / a.dataset_id / "plan.json"
         if candidate.exists():
             explicit_run = a.dataset_id
-    use_snapshot = ((a.command == "run" and a.run_command != "create" and a.run_command != "list")
+    use_snapshot = ((a.command == "run" and a.run_command not in {"create", "list", "active-status"})
                     or (a.command in run_commands and not (
                         a.command == "artifact" and getattr(a, "scope", "run") != "run"))
                     or a.analysis_run_id is not None
@@ -416,6 +548,91 @@ def main(argv=None):
         cfg = load_plan(Path(a.config).resolve().parent, explicit_run)["config"]
     else:
         cfg = resolve(a.config, a.set)
+    if a.command == "skillsbench":
+        if a.set or a.analysis_run_id:
+            parser.error("skillsbench registry commands read the editable root config; no run override")
+        from core.backends import capabilities
+        if a.skillsbench_command == "profile":
+            from runtime.agents.openhands import OpenHandsProfile, validate_profile
+            from core.io import identifier
+            identifier(a.profile_id)
+            outputs = {}
+            for value in a.output:
+                if ":" not in value:
+                    parser.error("--output must be TASK_ID:/absolute/path")
+                task, path = value.split(":", 1)
+                outputs.setdefault(task, []).append(path)
+            profile = OpenHandsProfile(bridge_advertise=a.bridge_advertise,
+                bridge_listen=a.bridge_advertise, skill_mode=a.skill_mode,
+                network=a.network, cpu_quota=a.cpu_quota, output_paths=outputs,
+                dependency_snapshot=str(a.dependency_snapshot.resolve()) if a.dependency_snapshot else None,
+                skip_agent_install=bool(a.dependency_snapshot),
+                use_host_proxy=(a.network == "public") if a.use_host_proxy is None else a.use_host_proxy,
+                condenser_max_tokens=a.condenser_max_tokens).model_dump()
+            if a.dependency_snapshot:
+                from runtime.agents.dependencies import verify_snapshot
+                verify_snapshot(a.dependency_snapshot)
+            profile = validate_profile(profile)
+            target = Path(cfg["project_root"]) / "runtime/agent-profiles" / a.profile_id / "manifest.json"
+            if target.exists() and validate_profile(read_json(target)) != profile:
+                raise FileExistsError("OpenHands profile is immutable; choose a new profile ID")
+            if not target.exists():
+                write_json(target, profile)
+            cfg["benchmark"].update(backend="skillsbench")
+            cfg["agent"].update(backend="openhands", profile_ref=str(target.relative_to(cfg["project_root"])))
+            from runtime.agents.openhands import BENCHFLOW_VERSION, BENCHFLOW_WHEEL_SHA256
+            print(json.dumps({"profile_ref": str(target.relative_to(cfg["project_root"])),
+                "profile_sha256": sha256(target), "benchflow_version": BENCHFLOW_VERSION,
+                "benchflow_wheel_sha256": BENCHFLOW_WHEEL_SHA256,
+                "cpu_quota_policy": profile["cpu_quota"],
+                "request_roles_qualified": False, "capture_parallel_eligible": False},
+                ensure_ascii=False, indent=2))
+        elif a.skillsbench_command == "dependencies-build":
+            from runtime.agents.dependencies import build_snapshot
+            result = build_snapshot(cfg, a.snapshot_id, a.wheelhouse, a.cli_archive, a.uv, a.python_runtime)
+            print(json.dumps({"path": result["path"], "receipt_sha256": result["manifest"]["receipt_sha256"]}))
+        elif a.skillsbench_command == "dependencies-verify":
+            from runtime.agents.dependencies import verify_snapshot
+            result = verify_snapshot(a.snapshot)
+            print(json.dumps({"verified": True, "files": len(result["files"]), "receipt_sha256": result["receipt_sha256"]}))
+        elif a.skillsbench_command == "import":
+            from catalog.skillsbench import import_tasks
+            print(json.dumps(import_tasks(cfg, a.snapshot_id, a.task_id, a.partition, oracle_only=a.oracle_only), ensure_ascii=False, indent=2))
+        elif a.skillsbench_command == "preflight":
+            from runtime.agents.skillsbench import preflight
+            result = preflight(cfg["project_root"], a.run_id, workers=a.workers)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            if result["blockers"]:
+                raise SystemExit(2)
+        elif a.skillsbench_command == "qualify":
+            from runtime.agents.qualification import qualify_profile
+            print(json.dumps(qualify_profile(cfg["project_root"], a.run_id, a.profile_id, a.profile_ref), indent=2))
+        elif a.skillsbench_command == "cleanup-network":
+            from runtime.agents.network import cleanup_network
+            print(json.dumps(cleanup_network(cfg["project_root"], a.run_id), indent=2))
+        elif a.skillsbench_command == "audit":
+            from runtime.agents.validation import audit_run
+            result = audit_run(cfg["project_root"], a.run_id, a.require_resolved, a.require_parallel, a.rollout_id)
+            print(json.dumps(result, indent=2))
+            if not result['verified']:
+                raise SystemExit(2)
+        elif a.skillsbench_command == "auxiliary-probe":
+            from runtime.agents.probes import auxiliary_probe
+            print(json.dumps(auxiliary_probe(cfg["project_root"], a.run_id, a.probe_id), indent=2))
+        elif a.skillsbench_command in {"oracle", "offline-check"}:
+            from runtime.agents.skillsbench import run_oracles
+            oracle_options = {}
+            if a.skillsbench_command == "oracle" and (a.workers != 1 or a.task_id or a.retry_failed):
+                oracle_options = dict(workers=a.workers, task_ids=a.task_id, retry_failed=a.retry_failed)
+            result = (run_oracles(cfg, a.run_id, offline=True) if a.skillsbench_command == "offline-check"
+                      else run_oracles(cfg, a.run_id, **oracle_options))
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            if result['valid_oracles'] != result['oracle_count'] or not result['oracle_count']:
+                raise SystemExit(2)
+        elif a.skillsbench_command == "gpu-smoke":
+            from runtime.agents.skillsbench import capture_gpu_smoke
+            print(json.dumps(capture_gpu_smoke(cfg["project_root"], a.run_id), ensure_ascii=False, indent=2))
+        return
     if a.command == "skillsbench-images":
         if a.set or a.analysis_run_id:
             parser.error("skillsbench-images reads root config.yaml; no run override")
@@ -504,9 +721,9 @@ def main(argv=None):
         from application.execution.status import run_status
 
         if a.harness_command == "prepare":
-            result = prepare(cfg["project_root"], a.run_id, a.rollout_id, a.source_run)
+            result = prepare(cfg["project_root"], a.run_id, a.rollout_id, a.source_run, a.incremental)
         elif a.harness_command == "run":
-            result = run(cfg["project_root"], a.run_id, a.eval_id, a.gold)
+            result = run(cfg["project_root"], a.run_id, a.eval_id, a.gold, a.incremental)
         else:
             result = run_status(cfg["project_root"], a.run_id)
         publish_artifacts()
@@ -519,13 +736,15 @@ def main(argv=None):
         return
     if a.command == "run":
         from application.execution.run_plan import create_run, list_runs, show_run
-        from application.execution.status import cancel_run, reconcile_run, run_status
+        from application.execution.status import active_run_statuses, cancel_run, reconcile_run, run_status
         from application.execution.supervisor import launch, wait
 
         if a.run_command == "create":
             result = {"run_id": a.run_id, "path": str(create_run(
                 cfg, a.run_id, operation=a.operation, tasks_file=a.tasks_file,
-                task_ids=a.task_id, partition=a.partition, repeat_count=a.repeat_count))}
+                task_ids=a.task_id, partition=a.partition, repeat_count=a.repeat_count,
+                from_run=a.from_run, clone_overrides=a.set, parallel_config=a.parallel_config,
+                reverse_task_order=a.reverse_task_order))}
         elif a.run_command == "revise-capture-budget":
             from application.execution.capture_budget_revision import revise_capture_budget
             result = revise_capture_budget(cfg["project_root"], a.run_id, revision_id=a.revision_id,
@@ -534,6 +753,26 @@ def main(argv=None):
             from application.execution.capture_budget_revision import revise_capture_control
             result = revise_capture_control(cfg["project_root"], a.run_id, revision_id=a.revision_id,
                 control_seconds=a.control_seconds, receipt_workers=a.receipt_workers, reason=a.reason)
+        elif a.run_command == "revise-concurrency":
+            from application.execution.capture_budget_revision import revise_concurrency
+            result = revise_concurrency(cfg["project_root"], a.run_id,
+                revision_id=a.revision_id, reason=a.reason)
+        elif a.run_command == "revise-serving-placement":
+            from application.execution.capture_budget_revision import revise_serving_placement
+            result = revise_serving_placement(cfg["project_root"], a.run_id, revision_id=a.revision_id,
+                                              gpus=a.gpus, base_url=a.base_url, reason=a.reason,
+                trajectory_sharding=a.trajectory_sharding, replica_base_urls=a.replica_base_urls,
+                max_cpu_workers_per_gpu=a.max_cpu_workers_per_gpu,
+                gpu_memory_utilization=a.gpu_memory_utilization)
+        elif a.run_command == "queue-resume":
+            from application.execution.queued_resume import enqueue
+            result = enqueue(cfg["project_root"], a.run_id, after_run=a.after_run,
+                             request_id=a.request_id, reason=a.reason)
+        elif a.run_command == "revise-serving-memory":
+            from application.execution.capture_budget_revision import revise_serving_memory
+            result = revise_serving_memory(cfg["project_root"], a.run_id,
+                revision_id=a.revision_id, gpu_memory_utilization=a.gpu_memory_utilization,
+                reason=a.reason)
         elif a.run_command == "retry-failed":
             from application.execution.failed_retry import request_failed_retry
             result = request_failed_retry(cfg["project_root"], a.run_id, request_id=a.request_id,
@@ -544,6 +783,8 @@ def main(argv=None):
             result = run_status(cfg["project_root"], a.run_id)
         elif a.run_command == "list":
             result = list_runs(cfg["project_root"])
+        elif a.run_command == "active-status":
+            result = active_run_statuses(cfg["project_root"])
         elif a.run_command == "cancel":
             result = cancel_run(cfg["project_root"], a.run_id, a.reason)
         elif a.run_command == "wait":
@@ -582,6 +823,9 @@ def main(argv=None):
         from hidden.reclassify_online import reclassify_online
 
         result = reclassify_online(cfg, a.run_id, a.session_id, wait_for_run=a.wait_for_run)
+    elif a.command == "capture-trace":
+        from hidden.publish_finalized import publish_finalized
+        result = publish_finalized(cfg, a.run_id, a.publication_id, a.session_id)
     elif a.command == "online-index":
         from difficulty.datasets.online import build_published_index
 
@@ -630,7 +874,13 @@ def main(argv=None):
         if a.resume and a.set:
             raise ValueError("Resume uses immutable snapshot; --set requires a new run")
         import os
-        if os.environ.get("DYCON_SUPERVISED") != "1" or os.environ.get("DYCON_EXECUTION_RUN") != str(Path(cfg["project_root"]) / "runs" / a.run_id):
+        # The supervisor may own an external artifact-root run (for example
+        # /data3/.../runs/<id>), so comparing against project_root/runs is
+        # invalid. The supervisor pins DYCON_EXECUTION_RUN and attempt identity.
+        supervised = (os.environ.get("DYCON_SUPERVISED") == "1"
+                      and os.environ.get("DYCON_EXECUTION_ATTEMPT")
+                      and os.environ.get("DYCON_EXECUTION_RUN"))
+        if not supervised:
             from application.execution.supervisor import launch
             result = launch(cfg["project_root"], a.run_id, resume=a.resume,
                             check_only=a.check_only, task_ids=a.task_id)
@@ -741,7 +991,8 @@ def main(argv=None):
         from action.analyzers.branches import analyze_branches, check_branch_analysis
         if a.check:
             if (a.source_run or a.rollout_id or a.rollout_list or a.termination_reason or a.formats
-                    or a.line_mode != "both" or a.progress_points != 101 or a.line_metrics):
+                    or a.line_mode is not None or a.progress_points != 101 or a.line_metrics
+                    or a.plot_layout is not None or a.entropy_mapping_comparison is not None):
                 parser.error("--check reads frozen settings; do not pass source or plot selection arguments")
             result = check_branch_analysis(cfg, a.analysis_id)
         else:
@@ -752,7 +1003,8 @@ def main(argv=None):
                                       scope=a.branch_scope, termination_reason=a.termination_reason,
                                       formats=a.formats or ("png", "svg"), dpi=a.dpi,
                                       line_mode=a.line_mode, progress_points=a.progress_points,
-                                      line_metrics=a.line_metrics)
+                                      line_metrics=a.line_metrics, plot_layout=a.plot_layout,
+                                      entropy_mapping_comparison=a.entropy_mapping_comparison)
     elif a.command == "action-review-length":
         from action.analyzers.review_length import run_review_length, check_review_length
         if a.check:
@@ -762,6 +1014,15 @@ def main(argv=None):
                 parser.error("action-review-length requires --audit-id and --action-id, or --check")
             result = run_review_length(cfg, a.analysis_id, audit_id=a.audit_id, action_id=a.action_id)
     elif a.command == "action-classify":
+        from core.backends import capabilities
+        from application.execution.evidence import RunEvidence
+        sources = [a.source_run] if isinstance(a.source_run, str) else (a.source_run or [])
+        for source_run in sources:
+            source_evidence = RunEvidence(cfg["project_root"], source_run).read()
+            if (any(t.get("benchmark") == "skillsbench" for t in source_evidence["tasks"].values())
+                    or any(r.get("agent") == "openhands" for r in source_evidence["rollouts"].values())):
+                capabilities({"benchmark": {"backend": "skillsbench"},
+                              "agent": {"backend": "openhands"}}, operation="action")
         from action.analyzers.trajectories import classify_trajectories
 
         result = classify_trajectories(cfg, a.analysis_id, a.rollout_id, a.rollout_list, run_id=a.source_run)
@@ -806,7 +1067,9 @@ def main(argv=None):
     elif a.command == "difficulty-plot-trajectories":
         from difficulty.evaluation.trajectories import visualize_trajectories
         result = visualize_trajectories(cfg, a.run_id, a.plot_id, attempt_id=a.attempt_id,
-                                        dataset_id=a.dataset_id, target=a.target, repair_id=a.repair_id, reuse_predictions_id=a.reuse_predictions_id)
+                                        dataset_id=a.dataset_id, target=a.target, repair_id=a.repair_id,
+                                        reuse_predictions_id=a.reuse_predictions_id,
+                                        rollout_ids=a.rollout_id, rollout_list=a.rollout_list)
     elif a.command == "difficulty-plot-parallel":
         from difficulty.evaluation.parallel import list_parallel_trajectories, visualize_parallel
 

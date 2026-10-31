@@ -80,7 +80,7 @@ desktop.ini
 
 # Shared difficulty datasets/splits, caches, attempts and derived results
 /difficulty/datasets/*/
-/difficulty/cache/**
+/difficulty/cache
 /difficulty/checkpoints/**
 /difficulty/predictions/**
 /difficulty/evaluations/**
@@ -186,3 +186,19 @@ desktop.ini
 
 # Retired capture spool payloads; maintained capture code lives in hidden/*.py
 /hidden/capture-archive-retired/
+
+# Generated benchmark snapshots and host-qualified runtime publications
+/catalog/snapshots/
+/catalog/qualifications/
+/runtime/agent-profiles/
+/runtime/dependency-snapshots/
+/runtime/wheelhouse/
+
+# Patch/editor backup files; production sources remain visible
+*.orig
+*.rej
+*~
+
+# Downloaded executables; keep the maintained env/curl wrapper scripts
+/runtime/skillsbench-tools/uv
+/runtime/skillsbench-tools/uvx

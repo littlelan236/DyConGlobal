@@ -16,6 +16,7 @@ from difficulty.datasets.submission import load_selection, prepare_cache
 from difficulty.models.estimators import inverse_target, transform_target
 from difficulty.models.ridge_grid import RidgeGrid, load_model, predict_model, save_model
 from difficulty.probe_config import LABELS, RidgeProbe, target_transform
+from difficulty.datasets.identity import task_key
 from difficulty.training.artifacts import finish_attempt
 from difficulty.training.splits import create_split, load_split
 
@@ -168,7 +169,7 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
             rows = read_json(source / 'rollouts.json')['rollouts']
             n_samples = sum(bool(line.strip()) for line in (source / 'samples.jsonl').read_text().splitlines())
             settings_raw.update(dataset_id=dataset_id, dataset_receipt_sha256=sha256(source / 'receipt.json'),
-                                expected_tasks=len({(row['repo'], row['instance_id']) for row in rows}),
+                                expected_tasks=len({task_key(row) for row in rows}),
                                 expected_rollouts=len(rows), expected_samples=n_samples)
             if split_id is not None:
                 frozen_split = read_json(source / 'splits' / identifier(split_id) / 'split.json')

@@ -15,6 +15,8 @@ import numpy as np
 from core.io import cache_roots, hash_json, owned_path, read_json, sha256, write_json
 from core.locking import file_lock
 from difficulty.receipts import verify_receipt
+from difficulty.datasets.identity import task_group, task_key, validate_same_task
+from application.execution.subject import verify_subject
 
 
 def load_selection(cfg, settings):
@@ -37,13 +39,13 @@ def load_selection(cfg, settings):
     fraction_labels = dataset_meta.get('label_normalization') == 'trajectory_fraction'
     samples = [json.loads(line) for line in (source / "samples.jsonl").read_text().splitlines() if line]
     rollouts = selection["rollouts"]
-    task_commits = defaultdict(set)
+    task_rows = defaultdict(list)
     for row in rollouts:
-        task_commits[(row["repo"], row["instance_id"])].add(row["base_commit"])
-    if any(len(commits) != 1 for commits in task_commits.values()):
-        raise ValueError("Same logical task has conflicting base commits")
+        task_rows[task_key(row)].append(row)
+    for rows in task_rows.values():
+        validate_same_task(rows)
     expected_rollouts = settings.expected_rollouts or settings.expected_tasks
-    if (len(task_commits) != settings.expected_tasks or len(rollouts) != expected_rollouts
+    if (len(task_rows) != settings.expected_tasks or len(rollouts) != expected_rollouts
             or len(samples) != settings.expected_samples):
         raise ValueError("Frozen dataset counts do not match experiment config")
     ids = {r["rollout_id"]: r for r in rollouts}
@@ -51,29 +53,41 @@ def load_selection(cfg, settings):
         raise ValueError("Duplicate rollout/sample ID")
     paths = {}
     for row in rollouts:
+        is_workspace = row.get("evaluation_subject", {}).get("kind") == "workspace"
         if resolved_only or row.get('training_eligibility') == 'resolved_only':
             if row.get('resolved') is not True or row.get('evaluation_status') != 'completed' or not row.get('selected_evaluation_id'):
                 raise ValueError('Resolved selection evaluation changed')
             reports = [read_json(path) for path in row.get('source_files', {}) if Path(path).suffix == '.json']
-            outcomes = [r.get('outcomes', {}).get(row['rollout_id']) for r in reports if isinstance(r, dict)]
-            if not any(o and o.get('resolved') is True and o.get('status') == 'completed'
-                       and o.get('patch_sha256') == row['patch_sha256'] for o in outcomes):
-                raise ValueError('Resolved selection does not bind a successful exact patch')
+            if is_workspace:
+                if not any(r.get('resolved') is True and r.get('evaluation_status') == 'completed'
+                           and r.get('subject_sha256') == row.get('subject_sha256')
+                           for r in reports if isinstance(r, dict)):
+                    raise ValueError('Resolved selection does not bind a successful workspace subject')
+            else:
+                outcomes = [r.get('outcomes', {}).get(row['rollout_id']) for r in reports if isinstance(r, dict)]
+                if not any(o and o.get('resolved') is True and o.get('status') == 'completed'
+                           and o.get('patch_sha256') == row['patch_sha256'] for o in outcomes):
+                    raise ValueError('Resolved selection does not bind a successful exact patch')
         if cfg.get('model', {}).get('fingerprint') and row['model_fingerprint'] != cfg['model']['fingerprint']:
             raise ValueError('Training input hidden model differs from configured model fingerprint')
-        if row["submission_status"] != "submitted" or row["canonical_exit_status"] != "Submitted":
-            raise ValueError("Selection does not bind a submitted canonical trajectory")
+        expected_terminal = "AgentCompleted" if is_workspace else "Submitted"
+        if row["submission_status"] != "submitted" or row["canonical_exit_status"] != expected_terminal:
+            raise ValueError("Selection does not bind a successful benchmark terminal trajectory" if is_workspace
+                             else "Selection does not bind a submitted canonical trajectory")
         trajectory = owned_path(cfg["project_root"], row["trajectory_path"])
         if sha256(trajectory) != row["trajectory_sha256"]:
             raise ValueError("Canonical trajectory SHA mismatch")
         data = read_json(trajectory)
-        if data.get("info", {}).get("exit_status") != "Submitted":
-            raise ValueError("Canonical trajectory is not Submitted")
+        if data.get("info", {}).get("exit_status") != expected_terminal:
+            raise ValueError("Canonical trajectory has the wrong benchmark terminal state")
         steps = [i for i, m in enumerate(data["messages"]) if m.get("role") == "assistant"]
         if len(steps) != row["canonical_valid_assistant_steps"]:
             raise ValueError("Canonical step count changed")
         row["_message_indices"] = steps
-        paths[str(owned_path(cfg["project_root"], row["patch_path"]))] = row["patch_sha256"]
+        if is_workspace:
+            verify_subject(cfg["project_root"], row)
+        else:
+            paths[str(owned_path(cfg["project_root"], row["patch_path"]))] = row["patch_sha256"]
         for path, digest in row["source_files"].items():
             if path in paths and paths[path] != digest:
                 raise ValueError("Conflicting source hashes")
@@ -90,20 +104,25 @@ def load_selection(cfg, settings):
             raise ValueError("Sample step outside canonical trajectory")
         if sample["message_index"] != row["_message_indices"][step]:
             raise ValueError("Sample message/step mismatch")
-        if any(sample[k] != row[k] for k in ("repo", "instance_id", "source_kind", "trajectory_sha256")):
+        if any(sample.get(k) != row.get(k) for k in ("benchmark", "revision", "repo", "instance_id",
+                                                       "source_kind", "trajectory_sha256")):
             raise ValueError("Sample/rollout identity mismatch")
-        if sample["task_group"] != row["repo"] + "::" + row["instance_id"]:
+        if sample["task_group"] != task_group(row):
             raise ValueError("Sample logical task mismatch")
+        expected_endpoint = "agent_terminal" if row.get("evaluation_subject", {}).get("kind") == "workspace" else "submission"
+        expected_status = "completed" if row.get("evaluation_subject", {}).get("kind") == "workspace" else "submitted"
         if (not sample.get("both_targets_available") or sample.get("censored")
-                or sample["submission_status"] != "submitted" or sample["endpoint"] != "submission"
+                or sample["submission_status"] != expected_status or sample["endpoint"] != expected_endpoint
                 or sample["anchor"] != "think_close" or sample["occurrence"] != 0):
-            raise ValueError("Sample is not an eligible submission close")
+            raise ValueError("Sample is not an eligible successful terminal close")
         for key in ("remaining_steps_to_submission", "remaining_reasoning_tokens_to_submission"):
             value = sample[key]
             if type(value) not in (int, float) or not np.isfinite(value) or value < 0:
                 raise ValueError("Missing/nonfinite/negative submission label")
         if sample["remaining_steps_to_submission"] != row["canonical_valid_assistant_steps"] - step:
             raise ValueError("Step label does not match canonical step count")
+        sample.setdefault("remaining_steps_to_success", sample["remaining_steps_to_submission"])
+        sample.setdefault("remaining_reasoning_tokens_to_success", sample["remaining_reasoning_tokens_to_submission"])
         if fraction_labels:
             for key in ("remaining_steps_fraction", "remaining_reasoning_tokens_fraction"):
                 value = sample.get(key)
@@ -112,11 +131,14 @@ def load_selection(cfg, settings):
             expected = (row["canonical_valid_assistant_steps"] - step) / row["canonical_valid_assistant_steps"]
             if not np.isclose(sample["remaining_steps_fraction"], expected):
                 raise ValueError("Normalized step label does not match canonical step count")
+            sample.setdefault("remaining_steps_fraction_to_success", sample["remaining_steps_fraction"])
             total = row.get('total_reasoning_tokens')
             if type(total) is not int or total <= 0 or not np.isclose(
                     sample['remaining_reasoning_tokens_fraction'],
                     sample['remaining_reasoning_tokens_to_submission'] / total):
                 raise ValueError('Normalized reasoning label does not match trajectory denominator')
+            sample.setdefault("remaining_reasoning_tokens_fraction_to_success",
+                              sample["remaining_reasoning_tokens_fraction"])
         identity = (sample["rollout_id"], step)
         if identity in seen:
             raise ValueError("Multiple close samples for the same action")

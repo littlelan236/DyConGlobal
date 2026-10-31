@@ -18,6 +18,7 @@ from difficulty.models.estimators import FFNMLEstimator, FrozenRidgePlusFFNEstim
 from difficulty.models.mlp_checkpoint import (ARCHITECTURE_ID, FEATURE_SCHEMA, MODEL_KIND,
     RIDGE_MLP_ARCHITECTURE, RIDGE_MLP_KIND, FLEX_ARCHITECTURE, FLEX_RIDGE_ARCHITECTURE, save_checkpoint)
 from difficulty.probe_config import LABELS, MLPProbe, RidgeMLPProbe, target_transform
+from difficulty.datasets.identity import task_key
 from difficulty.receipts import verify_receipt
 from difficulty.training.artifacts import finish_attempt
 from difficulty.training.splits import create_split, load_split
@@ -113,7 +114,7 @@ def run_probe(cfg, attempt_id, *, mode='fit', dataset_id=None, split_id=None, ki
             source = root / 'difficulty/datasets' / dataset_id
             rows = read_json(source / 'rollouts.json')['rollouts']
             raw_settings.update(dataset_id=dataset_id, dataset_receipt_sha256=sha256(source / 'receipt.json'),
-                                expected_tasks=len({(r['repo'], r['instance_id']) for r in rows}),
+                                expected_tasks=len({task_key(r) for r in rows}),
                                 expected_rollouts=len(rows),
                                 expected_samples=sum(bool(s.strip()) for s in (source / 'samples.jsonl').read_text().splitlines()))
         if split_id is not None:

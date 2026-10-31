@@ -15,12 +15,12 @@ from runtime.containers.rollout_adapter import RolloutEnvironment
 
 def check_tool_chain(cfg, run_id, task, factory, runtime):
     root = Path(cfg["project_root"])
-    out = root / "runs" / run_id / "startup"
+    out = Path(runtime.get("startup_output", root / "runs" / run_id / "startup"))
     out.mkdir(parents=True, exist_ok=True)
     if (out / "receipt.json").exists() and read_json(out / "receipt.json").get("passed"):
         return read_json(out / "receipt.json")
     cap, controller, metadata = cfg["capture"]["enabled"], runtime.get("capture_controller"), None
-    sid = "startup-" + run_id
+    sid = "startup-" + run_id + runtime.get("startup_suffix", "")
     if cap:
         inv = runtime["capture_token_inventory"]
         metadata = capture_request_metadata(
@@ -169,7 +169,7 @@ def check_mixed_batches(cfg, run_id, factory, runtime):
     from minisweagent.exceptions import FormatError
 
     controller, inventory = runtime["capture_controller"], runtime["capture_token_inventory"]
-    sid = "startup-mixed-" + run_id
+    sid = "startup-mixed-" + run_id + runtime.get("startup_suffix", "")
     md = capture_request_metadata(
         sid,
         "startup-mixed",
@@ -214,7 +214,7 @@ def check_mixed_batches(cfg, run_id, factory, runtime):
     )
     response.raise_for_status()
     controller.stop(sid)
-    path = Path(cfg["project_root"]) / "runs" / run_id / "startup/mixed-trajectory.json"
+    path = Path(runtime.get("startup_output", Path(cfg["project_root"]) / "runs" / run_id / "startup")) / "mixed-trajectory.json"
     write_json(path, {"messages": messages})
     controller.prepare_trajectory(sid, path)
     result = controller.finalize(

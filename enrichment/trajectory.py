@@ -207,7 +207,8 @@ def enrich(cfg, dataset_id, tokenizer, *, selection=None):
     for rid, row in selected["rollouts"].items():
         if row["run_id"] != selected["source_run_id"]:
             raise ValueError("Enrichment trajectory belongs to another source run")
-        for kind in ("trajectory", "patch"):
+        from application.execution.subject import artifact_kinds
+        for kind in artifact_kinds(row):
             path = Path(cfg["project_root"]) / row[kind + "_path"]
             if sha256(path) != row[kind + "_sha256"]:
                 raise ValueError(f"Changed {kind}: {rid}")

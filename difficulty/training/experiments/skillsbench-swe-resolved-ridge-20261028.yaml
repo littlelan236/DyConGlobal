@@ -1,0 +1,21 @@
+schema_version: 2
+run:
+  attempt_id: skillsbench-swe-resolved-ridge-20261028
+  mode: fit
+data:
+  dataset_id: skillsbench-swe-resolved-20261028
+  split:
+    id: task-grouped-20261028
+  targets:
+    - submission_remaining_reasoning_tokens_log1p
+features:
+  public_site: 3
+model:
+  kind: ridge
+  ridge:
+    layers: [3]
+    alphas: [1.0, 100.0, 10000.0]
+    standardize: true
+    blas_threads: 4
+tensorboard:
+  enabled: false

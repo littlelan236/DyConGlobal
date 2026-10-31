@@ -4,7 +4,7 @@ import math
 from pathlib import Path
 
 from application.execution.evidence import RunEvidence
-from core.io import artifact_dir, read_json, sha256, write_json
+from core.io import artifact_dir, artifact_reference, read_json, sha256, write_json
 from core.locking import exclusive_artifact
 from difficulty.datasets.selection import select_run
 from enrichment.online_trace import publication_directory
@@ -67,7 +67,7 @@ def build_published_index(cfg, run_id, index_id, rollout_ids=(), rollout_list=No
             "dataset_id": run_id,
             "capture_id": run_id,
             "hidden_root": str(source),
-            "label_root": str(trace.relative_to(cfg["project_root"])),
+            "label_root": artifact_reference(cfg["project_root"], trace),
             "publication_id": publication_id,
             "samples": samples,
             "source_receipt_sha256": sha256(trace / "receipt.json"),

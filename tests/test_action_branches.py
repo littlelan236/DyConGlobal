@@ -1,6 +1,7 @@
 """Exact action counts, historical retained sets, provenance and CLI coverage."""
 
 import copy
+import json
 import math
 from pathlib import Path
 
@@ -351,3 +352,93 @@ def test_plot_index_disambiguates_runs_and_marks_empty_trajectories():
     index = trajectory_plot_index(sources, {"line_metrics": ["entropy"], "formats": ["png"]})
     assert index["entries"][0]["files"] != index["entries"][1]["files"]
     assert index["entries"][1]["status"] == "no_parallel_steps"
+
+
+@pytest.mark.parametrize("mode,count", [("per-run", 2), ("all-runs", 2), ("both", 4), ("per-trajectory", 2)])
+def test_separate_layout_has_one_axis_and_one_metric_per_file(tmp_path, monkeypatch, mode, count):
+    from matplotlib.figure import Figure
+
+    from action.evaluation.branch_curves import build_trajectory_curves, render_line_plots
+    trajectories = [{"source_run_id": "run", "rollout_id": "r", "assistant_steps": 3,
+                     "instance_id": "task", "trajectory_sha256": "fixture-sha", "parallel_steps": 3}]
+    rows = [{"source_run_id": "run", "rollout_id": "r", "assistant_index": i,
+             "normalized_progress": i / 2, "entropy_all": float(i), "branches_all": 4}
+            for i in range(3)]
+    raw, normalized = build_curve_tables(rows, trajectories, 5, include_branch_counts=True)
+    captured = []
+
+    def capture(self, filename, **kwargs):
+        assert len(self.axes) == 1
+        values = list(self.axes[0].lines[0].get_ydata())
+        captured.append((str(filename), values))
+
+    monkeypatch.setattr(Figure, "savefig", capture)
+    render_line_plots(tmp_path, raw, normalized,
+                      {"line_mode": mode, "plot_layout": "separate", "dpi": 60,
+                       "formats": ["png"], "line_metrics": ["entropy", "branches"]},
+                      build_trajectory_curves(rows, include_branch_counts=True), trajectories)
+    assert len(captured) == count
+    for filename, values in captured:
+        if filename.endswith("/branches.png"):
+            assert set(values) == {4}
+        else:
+            assert filename.endswith("/entropy.png")
+            assert values[0] == 0 and values[-1] == 2
+    index = read_json(tmp_path / "plot-index.json")
+    assert index["figure_count"] == index["file_count"] == count
+
+
+def test_branch_counts_are_explicitly_enabled_and_historical_curve_columns_stay_stable():
+    from action.evaluation.branch_curves import metric_columns, resolve_line_metrics
+    row = {"branches_all": 4, "branches_retained": 2, "entropy_all": 0.5}
+    assert not any(metric == "branches" for _, metric, _ in metric_columns(row))
+    assert ("branches_all", "branches", "all") in metric_columns(row, include_branch_counts=True)
+    assert resolve_line_metrics([{"entropy_all": 0.5}, row], "per-run", ["branches"],
+                                include_branch_counts=True) == ["branches"]
+
+
+def test_separate_batch_cli_checks_all_files_and_does_not_invent_argmin_retention(cfg, capsys):
+    from core.cli import main
+    fixture_run(cfg, "one")
+    root = Path(cfg["project_root"])
+    # A historical argmin decision has no consensus retained set.
+    trajectory = root / "runs/one/rollout/trajectories/same-id/raw.traj.json"
+    content = read_json(trajectory)
+    for msg in content["messages"]:
+        embedded = msg["extra"]["dycon_parallel"]
+        embedded.pop("consensus", None)
+        for branch in embedded["candidates"]:
+            branch.pop("retained", None)
+        full_path = root / (f"hidden/spool/one/sessions/{embedded['session_id']}/parallel/decisions/"
+                            f"{embedded['decision_id']}.json")
+        full = read_json(full_path)
+        full.pop("consensus", None)
+        for branch in full["candidates"]:
+            branch.pop("retained", None)
+        write_json(full_path, full)
+    write_json(trajectory, content)
+    ep = root / "runs/one/evidence.json"
+    evidence = read_json(ep)
+    evidence["rollouts"]["same-id"]["trajectory_sha256"] = sha256(trajectory)
+    write_json(ep, evidence)
+    main(["--config", cfg["config_source"], "action-branch-stats", "separate", "--source-run", "one",
+          "--rollout-id", "same-id",
+          "--branch-scope", "all", "--line-mode", "per-run", "--plot-layout", "separate",
+          "--line-metric", "entropy", "--line-metric", "branches", "--format", "png", "--format", "svg"])
+    capsys.readouterr()
+    out = root / "action/outputs/separate"
+    index = read_json(out / "plots/plot-index.json")
+    assert index["figure_count"] == 2 and index["file_count"] == 4
+    assert all((out / f).is_file() for e in index["entries"] for f in e["files"])
+    rows = [json.loads(line) for line in (out / "steps.jsonl").read_text().splitlines()]
+    assert all(r["branches_all"] == 4 and "branches_retained" not in r and "decision_keep_count" not in r
+               for r in rows)
+    assert check_branch_analysis(cfg, "separate")["verified"]
+    # Even re-signing a receipt must not hide omission of an expected image.
+    missing = index["entries"][-1]["files"][-1]
+    (out / missing).unlink()
+    receipt = read_json(out / "branch-receipt.json")
+    receipt["files"].pop(missing)
+    write_json(out / "branch-receipt.json", receipt)
+    with pytest.raises(ValueError, match="Missing per-metric figure"):
+        check_branch_analysis(cfg, "separate")

@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from core.config import Strict
 from core.io import hash_json, identifier, read_json, write_json
@@ -21,19 +21,36 @@ class Task(Strict):
     benchmark: str
     revision: str
     instance_id: str
-    repo: str
-    base_commit: str
+    repo: str | None = None
+    base_commit: str | None = None
     partition: Literal["train", "val", "test", "excluded"]
     exclusion_reason: str | None = None
     instance: dict
 
     @model_validator(mode="after")
     def consistent_instance(self):
+        if self.benchmark == "skillsbench":
+            if self.repo is not None or self.base_commit is not None:
+                raise ValueError("SkillsBench tasks must not contain SWE repository placeholders")
+            from catalog.skillsbench import validate_payload
+            validate_payload(self.instance, self.instance_id, self.revision)
+            identifier(self.instance_id)
+            return self
+        if not self.repo or not self.base_commit:
+            raise ValueError("SWE tasks require repo and base_commit")
         for key in ("instance_id", "repo", "base_commit"):
             if self.instance.get(key) != getattr(self, key):
                 raise ValueError(f"Task {key} disagrees with benchmark instance")
         identifier(self.instance_id)
         return self
+
+    @model_serializer(mode="wrap")
+    def preserve_swe_shape(self, handler):
+        value = handler(self)
+        if self.benchmark == "skillsbench":
+            value.pop("repo", None)
+            value.pop("base_commit", None)
+        return value
 
 
 class Manifest(Strict):
@@ -45,7 +62,7 @@ class Manifest(Strict):
     def unique_partitions(self):
         groups = {}
         for task in self.tasks.values():
-            identity = (task.repo, task.base_commit, task.instance_id)
+            identity = (task.benchmark, task.revision, task.repo, task.base_commit, task.instance_id)
             if identity in groups and groups[identity] != task.partition:
                 raise ValueError("Same task cannot occur in multiple partitions")
             groups[identity] = task.partition
@@ -77,9 +94,16 @@ class Catalog:
                 validated["catalog_revision"] = original["catalog_revision"] + 1
                 write_json(self.path, validated)
 
-    def select_tasks(self, *, partition=None, task_ids=()):
+    def select_tasks(self, *, partition=None, task_ids=(), benchmark=None, revision=None):
         data = self.read()
+        if benchmark is not None:
+            data["tasks"] = {k: t for k, t in data["tasks"].items()
+                             if (t["benchmark"] == "skillsbench") == (benchmark == "skillsbench")
+                             and (revision is None or t["revision"] == revision)}
         requested = set(task_ids)
+        matches = [t["instance_id"] for t in data["tasks"].values() if t["instance_id"] in requested]
+        if len(matches) != len(set(matches)):
+            raise ValueError("Ambiguous task ID across benchmark revisions; select a frozen snapshot")
         unknown = requested - {t["instance_id"] for t in data["tasks"].values()}
         if unknown:
             raise ValueError(f"Unknown requested task IDs: {sorted(unknown)}")

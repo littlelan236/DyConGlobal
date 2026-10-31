@@ -1,5 +1,63 @@
 # 任务入口与接口约定
 
+多卡 TP=1 的轨迹调度配置、每卡 CPU worker 上限及证据位置见 [多 GPU TP1](MULTI-GPU-TP1-CN.md)。仍使用 `run create/start/status/cancel/resume`；新模式按空闲卡补发完整轨迹。
+
+## 多 GPU TP1 的配置与调度
+
+`serving.trajectory_sharding` 省略或为 `none` 时，一个服务使用 `gpus` 中所有设备，设备数等于 `tensor_parallel_size`。设为 `per_gpu_tp1` 时，`tensor_parallel_size` 固定为 1，每张 GPU 各启动一个 managed 服务；`replica_base_urls` 按 GPU 顺序逐一指定不同的本机 HTTP `/v1` 端口，`base_url` 等于首项。
+
+`serving.max_cpu_workers_per_gpu` 为正整数，默认 1，限制每卡同时承载的完整轨迹任务数。新模式总 CPU worker 数为 `len(gpus) * max_cpu_workers_per_gpu`，替代该模式下的 `execution.rollout_workers`；`max_num_seqs`、分支数和分支准入容量仍分别控制服务内的模型请求。调度按空闲槽位持续补发，不设置批次或 repetition 屏障；完整物理 attempt 内固定端口与 GPU。
+
+创建、启动、取消和恢复继续走现有入口。`run status RUN_ID` 与 `report run RUN_ID` 的 `serving_workers` 给出各 GPU 槽位占用，attempt 的 `serving_assignment` 给出真实分配；所有服务共用 run 的 capture 控制器和磁盘预算。新模式配置和克隆例子见[完整指南](MULTI-GPU-TP1-CN.md)，允许的创建期覆盖字段见[冻结克隆](RUN-CLONE-CN.md)。
+
+## Run 横向比较（2026-10-29）
+
+```bash
+# repetition 数相同：默认比较全部 repetitions，按 task×repetition 序号配对
+.venvs/runner/bin/dycon run compare RUN_A RUN_B RUN_C --baseline RUN_A --format markdown
+# repetition 数不同：分别指定一个 repetition；相同数量时也可显式选择
+.venvs/runner/bin/dycon run compare RUN_A RUN_B --baseline RUN_A \
+  --repetition RUN_A=rep-000 --repetition RUN_B=rep-002 --format markdown
+# 索引从 0 开始，rep-002 与 2 等价；默认 stdout 输出 JSON
+.venvs/runner/bin/dycon run compare RUN_A RUN_B \
+  --repetition RUN_A=0 --repetition RUN_B=2 --output temp/comparison.json
+```
+
+`run compare` 只读指定 run 的冻结 plan/work-items、最终 result 指针、canonical trajectory 和 run 自身的 evaluation evidence；不启动模型、GPU、容器、harness 或 token ledger 重放。默认 stdout 输出 JSON；`--format markdown` 输出汇总表。`--output` 可选，父目录须已存在且目标文件不得存在。至少两个不同的 rollout run；`--baseline` 必须在比较列表中。不支持 `--set` 或全局 `--run-id`。即使根 YAML 已改变或损坏，仍分别校验和读取各 run 快照。
+
+Repetition 选择与配对：
+
+- **全部 repetitions 模式**：未指定 `--repetition` 时，各 run 的 `repeat_count` 必须相同；按 `(task_key, repetition_index)` 配对。只保留所有 run 均最终 accepted/submitted 的配对，不要求一个 task 的每个 repetition 都 submitted，也不按“任一次成功”聚合。
+- **单 repetition 模式**：`--repetition RUN_ID=INDEX` 或 `RUN_ID=rep-XXX` 可重复，为每个多 repetition run 选择一个 repetition；不同 run 可以选不同序号。此时按 task identity 配对。只有一次 repetition 的 run 可省略选择，自动采用 `rep-000`。进入此模式后，每个多 repetition run 都必须有明确选择，不能混用一整个 run 与另一个 run 的单次样本。重复选择、未知 run、非法/越界索引会报错。
+- 数量不同且没有选择时直接报错，不截断 repetition、不随机选择。选择也可用于 repetition 数相同的 runs。
+- JSON schema 为 **2**：`common_submitted_task_count` 是去重 task 数；`common_submitted_sample_count` 是共同 submitted 配对数，也是 `resolved_rate_denominator`。`common_submitted_tasks` 保存去重清单，`common_submitted_samples` 保存配对及各 run 对应的 repetition。每个 run 给出原始 `repeat_count`、`selected_repetition_ids`、`submitted_task_count`、`submitted_sample_count`；逐样本明细在 `runs[].samples`，每行绑定实际 repetition/sample/rollout/attempt。Markdown 也明确显示模式、所选 repetition 和分母。
+
+统计口径：
+
+- 退出统计覆盖每个 run **所选 repetitions 的全部物理 attempt**；未筛选时即整个 run。含自动重试、基础设施失败和主动重跑，按 task identity + repetition ID + attempt ID 去重，同一 attempt 的 canonical row、agent-outcome、attempt.json 和最终 result 不重复计算。并行候选分支不是独立 attempt。优先采用已保存的 agent_exit_status，避免后续 CaptureError 掩盖模型退出。
+- 默认目标为 `LimitsExceeded`、`ContextLimitExceeded`/`contextLimitExceeded`、`ContextWindowExceededError`、`reasoning_loop`/`reasoningLoop`（大小写及下划线等差异归一化）。输出三类各自及合计的次数/概率；保留全部原始状态分布。普通网络 Timeout、Cancelled 等不计入模型循环/预算退出。
+- 退出概率分母是所选 repetitions 的全部已启动物理 attempt 数，独立于共同 submitted 集合。只有预留 context、尚未启动的 attempt 不计入；已启动但结果未知的 attempt 计入分母，并在 `unknown_outcome_count` 单列。活动 run 或中断且证据不全的 run 是当前观察值，不能视为最终失败概率。schema-2 迁移 run 可读取其保留的原物理产物位置，不读取 schema-1 archive。
+- 共同 submitted 配对使用完整 task identity：**benchmark + revision + instance_id**（task_key）。只采用最终 accepted 的 submitted 指针；早期重试或未结算的 Submitted 不进入集合。任务名称相同但 benchmark/revision 不同不会配对。JSON 保留精确 rollout/attempt、轨迹 SHA、证据 revision 与 hash。
+### 多次 Harness 评测结果
+
+同一个 rollout 可以有多份 harness/evaluation evidence，但横向比较不会把这些评测次数相加、平均或按“任意一次成功”合并。每次评测的完整记录仍保存在 run 的 `evidence.json`；rollout 上的 `selected_evaluation_id`、`evaluation_status` 和 `resolved` 表示当前被选中的那一次结果，`run compare` 只读取这组当前字段。
+
+因此，如果同一个 rollout 先评测为 `resolved=true`、后评测为 `resolved=false`，当前统计按后一次 selected evaluation 计为 unresolved；历史评测不会被删除，但不会同时贡献成功和失败次数。未被当前 selected evaluation 覆盖的共同 submitted 配对保持 `resolved=null`，计入 `unknown_evaluation_count`，不会自动计为 unresolved，也不会借用其他 run 的 harness 结果。
+
+`resolved_rate` 的分母仍是共同 submitted 的 task/repetition 配对数，不会因为评测缺失而缩小。需要比较某一次特定 harness 结果时，应先让该 evaluation 成为 rollout 当前 selected evaluation，或生成绑定该评测证据的新 run；当前 `run compare` 没有按 `eval_id`、评测版本或“取最佳/取平均”的参数。
+
+- resolved_count 只计共同 submitted 配对中精确选中轨迹上已有的 `resolved=true`；resolved_rate 固定为 `resolved_count / 共同 submitted 配对数`，不缩小到已评测集合。单 repetition 模式下该分母也就是共同 task 数。未知评测（含 infra_error）单列，不补造 unresolved，也不自动借用其他 run 的 harness 结果。空交集时次数/用量为 0，率为 null。
+- steps 是所选最终 canonical 轨迹的 assistant 消息数，含提交步骤；prompt/completion/total token 累计保存的 canonical 模型响应（含有响应证据的选中 FormatError query）。并行 run **仅计每步实际选中分支**，不读取 `dycon_parallel.total_usage`、不累计落选分支、辅助请求或以前 attempt。缺 total_tokens 但 prompt/completion 完整时按两者之和计算；任一 token 字段缺失则该字段总量为 null，另保留 known subtotal 与 coverage，绝不当作 0 或重新分词估算。coverage 分别列出不完整 task 数与样本数。
+- `--baseline` 为各项次数、率、steps、token 给出绝对差值及相对变化率 `(本 run - 基准) / 基准`；基准为 0 或数据缺失时相对变化为 null。率另给百分点差，尤其 resolved 的百分点差为 `100 × (本 run resolved_count - 基准 resolved_count) / 共同 submitted 配对数`。Markdown 的率变化显示百分点，其余变化显示相对百分比；JSON 同时保留两者。
+
+比较不会修改 run、评测证据、配置、最终选择或分析 selection。活动 run 在读取过程中可能变化；需要可重复的最终比较时，应在 run 和 harness 完成后执行并保存 JSON。`N/A` 表示缺数据、空分母或零基准，具体原因见 JSON 的 coverage/unknown 字段。单 repetition run 的统计数值保持原口径，schema-1 旧报告文件仍保留原样。
+
+## Run 独立共识/Action 熵策略（2026-10-27）
+
+`dycon run create RUN_ID --operation rollout ... --parallel-config POLICY.yaml` 创建并冻结 run 专属策略；支持 `parallel_enthophy` 的三种原始 Shannon 熵映射，以及两个共识模式的 estimator-score/当前step最短代表策略。新增策略参数不写根配置；旧 run 的 snapshot/receipt 不回写。完整 schema、clone 与证据规则见 [Run 独立 Action 熵策略](ACTION-ENTROPY-RUN-POLICY-CN.md)。创建不启动 GPU；`run start --check-only` 仍会使用 GPU。
+
+已有 rollout run 的显存比例调整使用 `dycon run revise-serving-memory RUN_ID --revision-id ID --gpu-memory-utilization FRACTION --reason TEXT`，仅在停止及清理确认后执行；完整流程见 [显存比例审计修订](SERVING-MEMORY-REVISION-CN.md)。该入口只修订显存比例，不改变设备、TP、模型和采样参数。
+
 ## Harness requirements 元数据预取（2026-10-26）
 
 运行前可用 runner 的 `dycon harness metadata-prefetch --instances INSTANCES.json --output NEW_RECEIPT.json [--proxy URL] [--refresh]`，按当前根 config 的 `environment.requirements_cache` 缓存官方 requirements。输入为完整 instance dict 列表，使用 `environment_setup_commit`（否则 base_commit），复用官方递归 requirements reader，不创建容器或修改评分定义。
@@ -37,6 +95,15 @@ NAS locations and checksums, avoiding needless tensor duplication.
 日常操作从 [最小运行清单](MINIMUM-RUN-CN.md) 开始；依赖、Docker、镜像、网络和 harness 环境故障查 [容器环境修复指南](container-environment-repair-cn.md)。本文保存完整入口表、输入格式、产物与分析口径。模块内部实现另见源码及各模块 README。
 
 
+
+<a id="skillsbench-think-close-contract"></a>
+## SkillsBench 显式 close 与 hidden 覆盖契约（2026-10-30）
+
+`generation.require_reasoning_close=true` 会由 `rollout.model.model_config` 向 OpenHands 的 effective request 添加 tokenizer-bound close grammar；managed serving 同时启用 xgrammar 的 `enable_in_reasoning=true`。此次稳定完成 smoke 的组合还包括 `generation.thinking_token_budget=512`、`generation.max_tokens=8192`、`capture.enabled=true`、`capture.anchors=[think_close]` 和 export 开启。仅开 grammar 曾达到 token 上限，配置不是无条件完成保证。
+
+正式入口仍为 `dycon run create/start/wait`；生成与预算配置在根 YAML 中维护、创建时冻结。`skillsbench audit RUN_ID --rollout-id ROLLOUT_ID` 可复核已结束轨迹（failed run 必须显式指定 rollout），但必须另外将全部 canonical assistant step 与 accepted native action-request、显式 close token、persisted hidden 一一核对。Reasoning 字段、capture complete、总点数相等或 artifact hash 校验成功不能替代逐 step 覆盖验收。Qwen3 parser 的 implicit tool-call reasoning end 不等于生成了显式 `</think>`。
+
+MIG 单任务 smoke `skillsbench-thinkclose-mig6-smoke-v5-20261030` 已通过 42/42 step 的 native/hidden 对齐；AgentCompleted、capture complete，VerifierError 独立记录，不宣称 resolved。适用范围、配置、逐点检查与 MIG 自身进程被 preflight 判占用的兼容限制见 [SkillsBench/OpenHands close capture 指南](SKILLSBENCH-OPENHANDS-CN.md#think-close-capture)。
 
 ## 1. 入口、环境与配置
 
@@ -658,13 +725,13 @@ MLP 正式训练使用 `difficulty-mlp`，Ridge+MLP 使用 `difficulty-ridge-mlp
 
 ## GPU MIG serving
 
-Managed rollout serving accepts either physical GPU indices or MIG instance UUIDs in serving.gpus. The number of entries must equal serving.tensor_parallel_size; one MIG instance therefore uses TP=1. The UUID must be discovered at launch time with nvidia-smi -L and frozen in the run resolved configuration. Example:
+Managed rollout serving accepts physical GPU indices or one MIG instance UUID in serving.gpus. In the default single-service mode (trajectory_sharding absent or none), the number of entries must equal serving.tensor_parallel_size; one MIG instance therefore uses TP=1. The per_gpu_tp1 mode starts an independent TP=1 service per configured GPU and uses a separate replica_base_urls entry for each; its GPU count is not its TP size. This mode and the per-GPU CPU worker limit are documented in [Multi-GPU TP1](MULTI-GPU-TP1-CN.md). The current device validator still rejects mixing physical indices with MIG UUIDs or listing multiple MIG instances. The UUID must be discovered at launch time with nvidia-smi -L and frozen in the run resolved configuration. Example:
 
     serving:
       gpus: ["MIG-INSTANCE-UUID"]
       tensor_parallel_size: 1
 
-Run creation and execution still use the normal dycon commands. The serving manager preserves the UUID in CUDA_VISIBLE_DEVICES, checks that the instance exists and is visible as one CUDA device, and records the device and measured memory in startup/launch.json. It takes a run-local device lock so two managed runs cannot claim the same configured device. Physical GPU configurations such as gpus: [0, 1, 2, 3] with TP=4 remain unchanged. Offline hidden replay keeps its separate integer-GPU contract in this release.
+Run creation and execution use the normal dycon commands. The serving manager preserves the UUID in CUDA_VISIBLE_DEVICES, checks visibility and records device memory in serving/launch.json (or serving/workers/worker-NN/launch.json in per_gpu_tp1 mode). MIG instances retain the existing device lock; physical GPUs permit sharing between managed services, so memory admission does not imply exclusive compute access. Physical GPU configurations such as gpus: [0, 1, 2, 3] with TP=4 remain supported in the default mode. Offline hidden replay keeps its separate integer-GPU contract.
 
 ### Harness failure outcomes
 
@@ -986,3 +1053,84 @@ Historical evidence paths remain readable. See [capture archive guide](CAPTURE-A
 
 在 `difficulty-plot-trajectories` 中显式添加 `--repair-id REPAIR_ID`，即可对全部可验证的 repaired canonical close hidden 预测，独立于真值是否可用。
 预测、真值分别统计覆盖数；canonical-identity-only 预测点单列，不冒充 native token 标签。输出 `coverage-audit.json`，旧训练数据集和旧图保持不可变。
+
+SkillsBench/OpenHands 操作、固定版本、请求角色门槛、运行命令和 rootless Docker 资源适配记录见 [SkillsBench + OpenHands](SKILLSBENCH-OPENHANDS-CN.md)。
+
+
+## GPU进程退出后排队恢复
+
+`dycon run revise-serving-placement RUN_ID --revision-id ID --gpus 2 3 --base-url http://127.0.0.1:8107/v1 --reason TEXT`仅在目标已退出且清理完成时审计修改GPU和端口，保留TP、显存比例、任务、算法与完成证据，复用资源修订锁、before/after和receipt。 显式转换到多卡独立 TP=1 时，须同时提供 `--trajectory-sharding per_gpu_tp1`、`--replica-base-urls URL...`、`--max-cpu-workers-per-gpu N`、`--gpu-memory-utilization FRACTION`；仅这一完整配置会将 TP 改为 1，继续保留原 run ID 和已完成进度。完整流程见 [多 GPU TP1](MULTI-GPU-TP1-CN.md#保留原-run-id-和进度的离线拓扑修订)。
+
+`dycon run queue-resume RUN_ID --after-run PREDECESSOR --request-id ID --reason TEXT`通过用户systemd一次性服务等待登记的前序GPU工作进程退出，再调用正式`run resume --detach`。使用PID/start_ticks/boot身份及pidfd事件，无定时轮询；不等待前序supervisor、harness或capture全部结束，不等待同GPU其他run。目标与前序需同GPU但不同端口。请求、状态和resume结果保存在`state/run-resume-queue/ID/`；`systemctl --user stop dycon-resume-ID.service`可取消等待。
+
+源execution或目标配置/计划/执行代际变化、替代GPU进程出现会记录failed并停止，不猜测或自动扩大操作。stage=resumed表示正式resume已派发，不代表后续模型健康验收。user systemd管理等待进程，终端断开不影响；不承诺服务器重启后自动恢复（transient unit）。
+
+## SkillsBench task ??????2026-10-29?
+
+?? `catalog/qualifications/skillsbench-oracle-availability-f860ecf02-20261028.json` ?????? revision ?? oracle status?task package hash??? run?profile/context hash ? agent ?????????? task ?? [SkillsBench task availability](SKILLSBENCH-TASK-AVAILABILITY-20261028-CN.md)??????????????? catalog task ???? run ???
+
+
+## SkillsBench unified startup repair (2026-10-30)
+
+`skillsbench dependencies-build NEW_ID --wheelhouse WHEELS --cli-archive ARCHIVE --uv UV --python-runtime PORTABLE_CPYTHON_PREFIX` publishes an existing portable CPython 3.12 prefix, the complete wheel closure and audited CLI/tools adaptations. Every byte is hash-bound; old publications and task interpreters are unchanged. CLI adaptations select native subprocess terminal, retain it on reset, and read a positive bounded SDK timeout from the run-owned agent environment. SDK implicit retries are disabled.
+
+`skillsbench preflight RUN_ID --workers 4` now executes owned task sandboxes, using the same `SkillsBenchFactory`, `OwnedPlanes`, installation hook and skill deployment as rollout. It verifies actual image IDs, offline private installation, non-root tools and ACP initialize/session creation, then confirms cleanup. No model request is issued. Evidence is under `validation/environments/`; successful receipts are reusable only for the same complete configuration, task, dependency and code identity. `run start/resume` invokes this gate before managed serving starts. Oracle results are independent.
+
+Generation validation is shared by create/clone/start: thinking budget must be below total output, with room for the rendered prompt in the frozen context. For the repair candidate, reasoning=81920 and total output=98304; GPU validation determines acceptance. A budget change requires a new run. API attempts preserve terminal receipts and actual usage even on limit/protocol failure; limit/protocol HTTP 400 responses carry a correlation ID and are not opaque 502 retries.
+
+`skillsbench audit RUN_ID [--rollout-id ID]` writes schema-3 evidence with `step_coverage`: every canonical assistant response, including the final answer, must map to its exact native output, explicit first close, a subsequent forward, one FULL graph close hidden and verified NAS tensor bytes. Missing/duplicate/unexpected/unfinished sets are explicit. A failed coverage check returns exit code 2. Parallel candidate and canonical winner denominators remain separate.
+
+
+
+## SkillsBench 修复后正常启动与 run 规模（2026-10-30）
+
+修复范围已经接入统一生产入口：`dycon run create` 冻结配置，`run start`/`run resume` 先执行共享 SkillsBench preflight，再启动 managed serving 和 BenchFlow；`run retry-failed` 注册新的 physical attempt 后仍走同一 resume 链路。旧 run 的 resolved-config、selection、receipt 和历史轨迹不修改。普通 baseline、capture、parallel 和 cancellation 共用这些 owner；未启用的能力不会被隐式打开。
+
+本轮修复覆盖：
+
+- reasoning/action 预算和 tokenizer-bound close grammar；默认候选为 reasoning `81920`、总输出 `98304`，剩余空间留给 close、tool-call 和终止 token。
+- native API attempt terminal receipt、实际 token usage、结构化 limit/protocol/transport/cancelled 错误和 request correlation。
+- OpenHands 普通 baseline 的 reasoning token 周期检测，以及跨 assistant step 的 reasoning/action 周期检测；命中后在工具执行前早停，保留原始响应和检测证据。parallel candidate 仍保留原有 per-branch detector 和 loop escape。
+- capture session draining、延迟 native output、幂等 stop/finalize、session 级取消和 condensation selector 隔离。
+- hash-bound CPython 3.12 agent runtime、subprocess terminal backend、SDK bounded timeout、非 root skill discovery、compose image identity 和 75-task environment audit。
+- workspace file/directory 探测、逐 step native/hidden coverage、全候选 parallel evidence、API terminal coverage 和 run-local startup failure circuit breaker。
+
+新 run 的推荐流程：
+
+```bash
+cd /home/wangtianyi/DyConGlobal
+.venvs/runner/bin/dycon config-check
+.venvs/runner/bin/dycon catalog-check
+.venvs/runner/bin/dycon skillsbench dependencies-verify \
+  runtime/dependency-snapshots/openhands-startup-safe-v2-20261030
+
+# 使用已审核的 SkillsBench snapshot/profile；run 创建时冻结它们
+.venvs/runner/bin/dycon run create RUN_ID --operation rollout \
+  --repeat-count 3 --task-id TASK_ID_1 --task-id TASK_ID_2
+.venvs/runner/bin/dycon skillsbench preflight RUN_ID --workers 4
+.venvs/runner/bin/dycon run start RUN_ID --detach
+.venvs/runner/bin/dycon run wait RUN_ID
+.venvs/runner/bin/dycon run status RUN_ID
+.venvs/runner/bin/dycon skillsbench audit RUN_ID
+.venvs/runner/bin/dycon artifact verify RUN_ID
+```
+
+`preflight --workers 4` 会对所选 task 建立真实 BenchFlow sandbox，检查镜像、离线 agent runtime、非 root terminal/ACP、skill visibility、compose image identity 和 cleanup；它不发 LLM 请求。`run start/resume` 会再次通过同一内部 gate。只有在 preflight、真实 agent/tool smoke、逐 step audit 和 artifact verify 均通过后，才扩大到完整批量。
+
+若改变 model/tokenizer、dependency publication、profile、generation budget、capture 或 serving placement，应创建新 run；resume 不重新读取根 YAML。`run cancel` 后必须检查 `cleanup_complete=true`，再进行 retry/resume。`run retry-failed` 使用新的 request/attempt ID，不覆盖旧证据。
+
+本次验证 run 的真实规模如下：
+
+| Run | 任务 × repetition | 用途 | 结果 |
+|---|---:|---|---|
+| `skillsbench-agent75-qualified-thinkclose-20261030` | 75×3 | 原问题 run | 已停止，保留历史证据 |
+| `skillsbench-startup-qualify-v2-20261030` | 1×1 | GPU 2、3 baseline/长 reasoning | capture complete；reasoning loop/协议失败证据独立保留 |
+| `skillsbench-capture-loops-v4-20261030` | 4×1 | GPU 2、3 capture、循环和逐 step | 4 个 attempt 完成；reasoning loop 早停；audit/artifact verify 通过 |
+| `skillsbench-parallel-v5-20261030` | 1×1，2 branches | GPU 2、3 parallel candidate | 8 canonical steps、16 candidate native receipts；audit/artifact verify 通过 |
+| `skillsbench-unified-repair-env75-v4-20261030` | 75×1 | 全任务环境预检 | 75/75 environment receipts 通过；未执行 LLM rollout |
+| `skillsbench-offline-startup-v6-20261030` | 1×oracle | offline install/oracle | 1/1 valid oracle；不代表 OpenHands rollout |
+| `skillsbench-noskill-startup-v6-20261030` | 1×preflight | no-skill 可见性 | environment preflight 通过 |
+
+因此，修复后的新验证 run **不是 75×3**。`75×3` 只属于原问题 run 的冻结计划；本轮修复已经完成 75-task 环境覆盖，但尚未启动修复后的完整 75×3 agent rollout。完整 75×3 必须在新的 run 中创建，且先通过 G0–G4 gate。
+
+`skillsbench audit` 当前生成 schema-4 receipt：逐 step 分母是全部 canonical assistant responses（含最终回答），并列出 missing、duplicate、unexpected、unfinished、API terminal coverage；parallel 还单独列出所有候选和未选工具执行情况。官方 verifier 的 resolved truth 与基础设施/capture truth 分开保存。

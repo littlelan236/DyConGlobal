@@ -22,7 +22,8 @@ def retry_index(run):
             attempts = result.setdefault(item['sample_key'], {})
             for old in item['superseded_attempts']:
                 previous = attempts.setdefault(old['attempt_id'], old)
-                if previous != old:
+                identity = ('attempt_id', 'outcome_sha256', 'source_path', 'source_sha256')
+                if any(previous.get(k) != old.get(k) for k in identity):
                     raise ValueError('Conflicting operator retry attempt identity')
     return result
 

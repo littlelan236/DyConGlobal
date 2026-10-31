@@ -13,9 +13,10 @@ from pathlib import Path
 
 from application.execution.evidence import RunEvidence
 from difficulty.datasets.selection import select_run
-from core.io import identifier, now, owned_path, read_json, sha256, write_json
+from core.io import artifact_reference, identifier, now, owned_path, read_json, sha256, write_json
 from core.locking import file_lock
 from difficulty.datasets.paths import dataset_directory
+from difficulty.datasets.identity import benchmark as row_benchmark, task_descriptor
 from enrichment.online_trace import publication_directory
 
 
@@ -43,7 +44,7 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
     index_path = dataset_directory({'project_root': str(root)}, index_id) / 'index.json'
     index = read_json(index_path)
     trace = publication_directory(root, source_run, index.get('publication_id'))
-    if owned_path(root, index.get('label_root', str(trace.relative_to(root)))) != trace:
+    if owned_path(root, index.get('label_root', artifact_reference(root, trace))) != trace:
         raise ValueError('Online index label root differs from its named publication')
     if index['schema_version'] != 3 or index['dataset_id'] != source_run:
         raise ValueError('Requires a source-run schema 3 online index')
@@ -91,23 +92,33 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
             if sha256(path) != row['trajectory_sha256']:
                 raise ValueError('Resolved canonical trajectory checksum mismatch')
             trajectory = read_json(path)
-            if trajectory.get('info', {}).get('exit_status') != 'Submitted':
-                raise ValueError('Resolved source is not a submitted canonical trajectory')
+            workspace_subject = row.get('evaluation_subject', {}).get('kind') == 'workspace'
+            expected_terminal = 'AgentCompleted' if workspace_subject else 'Submitted'
+            if trajectory.get('info', {}).get('exit_status') != expected_terminal:
+                raise ValueError('Resolved source does not have its benchmark terminal state')
             steps = [i for i, message in enumerate(trajectory['messages']) if message.get('role') == 'assistant']
             steps_by_id[rid] = steps
             evaluation = catalog['evaluations'][row['selected_evaluation_id']]
             outcome = evaluation['outcomes'][rid]
             report = owned_path(root, evaluation['report_path'])
+            digest_key = 'subject_sha256' if workspace_subject else 'patch_sha256'
             if (outcome['status'] != 'completed' or outcome['resolved'] is not True
-                    or outcome['patch_sha256'] != row['patch_sha256']
+                    or outcome.get(digest_key) != row.get(digest_key)
                     or sha256(report) != evaluation['report_sha256']):
-                raise ValueError('Resolved evaluation must bind the exact patch and report')
+                raise ValueError('Resolved evaluation must bind the exact subject and report')
             source_files[str(report)] = evaluation['report_sha256']
-            rollouts[rid] = {**row, 'rollout_id': rid, 'repo': task['repo'],
-                'instance_id': task['instance_id'], 'base_commit': task['base_commit'],
-                'canonical_exit_status': 'Submitted', 'canonical_valid_assistant_steps': len(steps),
+            descriptor = task_descriptor({**task, **row,
+                'benchmark_revision': task.get('revision') or row.get('revision'),
+                'task_package_sha256': task.get('instance', {}).get('package_sha256')})
+            rollouts[rid] = {**row, **descriptor, 'rollout_id': rid,
+                'benchmark': row_benchmark(task), 'agent': row.get('agent', 'unknown'),
+                'canonical_exit_status': expected_terminal, 'canonical_valid_assistant_steps': len(steps),
                 'source_kind': 'online_close', 'hidden_root': index['hidden_root'],
-                'source_files': {str(report): evaluation['report_sha256']}}
+                'source_files': {str(report): evaluation['report_sha256']},
+                'submission_status': 'submitted'}
+            if workspace_subject:
+                rollouts[rid]['task_package_sha256'] = task['instance']['package_sha256']
+                rollouts[rid]['evaluation_subject_sha256'] = row['subject_sha256']
             if label_normalization == 'trajectory_fraction':
                 rollouts[rid]['total_reasoning_tokens'] = reasoning_totals.get(rid, 0)
         for event in index['samples']:
@@ -138,10 +149,13 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
                 raise ValueError('Remaining-step label differs from canonical action suffix')
             if event['anchor'] != 'think_close' or event['alignment_status'] != 'exact':
                 raise ValueError('Requires exact action-close hidden evidence')
-            sample = {**event, 'repo': row['repo'], 'instance_id': row['instance_id'],
-                'source_kind': row['source_kind'], 'task_group': row['repo'] + '::' + row['instance_id'],
-                'agent_step': step, 'occurrence': 0, 'endpoint': 'submission',
-                'submission_status': 'submitted', 'both_targets_available': True,
+            sample = {**event, **{k: row[k] for k in ('benchmark', 'agent', 'revision', 'repo', 'instance_id')
+                                  if k in row},
+                'source_kind': row['source_kind'], 'task_group': row['task_group'],
+                'agent_step': step, 'occurrence': 0,
+                'endpoint': 'agent_terminal' if workspace_subject else 'submission',
+                'submission_status': 'completed' if workspace_subject else 'submitted',
+                'both_targets_available': True,
                 'hidden_root': index['hidden_root'], 'hidden_sha256': event['sha256'],
                 'remaining_steps_to_submission': event['labels']['remaining_steps'],
                 'remaining_reasoning_tokens_to_submission': event['labels']['remaining_reasoning_tokens']}
@@ -181,6 +195,8 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
         dataset_meta = {
             'schema_version': 1, 'dataset_id': dataset_id, 'kind': 'submission_training_selection',
             'source_run_ids': [source_run], 'eligibility': 'resolved_only',
+            'benchmark': row_benchmark(next(iter(catalog['tasks'].values()))) if catalog['tasks'] else 'unknown',
+            'agent': next((r.get('agent', 'unknown') for r in rollouts.values()), 'unknown'),
             'feature_schema': 'public-hidden-last-token-v1', 'anchor': 'think_close',
             'label_fields': ['remaining_steps_to_submission', 'remaining_reasoning_tokens_to_submission'],
         }

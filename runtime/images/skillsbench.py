@@ -19,6 +19,7 @@ import socket
 import subprocess
 import threading
 import time
+import uuid
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -76,7 +77,7 @@ def _inside(root, relative):
 
 
 @contextmanager
-def build_proxy(cfg, state):
+def build_proxy(cfg, state, *, managed_role=None):
     """Own a byte-transparent socat forwarder only during image preparation."""
     options = cfg['skillsbench_images']
     if not options.get('manage_build_proxy'):
@@ -97,8 +98,19 @@ def build_proxy(cfg, state):
     state.mkdir(parents=True, exist_ok=True)
     args = [executable, f'TCP4-LISTEN:{listen.port},bind={listen.hostname},reuseaddr,backlog=1024,fork',
             f'TCP4:{upstream.hostname}:{upstream.port}']
+    launch_args=args
+    attempt_id=os.environ.get('DYCON_EXECUTION_ATTEMPT')
+    execution_run=os.environ.get('DYCON_EXECUTION_RUN')
+    if managed_role and attempt_id and execution_run:
+        import sys
+        resource='network-proxy-'+uuid.uuid4().hex
+        attempt=Path(execution_run)/'execution/attempts'/attempt_id
+        write_json(attempt/'spawn-intents'/(resource+'.json'),
+                   {'resource_id':resource,'role':managed_role,'created_at':now()})
+        launch_args=[sys.executable,'-m','application.execution.process_gate','--role',managed_role,
+                     execution_run,attempt_id,resource,*args]
     with (state / 'proxy.log').open('a') as log:
-        process = subprocess.Popen(args, stdout=log, stderr=log, start_new_session=True)
+        process = subprocess.Popen(launch_args, stdout=log, stderr=log, start_new_session=True)
         receipt = {'pid': process.pid, 'owner_pid': os.getpid(), 'args': args,
                    'listen': options['build_proxy'], 'upstream': options['host_proxy'],
                    'started_at': now(), 'active': True}

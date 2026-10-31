@@ -7,6 +7,7 @@ from pathlib import Path
 from core.io import hash_json, identifier, now, read_json, sha256, write_json
 from core.locking import file_lock
 from difficulty.receipts import verify_receipt
+from difficulty.datasets.identity import benchmark, task_group, task_key, validate_same_task
 
 
 def compose_datasets(root, dataset_id, source_dataset_ids):
@@ -37,7 +38,10 @@ def compose_datasets(root, dataset_id, source_dataset_ids):
             raise ValueError(f"Source dataset is empty: {source_id}")
         if {row["rollout_id"] for row in source_samples} != {row["rollout_id"] for row in source_rollouts}:
             raise ValueError(f"Source samples/rollouts disagree: {source_id}")
+        source_dataset = read_json(source / "dataset.json") if (source / "dataset.json").is_file() else {}
         for row in source_rollouts:
+            row.setdefault("benchmark", source_dataset.get("benchmark", "swebench"))
+            row.setdefault("agent", source_dataset.get("agent", "unknown"))
             rid = row["rollout_id"]
             if rid in rollout_ids:
                 raise ValueError(f"Duplicate rollout across source datasets: {rid}")
@@ -49,7 +53,11 @@ def compose_datasets(root, dataset_id, source_dataset_ids):
             if sid in sample_ids:
                 raise ValueError(f"Duplicate sample across source datasets: {sid}")
             sample_ids.add(sid)
-            samples.append(row)
+            producer = next(r for r in source_rollouts if r['rollout_id'] == row['rollout_id'])
+            if row.get('benchmark', producer['benchmark']) != producer['benchmark']:
+                raise ValueError('Sample benchmark differs from its authoritative rollout')
+            samples.append({**row, 'benchmark': producer['benchmark'],
+                            'agent': row.get('agent', producer.get('agent', 'unknown'))})
         eligibilities.add(receipt.get("eligibility", "all_eligible"))
         run_ids = {row["run_id"] for row in source_rollouts if row.get("run_id")}
         run_ids.update(receipt.get("source_run_ids", []))
@@ -66,11 +74,17 @@ def compose_datasets(root, dataset_id, source_dataset_ids):
     fingerprints = {row['model_fingerprint'] for row in rollouts if row.get('model_fingerprint')}
     if len(fingerprints) > 1:
         raise ValueError('Cannot compose incompatible hidden model fingerprints')
-    task_commits = {}
+    tokenizers = {row['tokenizer_fingerprint'] for row in samples if row.get('tokenizer_fingerprint')}
+    if len(tokenizers) > 1:
+        raise ValueError('Cannot compose incompatible tokenizer fingerprints')
+    by_task = {}
     for row in rollouts:
-        task = (row['repo'], row['instance_id'])
-        if task_commits.setdefault(task, row['base_commit']) != row['base_commit']:
-            raise ValueError('Same task has conflicting base commits across datasets')
+        task = task_key(row)
+        by_task.setdefault(task, []).append(row)
+    for rows in by_task.values():
+        validate_same_task(rows)
+    source_benchmarks = sorted({benchmark(row) for row in rollouts})
+    source_agents = sorted({row.get("agent", "unknown") for row in rollouts})
 
     destination = root / "difficulty/datasets" / dataset_id
     with file_lock(root / "state/difficulty-dataset-locks" / f"{dataset_id}.lock", nonblocking=True):
@@ -87,12 +101,16 @@ def compose_datasets(root, dataset_id, source_dataset_ids):
         write_json(destination / "summary.json", {
             "dataset_id": dataset_id, "source_datasets": source_dataset_ids,
             "source_runs": sorted({run for source in sources for run in source["source_run_ids"]}),
-            "rollouts": len(rollouts), "tasks": len({row["task_group"] for row in samples}),
+            "rollouts": len(rollouts), "tasks": len({task_group(row) for row in rollouts}),
             "samples": len(samples), "eligibility": sorted(eligibilities),
+            "source_benchmarks": source_benchmarks, "source_agents": source_agents,
             "source_kinds": dict(Counter(row.get("source_kind", "unknown") for row in samples)),
         })
         write_json(destination / "dataset.json", {
             "schema_version": 1, "dataset_id": dataset_id, "kind": "submission_training_selection",
+            "benchmark": source_benchmarks[0] if len(source_benchmarks) == 1 else "mixed",
+            "agent": source_agents[0] if len(source_agents) == 1 else "mixed",
+            "source_benchmarks": source_benchmarks, "source_agents": source_agents,
             "sample_order_sha256": hash_json([row["sample_id"] for row in samples]),
             "feature_schema": "public-hidden-last-token-v1", "source_datasets": sources,
             "label_fields": ["remaining_steps_to_submission", "remaining_reasoning_tokens_to_submission"],

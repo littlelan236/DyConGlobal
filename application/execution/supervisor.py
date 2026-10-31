@@ -111,7 +111,7 @@ def _resources(run, attempt, cancelled):
         if (record.get('run_id') != run.name or record.get('execution_attempt_id') != attempt.name
                 or record.get('project_root') != str(run.parent.parent) or record.get('managed') is not True):
             raise RuntimeError('Resource ownership differs from execution')
-        if record.get('role') != 'serving' or record.get('pgid') != record.get('pid') or record.get('sid') != record.get('pid'):
+        if record.get('role') not in {'serving','network-proxy'} or record.get('pgid') != record.get('pid') or record.get('sid') != record.get('pid'):
             raise RuntimeError('Resource is not an isolated managed serving process')
         ack = path.with_name(path.stem + '.ack.json')
         if not ack.exists():

@@ -20,12 +20,14 @@ from rollout.parallel import RANDOM_SELECTION_MODE, baseline_selection_seed, ran
 from runtime.serving.parallel import artifact_contract
 
 
-def validate_selection(summary, generation_seed):
+def validate_selection(summary, generation_seed, parallel_options=None):
     """Audit a frozen winner after decoding and online scoring have finished."""
     from rollout.loop_escape import validate_loop_escape_evidence
 
     validate_loop_escape_evidence(summary)
     candidates = summary["candidates"]
+    if parallel_options is not None and summary.get("branch_count") != parallel_options.get("branch_count"):
+        raise ValueError("Parallel decision branch count differs from frozen run")
     mode = summary["selection_mode"]
     selected = summary["selected_branch_id"]
     if mode == "minimum_score":
@@ -36,10 +38,10 @@ def validate_selection(summary, generation_seed):
             expected = min(pool, key=lambda c: c["branch_id"])["branch_id"]
         else:
             expected = min(pool, key=lambda c: (c["score"], c["branch_id"]))["branch_id"]
-    elif mode == "parallel_consensus":
-        from rollout.consensus import validate_consensus_evidence
+    elif mode in {"parallel_consensus", "parallel_enthophy"}:
+        from rollout.consensus import consensus_options, validate_consensus_evidence
 
-        validate_consensus_evidence(summary)
+        validate_consensus_evidence(summary, consensus_options(parallel_options) if parallel_options else None)
         expected = selected
     elif mode == RANDOM_SELECTION_MODE:
         ids = sorted(c["branch_id"] for c in candidates if c.get("selection_eligible"))
@@ -66,7 +68,8 @@ def validate_selection(summary, generation_seed):
 
 def validate_parallel_queries(cfg, run_id, factory, runtime):
     repetitions = cfg["parallel"]["validation_repetitions"]
-    out = Path(cfg["project_root"]) / "runs" / run_id / "startup/parallel-validation"
+    startup = Path(runtime.get("startup_output", Path(cfg["project_root"]) / "runs" / run_id / "startup"))
+    out = startup / "parallel-validation"
     out.mkdir(parents=True, exist_ok=False)
     controller = runtime["capture_controller"]
     inventory = runtime["capture_token_inventory"]
@@ -89,7 +92,7 @@ def validate_parallel_queries(cfg, run_id, factory, runtime):
     case_lock = threading.Lock()
 
     def run_case(repeat, mode, single, selection, branches):
-        sid = f"startup-bench-{run_id}-{repeat}-{mode}"
+        sid = f"startup-bench-{run_id}-{repeat}-{mode}" + runtime.get("startup_suffix", "")
         md = capture_request_metadata(sid, "startup-benchmark", run_id, sid, 0,
             cfg["capture"]["anchors"], newline_token_ids=inventory["newline_token_ids"],
             close_token_ids=inventory["close_token_ids"],
@@ -142,7 +145,7 @@ def validate_parallel_queries(cfg, run_id, factory, runtime):
                     np.testing.assert_allclose(online, offline, rtol=1e-10, atol=1e-10)
                     score_errors.append(abs(online - offline))
             if selection is None:
-                selection_audit = validate_selection(summary, cfg["generation"]["seed"])
+                selection_audit = validate_selection(summary, cfg["generation"]["seed"], cfg.get("parallel"))
             tokens = summary["total_usage"]["completion_tokens"]
         else:
             tokens = message["extra"]["response"]["usage"]["completion_tokens"]

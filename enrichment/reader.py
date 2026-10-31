@@ -6,10 +6,13 @@ from core.io import read_json
 
 
 class TrajectoryReader:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, hydrate_responses: bool = True):
         self.path = Path(path)
         self.data = read_json(self.path)
         self.messages = self.data.get("messages", [])
+        if not hydrate_responses:
+            # Compact canonical responses retain usage; reports need no native token arrays.
+            return
         from hidden.artifacts import read_request, response_records
 
         for _, message, response in response_records(self.data):
@@ -78,6 +81,11 @@ class TrajectoryReader:
             yield {"message_index": index, "response": response, "malformed": False}
 
     def prepared_prefix(self, message_index: int) -> list[dict]:
+        if self.data.get("agent") == "openhands":
+            request = self.messages[message_index].get("extra", {}).get("request", {})
+            if not isinstance(request.get("messages"), list):
+                raise ValueError("OpenHands canonical request prefix is unavailable")
+            return request["messages"]
         # OpenAI text-only runtime: no cache-control or multimodal rewriting enabled.
         prefix = [{k: v for k, v in m.items() if k != "extra"} for m in self.messages[:message_index]]
         if any(m.get("role") == "exit" for m in prefix):

@@ -83,6 +83,10 @@ def _experiment_checkpoint(directory, target, fit_scope, fingerprint, project_ro
             raise ValueError("Frozen dataset-owned split changed")
     elif hash_json(read_json(directory / "split.json")) != experiment["split_sha256"]:
         raise ValueError("Frozen experimental split changed")
+    fit_provenance = None
+    if experiment.get('dataset_id') and experiment.get('split_id'):
+        from difficulty.training.provenance import fit_sources
+        fit_provenance = fit_sources(root, experiment['dataset_id'], experiment['split_id'], scope)
     return model, {
         "experiment": str(directory), "selection_metric": "validation_pooled_r2",
         "layer": winner["layer"], "alpha": winner["alpha"], "fit_scope": scope,
@@ -90,6 +94,7 @@ def _experiment_checkpoint(directory, target, fit_scope, fingerprint, project_ro
         "training_receipt_present": (directory / "receipt.json").is_file(),
         "training_completion": "receipt_present" if (directory / "receipt.json").is_file()
         else "numerical_artifacts_only_no_training_completion_receipt",
+        "training_sources": fit_provenance,
     }
 
 
@@ -202,6 +207,10 @@ def publish_predictor(cfg, predictor_id, *, experiment=None, checkpoint=None,
                      "source_checkpoint": str(checkpoint), "source_checkpoint_sha256": sha256(checkpoint),
                      "provenance": provenance,
                      "files": {p.name: sha256(p) for p in stage.iterdir()}}
+            training_sources=provenance.get('training_sources') or {}
+            tokenizer_fingerprints=training_sources.get('tokenizer_fingerprints') or []
+            if len(tokenizer_fingerprints)==1:
+                value['tokenizer_fingerprint']=tokenizer_fingerprints[0]
             write_json(stage / "manifest.json", value)
             contract = artifact_contract(stage / "manifest.json", model_fingerprint=cfg["model"]["fingerprint"])
             module, name = loader.split(":")

@@ -14,6 +14,12 @@ TARGETS = DEFAULT_TARGETS + (
     "submission_remaining_reasoning_tokens_linear",
     "submission_remaining_steps_fraction",
     "submission_remaining_reasoning_tokens_fraction",
+    "success_remaining_steps_linear",
+    "success_remaining_steps_log1p",
+    "success_remaining_reasoning_tokens_linear",
+    "success_remaining_reasoning_tokens_log1p",
+    "success_remaining_steps_fraction",
+    "success_remaining_reasoning_tokens_fraction",
 )
 LABELS = {
     'submission_remaining_steps_linear': 'remaining_steps_to_submission',
@@ -22,6 +28,12 @@ LABELS = {
     'submission_remaining_reasoning_tokens_log1p': 'remaining_reasoning_tokens_to_submission',
     'submission_remaining_steps_fraction': 'remaining_steps_fraction',
     'submission_remaining_reasoning_tokens_fraction': 'remaining_reasoning_tokens_fraction',
+    'success_remaining_steps_linear': 'remaining_steps_to_success',
+    'success_remaining_steps_log1p': 'remaining_steps_to_success',
+    'success_remaining_reasoning_tokens_linear': 'remaining_reasoning_tokens_to_success',
+    'success_remaining_reasoning_tokens_log1p': 'remaining_reasoning_tokens_to_success',
+    'success_remaining_steps_fraction': 'remaining_steps_fraction_to_success',
+    'success_remaining_reasoning_tokens_fraction': 'remaining_reasoning_tokens_fraction_to_success',
 }
 
 

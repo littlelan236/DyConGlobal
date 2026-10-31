@@ -8,7 +8,7 @@ from pathlib import Path
 
 from application.execution.evidence import RunEvidence
 from core.io import hash_json, now, read_json, update_status, write_json
-from core.locking import exclusive_run
+from core.locking import exclusive_evaluation
 from runtime.containers.factory import ContainerFactory, TaskContext
 from runtime.containers.dependencies import classify_dependency_failure, from_exception, record_dependency_failure
 
@@ -182,19 +182,29 @@ def install_harness_adapter(cfg: dict, factory: ContainerFactory, rows: list[dic
     return official
 
 
-@exclusive_run
-def evaluate(cfg, run, eval_id, gold=False, factory=None):
+@exclusive_evaluation
+def evaluate(cfg, run, eval_id, gold=False, factory=None, incremental=False):
     from core.io import owned_path, sha256
 
     output = Path(run) / "harness"
+    if incremental:
+        output = output / "evaluations" / eval_id
     # Snapshot selection is authoritative even if the live manifest has since changed.
     selected = cfg.get("selection")
+    if incremental and selected:
+        selected = {**selected, "rollouts": {rid: row for rid, row in selected["rollouts"].items()
+                    if row.get("evaluation_status") != "completed"}}
+        selected["rollout_ids"] = sorted(selected["rollouts"])
+        selected["tasks"] = {row["task_key"]: selected["tasks"][row["task_key"]]
+                              for row in selected["rollouts"].values()}
     if not selected or not selected.get("rollout_ids"):
         raise ValueError("Evaluation requires a run snapshot with explicit rollout selection")
     output.mkdir(parents=True, exist_ok=True)
     if (output / "summary.json").exists():
         raise FileExistsError(f"Harness output already exists: {output}")
-    cfg = {**cfg, "evaluation_run_id": run.name}
+    import hashlib
+    evaluation_owner = "harness-" + hashlib.sha256(f"{run.name}:{eval_id}".encode()).hexdigest()[:24]
+    cfg = {**cfg, "evaluation_run_id": evaluation_owner}
     write_json(output / "resolved-config.json", cfg)
     rows = {}
     for rid, row in selected["rollouts"].items():
@@ -299,45 +309,69 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None):
                 if result.get('failure_type') == 'dependency_error':
                     update_status(output / 'status.json', 'evaluation',
                         dependency_failure_count=sum(x.get('failure_type') == 'dependency_error' for x in outcomes.values()))
-        resolved = sum(row["resolved"] is True for row in outcomes.values())
+        # Incremental evaluations must carry forward all prior outcomes and
+        # source rows. Otherwise a later batch would hide earlier resolved
+        # trajectories from run-level evidence and cross-run comparison.
+        cumulative_outcomes = dict(outcomes)
+        historical_rows = {}
+        if incremental:
+            evaluation_root = output.parent
+            for summary_path in evaluation_root.glob("*/summary.json"):
+                if summary_path.parent == output:
+                    continue
+                try:
+                    prior = read_json(summary_path)
+                    cumulative_outcomes = {**prior.get("outcomes", {}), **cumulative_outcomes}
+                    resolved_cfg = summary_path.parent / "resolved-config.json"
+                    if resolved_cfg.exists():
+                        prior_cfg = read_json(resolved_cfg)
+                        prior_sel = prior_cfg.get("selection", {})
+                        historical_rows.update(prior_sel.get("rollouts", {}))
+                except (OSError, ValueError, TypeError):
+                    continue
+        resolved = sum(row["resolved"] is True for row in cumulative_outcomes.values())
         summary = {
             "evaluation_id": eval_id,
             "gold": gold,
-            "requested": len(outcomes),
+            "incremental": bool(incremental),
+            "requested": len(cumulative_outcomes),
             "resolved": resolved,
-            "network_retries": sum(max(0, len(row.get("attempts", [])) - 1) for row in outcomes.values()),
-            "resolve_rate": resolved / len(outcomes),
-            "graded": sum(row["status"] == "completed" for row in outcomes.values()),
-            "failure_counts": dict(Counter(row["failure_type"] for row in outcomes.values()
+            "network_retries": sum(max(0, len(row.get("attempts", [])) - 1) for row in cumulative_outcomes.values()),
+            "resolve_rate": resolved / len(cumulative_outcomes) if cumulative_outcomes else None,
+            "graded": sum(row["status"] == "completed" for row in cumulative_outcomes.values()),
+            "failure_counts": dict(Counter(row["failure_type"] for row in cumulative_outcomes.values()
                                             if row.get("failure_type"))),
-            "dependency_failure_count": sum(row.get('failure_type') == 'dependency_error' for row in outcomes.values()),
-            "dependency_reason_counts": dict(Counter(row['dependency_failure']['reason'] for row in outcomes.values()
-                                                      if row.get('dependency_failure'))),
-            "outcomes": outcomes,
+            "dependency_failure_count": sum(row.get("failure_type") == "dependency_error" for row in cumulative_outcomes.values()),
+            "dependency_reason_counts": dict(Counter(row["dependency_failure"]["reason"] for row in cumulative_outcomes.values()
+                                                      if row.get("dependency_failure"))),
+            "outcomes": cumulative_outcomes,
             "finished_at": now(),
         }
         write_json(output / "summary.json", summary)
         if not gold:
             evidence = RunEvidence(cfg["project_root"], run.name)
             with evidence.transaction() as data:
-                for rid, row in selected["rollouts"].items():
+                all_rows = {**historical_rows, **selected["rollouts"]}
+                all_tasks = dict(selected.get("tasks", {}))
+                for row in historical_rows.values():
+                    task_key = row["task_key"]
+                    if task_key not in all_tasks:
+                        prior_cfg = next((read_json(p.parent / "resolved-config.json") for p in (output.parent).glob("*/summary.json") if p.parent / "resolved-config.json" in [p.parent / "resolved-config.json"]), None)
+                        if prior_cfg:
+                            all_tasks.update(prior_cfg.get("selection", {}).get("tasks", {}))
+                for rid, row in all_rows.items():
+                    if rid not in cumulative_outcomes:
+                        continue
                     if rid not in data["rollouts"]:
-                        # An evaluation run holds explicit, immutable source references.
-                        imported = dict(row, run_id=run.name, evaluation_status="not_run",
-                                        resolved=None, selected_evaluation_id=None)
+                        imported = dict(row, run_id=run.name, evaluation_status="not_run", resolved=None, selected_evaluation_id=None)
                         imported["provenance"] = {**row.get("provenance", {}), "source_run_id": row["run_id"]}
                         data["rollouts"][rid] = imported
-                        data["tasks"][row["task_key"]] = selected["tasks"][row["task_key"]]
+                        if row["task_key"] in all_tasks:
+                            data["tasks"][row["task_key"]] = all_tasks[row["task_key"]]
             evidence.record_evaluation(
-                eval_id,
-                output.relative_to(Path(cfg["project_root"])) / "summary.json",
-                outcomes,
-                {
-                    "harness": "swebench==4.1.0",
-                    "run_id": run.name,
-                    "config_hash": cfg["config_hash"],
-                    "source_run_id": selected.get("source_run_id", run.name),
-                },
+                eval_id, output / "summary.json", cumulative_outcomes,
+                {"harness": "swebench==4.1.0", "run_id": run.name,
+                 "config_hash": cfg["config_hash"], "source_run_id": selected.get("source_run_id", run.name)},
             )
         update_status(
             output / "status.json", "complete" if summary["graded"] == summary["requested"] else "incomplete",
@@ -349,7 +383,7 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None):
         raise
     finally:
         try:
-            factory.cleanup_owned(run.name)
+            factory.cleanup_owned(evaluation_owner)
         finally:
             if official is not None:
                 official.dycon_restore()

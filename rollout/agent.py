@@ -9,6 +9,7 @@ from minisweagent.exceptions import FormatError, LimitsExceeded
 from pydantic import Field
 
 from core.io import hash_json, write_json
+from rollout.step_loop import repeated_suffix
 
 
 class DurableAgentConfig(AgentConfig):
@@ -60,17 +61,10 @@ class DurableAgent(DefaultAgent):
         if repeats is None:
             return message
         self._loop_history.append(_step_fingerprint(message))
-        history = list(self._loop_history)
-        for period in range(1, self.config.loop_max_period + 1):
-            size = repeats * period
-            if len(history) < size or history[-size:] != history[-period:] * repeats:
-                continue
-            self._loop_hit = {
-                "period": period, "repeats": repeats,
-                "start_step": step - size + 1, "end_step": step,
-                "action_executed": False,
-                "match_policy": "exact_reasoning_content_and_actions_v1",
-            }
+        hit = repeated_suffix(self._loop_history, repeats, self.config.loop_max_period, step,
+                              match_policy='exact_reasoning_content_and_actions_v1')
+        if hit is not None:
+            self._loop_hit = hit
             message.setdefault("extra", {}).update(action_executed=False, loop_detection=self._loop_hit)
             # Native formatting pads empty outputs with explicit not-executed
             # observations. Preserve tool-call pairing without running tools.

@@ -122,8 +122,14 @@ def test_close_only_capture_does_not_run_newline_mixed_diagnostic():
     assert result == {"status": "skipped", "reason": "requires_reasoning_newline_capture"}
 
 
-def test_parallel_plugin_drains_before_score_results():
+def test_parallel_plugin_results_use_independent_lane_and_periodic_drain():
+    import ast
     source = Path(__file__).parents[1] / "runtime/serving/vllm_plugin.py"
-    text = source.read_text()
-    assert 'if action == "results":\n                    # A completed generate' in text
-    assert "await self.drain_once()" in text
+    tree = ast.parse(source.read_text())
+    endpoint = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == 'parallel')
+    result_branch = next(n for n in ast.walk(endpoint) if isinstance(n, ast.If)
+        and isinstance(n.test, ast.Compare) and any(isinstance(c, ast.Constant) and c.value == 'results'
+                                                   for c in n.test.comparators))
+    calls = [ast.unparse(n.func) for n in ast.walk(result_branch) if isinstance(n, ast.Call)]
+    assert 'self.result_lane.run' in calls
+    assert 'self.drain_once' not in calls

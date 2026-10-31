@@ -139,7 +139,7 @@ def _finish_attempt(cfg, run_id, task, sample, context, out, runtime, state,
                 capture_status = 'complete'
                 errors = []
             elif capture_client is not None:
-                capture_client.timeout = cfg['capture']['export']['upload_max_elapsed_seconds'] + cfg['capture']['finalize_seconds']
+                capture_client.timeout = cfg['capture'].get('finalize_request_seconds') or (cfg['capture']['export']['upload_max_elapsed_seconds'] + cfg['capture']['finalize_seconds'])
                 finalized = capture_client.finalize(
                     capture_session_id, rollout_id=rid, trajectory_path=str(canonical),
                     trajectory_sha256=sha256(canonical), model_fingerprint=cfg['model']['fingerprint'])
@@ -182,6 +182,10 @@ def _finish_attempt(cfg, run_id, task, sample, context, out, runtime, state,
 
 def _execute_attempt(cfg, run_id, task, factory, runtime, sample, context, out):
     """One clean environment, agent, model and capture session per attempt."""
+    if task.get("benchmark") == "skillsbench":
+        from runtime.agents.skillsbench import execute_attempt
+
+        return execute_attempt(cfg, run_id, task, runtime, sample, context, out, factory)
     from hidden.backends.vllm.online import CaptureClient, capture_request_metadata
     from rollout.agent import DurableAgent
     from rollout.model import make_model
@@ -295,12 +299,22 @@ def _execute_attempt(cfg, run_id, task, factory, runtime, sample, context, out):
                     try:
                         import requests
                         endpoint = cfg['serving']['base_url'].removesuffix('/v1').rstrip('/')
-                        flushed = requests.post(endpoint + '/dycon/capture/engine/flush', timeout=cfg['capture']['finalize_seconds'])
+                        flushed = requests.post(endpoint + '/dycon/capture/engine/flush',
+                            json={'session_id': capture_session_id},
+                            timeout=cfg['capture'].get('flush_timeout_seconds') or cfg['capture']['finalize_seconds'])
                         flushed.raise_for_status()
                         if flushed.json().get('failures'):
                             raise RuntimeError('Capture drain failed: ' + str(flushed.json()['failures']))
-                        capture_client.timeout = cfg['capture']['finalize_seconds'] + cfg['capture']['control_seconds']
+                    except Exception as exc:
+                        capture_failure(exc, abort=False)
+                        capture_status = 'partial'
+                    capture_client.timeout = cfg['capture']['finalize_seconds'] + cfg['capture']['control_seconds']
+                    try:
                         capture_client.stop(capture_session_id)
+                    except Exception as exc:
+                        capture_failure(exc, abort=False)
+                        capture_status = 'partial'
+                    try:
                         capture_client.prepare(capture_session_id, path)
                         write_json(out / 'capture-prepared.json', {'session_id': capture_session_id, 'trajectory_sha256': sha256(path)})
                     except Exception as exc:
@@ -391,6 +405,9 @@ def _retry_cursor(cfg, history):
 
 def _decorate_result(cfg, sample, work, out, result, history):
     result = {**sample.as_dict(), **result}
+    assignment = out / 'serving-assignment.json'
+    if assignment.exists():
+        result['serving_assignment'] = read_json(assignment)
     result.setdefault('seed_round', 0)
     result.setdefault('effective_seed', sample.sample_seed)
     result.setdefault('disposition', disposition(cfg, result.get('exit_status')))
@@ -531,6 +548,14 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
             return {**sample.as_dict(), 'exit_status': boundary, 'disposition': 'pending'}
         # Persist retry accounting at the actual physical start, not reservation.
         runtime = {**runtime, 'retry_kind': retry_kind}
+        if 'serving_worker_id' in runtime:
+            write_json(out / 'serving-assignment.json', {
+                'run_id': run_id, 'sample_key': sample.sample_key, 'attempt_id': context['attempt_id'],
+                'execution_attempt_id': os.environ.get('DYCON_EXECUTION_ATTEMPT'),
+                'worker_id': runtime['serving_worker_id'], 'gpu': runtime['serving_worker_gpu'],
+                'base_url': runtime['serving_worker_endpoint'], 'tensor_parallel_size': 1,
+                'config_hash': cfg['config_hash'], 'assigned_at': now(),
+            })
         result = _execute_attempt(cfg, run_id, task, factory, runtime, sample, context, out)
         return _decorate_result(cfg, sample, work, out, result, history)
 
@@ -538,15 +563,21 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
 @exclusive_run
 @cancellable_run
 def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_only=False):
-    # Prevent mini-swe-agent from loading the user's unrelated global .env.
-    os.environ["MSWEA_GLOBAL_CONFIG_DIR"] = str(Path(cfg["project_root"]) / "state/miniswe-config")
-    os.environ["MSWEA_SILENT_STARTUP"] = "1"
-    if (Path(os.environ["MSWEA_GLOBAL_CONFIG_DIR"]) / ".env").exists():
-        raise ValueError(
-            "mini-swe-agent .env overrides are disabled; use config.yaml and API-key environment"
-        )
+    from core.backends import identity
+    skillsbench = identity(cfg) == ("skillsbench", "openhands")
+    if not skillsbench:
+        os.environ["MSWEA_GLOBAL_CONFIG_DIR"] = str(Path(cfg["project_root"]) / "state/miniswe-config")
+        os.environ["MSWEA_SILENT_STARTUP"] = "1"
+        if (Path(os.environ["MSWEA_GLOBAL_CONFIG_DIR"]) / ".env").exists():
+            raise ValueError(
+                "mini-swe-agent .env overrides are disabled; use config.yaml and API-key environment"
+            )
     from core.model_identity import verify_model
-    from runtime.containers.factory import ContainerFactory
+    if skillsbench:
+        from runtime.agents.skillsbench import SkillsBenchFactory
+        ContainerFactory = SkillsBenchFactory
+    else:
+        from runtime.containers.factory import ContainerFactory
     from runtime.serving.manager import ServingManager
 
     root = Path(cfg["project_root"])
@@ -612,13 +643,26 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
     verify_model(cfg)
     run = root / "runs" / run_id
     write_json(run / "process.json", {"pid": os.getpid(), "supervisor_pid": os.getppid()})
-    factory = factory or ContainerFactory(cfg)
+    factory = factory or (ContainerFactory(cfg, run_id) if skillsbench else ContainerFactory(cfg))
     outcomes = dict(settled)
     update_status(run / "status.json", "rollout")
     try:
         factory.lock_images([t["instance"] for t in selection["tasks"].values()])
-        with ServingManager(cfg, run / "serving") as serving:
-            runtime = getattr(serving, "runtime", {})
+        if skillsbench:
+            from runtime.agents.skillsbench import preflight
+            checked = preflight(root, run_id, workers=min(8, cfg['execution']['rollout_workers']))
+            write_json(run / 'validation/startup-preflight.json', checked)
+            if checked['blockers']:
+                raise ValueError('SkillsBench preflight rejected run: ' + '; '.join(checked['blockers']))
+        sharded = cfg['serving'].get('trajectory_sharding', 'none') == 'per_gpu_tp1'
+        if sharded:
+            from runtime.serving.pool import ServingPool
+            context = ServingPool(cfg, run / 'serving', run_id)
+        else:
+            context = ServingManager(cfg, run / 'serving')
+        with context as serving:
+            runtime = {} if sharded else getattr(serving, 'runtime', {})
+            worker_limit = serving.capacity if sharded else cfg['execution']['rollout_workers']
             cancellation = CURRENT.get()
             runtime['cancellation'] = cancellation
             wake = CompletionWake(cancellation)
@@ -627,6 +671,12 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
                 # Never put cancellation control onto the worker/branch executors.
                 import threading
                 def control():
+                    if sharded:
+                        errors = serving.cancel(run_id, cancellation.attempt_id)
+                        if errors:
+                            write_json(run / 'execution/attempts' / (cancellation.attempt_id or 'direct') / 'cancel-control-error.json',
+                                       {'workers': errors, 'at': now()})
+                        return
                     if runtime.get('capture_controller') is not None:
                         runtime['capture_controller'].cancel_run(run_id)
                     if cfg['serving']['management'] == 'managed' and cfg['capture']['enabled']:
@@ -643,9 +693,14 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
                 threading.Thread(target=control, name='dycon-cancel-control', daemon=True).start()
             cancellation.add_callback(cancel_runtime)
             runtime["validation_mixed"] = check_only
-            from runtime.serving.startup import check_tool_chain
-
-            check_tool_chain(cfg, run_id, next(iter(selection["tasks"].values())), factory, runtime)
+            if not skillsbench:
+                from runtime.serving.startup import check_tool_chain
+                startup_task = next(iter(selection['tasks'].values()))
+                if sharded:
+                    for worker in serving.workers:
+                        check_tool_chain(worker.cfg, run_id, startup_task, factory, {**runtime, **worker.runtime()})
+                else:
+                    check_tool_chain(cfg, run_id, startup_task, factory, runtime)
             if check_only:
                 update_status(run / "status.json", "validated")
                 return {"startup": "passed"}
@@ -662,20 +717,37 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
                 tracker.phases[item['sample_key']] = 'ready'
             tracker._write()
             stopped = None
-            with concurrent.futures.ThreadPoolExecutor(max_workers=cfg['execution']['rollout_workers']) as pool:
+            from rollout.startup_failure_gate import StartupFailureGate
+            startup_gate = StartupFailureGate(cfg['execution'].get('startup_failure_limit'))
+            reservations = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=worker_limit) as pool:
                 def fill():
                     nonlocal stopped
-                    while pending and len(running) < cfg['execution']['rollout_workers']:
+                    if stopped:
+                        return
+                    while pending and len(running) < worker_limit:
                         stopped = _boundary(run, factory)
                         if stopped:
+                            return
+                        worker = serving.acquire() if sharded else None
+                        if sharded and worker is None:
                             return
                         item = pending.popleft()
                         task = selection['tasks'][item['task_key']]
                         task_runtime = {**runtime, 'queue_wait_seconds': time.monotonic() - queued_at[item['sample_key']]}
+                        if worker is not None:
+                            task_runtime.update(worker.runtime())
                         tracker.phase(item['sample_key'], 'admission')
-                        future = pool.submit(admitted_task, cfg, run_id, item['task_key'], task, factory,
-                                             task_runtime, sample_from_item({**item, 'run_id': run_id}))
+                        try:
+                            future = pool.submit(admitted_task, cfg, run_id, item['task_key'], task, factory,
+                                                 task_runtime, sample_from_item({**item, 'run_id': run_id}))
+                        except BaseException:
+                            if worker is not None:
+                                serving.release(worker)
+                            raise
                         running[future] = item
+                        if worker is not None:
+                            reservations[future] = worker
                         future.add_done_callback(wake.notify)
 
                 fill()
@@ -695,6 +767,8 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
                         break
                     for future in finished:
                         item = running.pop(future)
+                        if sharded:
+                            serving.release(reservations.pop(future))
                         try:
                             value = future.result()
                         except Exception as exc:
@@ -702,10 +776,14 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
                                      'error': repr(exc), 'traceback': traceback.format_exc()}
                         kind = value.get('disposition') or disposition(cfg, value.get('exit_status'))
                         tracker.result(item['sample_key'], value)
+                        if startup_gate.observe(value):
+                            stopped = 'StartupFailureThreshold'
+                        if startup_gate.limit is not None:
+                            write_json(run / 'rollout/startup-failure-gate.json', startup_gate.receipt(run_id))
                         boundary = _boundary(run, factory)
                         if boundary:
                             stopped = boundary
-                        if kind in {'retry_pending', 'infrastructure_retry'} and not stopped:
+                        if kind in {'retry_pending', 'infrastructure_retry', 'admission_waiting'} and not stopped:
                             pending.append(item)
                             queued_at[item['sample_key']] = time.monotonic()
                             tracker.phase(item['sample_key'], 'ready')
@@ -761,6 +839,10 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
 
 
 def admitted_task(cfg, run_id, key, task, factory, runtime, sample=None):
+    # Per-attempt config is a derived serving route; the run's immutable snapshot
+    # and config_hash remain authoritative for all other execution semantics.
+    if 'serving_cfg' in runtime:
+        cfg = copy.deepcopy(runtime['serving_cfg'])
     run = Path(cfg['project_root']) / 'runs' / run_id
     boundary = _boundary(run, factory)
     if boundary:
@@ -769,7 +851,12 @@ def admitted_task(cfg, run_id, key, task, factory, runtime, sample=None):
     stamp = time.monotonic()
     if controller and controller.spool:
         options = cfg['capture']['export']
-        controller.spool.budget.admit(options['spool_high_watermark'], options['spool_low_watermark'],
-                                      factory.deadline.remaining(options['upload_max_elapsed_seconds']))
+        try:
+            controller.spool.budget.admit(options['spool_high_watermark'], options['spool_low_watermark'],
+                factory.deadline.remaining(cfg['capture'].get('admission_seconds') or options['upload_max_elapsed_seconds']))
+        except TimeoutError as exc:
+            # No physical attempt has started. Keep capacity waits in the queue.
+            return {**sample.as_dict(), 'exit_status': 'AdmissionWaiting',
+                    'disposition': 'admission_waiting', 'error': str(exc)}
     runtime = {**runtime, 'admission_wait_seconds': time.monotonic() - stamp}
     return run_task(cfg, run_id, key, task, factory, runtime, sample=sample)

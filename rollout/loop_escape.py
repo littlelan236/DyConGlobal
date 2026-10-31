@@ -125,7 +125,7 @@ def selection_failure(records, meta, mode, fallback_policy, consensus_config):
     if not proposed or proposed == set(meta["candidate_ids_before"]):
         return None
     eligible = [r for r in records if r["branch_id"] in proposed and r["loop_escape"]["status_before"] == "eligible"]
-    if mode == "parallel_consensus":
+    if mode in {"parallel_consensus", "parallel_enthophy"}:
         from rollout.consensus import select_consensus
 
         candidates = [SimpleNamespace(branch_id=r["branch_id"], message={}, response=SimpleNamespace(
@@ -134,7 +134,8 @@ def selection_failure(records, meta, mode, fallback_policy, consensus_config):
             candidates, {r["branch_id"]: float(r["score"]) for r in eligible},
             consensus_config.get("retention_ratio", 0.5),
             consensus_config.get("min_retained_branches", 2),
-            consensus_config.get("tie_policy", "estimator_score"))
+            consensus_config.get("tie_policy", "estimator_score"),
+            retention_rule=consensus_config.get("retention_rule"))
         if winner is None:
             return "selection_unavailable_after_filter"
     elif mode != "parallel_baseline" and not eligible and fallback_policy != "first_valid":

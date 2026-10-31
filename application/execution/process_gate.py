@@ -13,6 +13,7 @@ from core.processes import identity
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--role',choices=['serving','network-proxy'],default='serving')
     parser.add_argument('run')
     parser.add_argument('attempt_id')
     parser.add_argument('resource_id')
@@ -23,7 +24,7 @@ def main():
     resources = attempt / 'resources'
     resources.mkdir(parents=True, exist_ok=True)
     record = {**identity(os.getpid()), 'run_id': run.name, 'execution_attempt_id': args.attempt_id,
-              'project_root': str(run.parent.parent), 'role': 'serving', 'managed': True,
+              'project_root': str(run.parent.parent), 'role': args.role, 'managed': True,
               'argv': args.command, 'registered_at': now()}
     write_json(resources / (args.resource_id + '.json'), record)
     write_json(run / 'execution/resource-notification.json', {'resource_id': args.resource_id, 'at': now()})

@@ -7,6 +7,8 @@
 - 正式任务使用 `core.cli`（安装后的 `dycon`）；各任务命令、环境和产物见 `docs/ENTRYPOINTS.md`。
 - 已有统一入口时，不得自行创建临时脚本、复制 launcher、直接调用内部 runner/worker，或另起一套配置、任务选择、模型请求和产物写入逻辑。这会绕过身份校验、锁、不可变快照、恢复和 receipt，造成行为不一致。
 - 普通、capture、steering、steering+capture rollout 都通过 `dycon rollout`；只在唯一 `config.yaml` 中切换开关。正式 rollout 拒绝 `--set`，resume 使用原始快照。
+- Run 独立共识/熵策略是明确授权的例外：`dycon run create ... --parallel-config POLICY.yaml` 冻结本 run 的代表策略和熵映射，不向根 `config.yaml` 添加新策略参数；执行/resume 只读本 run 快照。见 `docs/ACTION-ENTROPY-RUN-POLICY-CN.md`。
+- 多卡独立 TP=1 轨迹调度使用 `serving.trajectory_sharding: per_gpu_tp1`，复用正式 `run create/start/status/cancel/resume`；GPU/端口列表与 `max_cpu_workers_per_gpu` 在创建时冻结。完整轨迹和其候选分支固定使用同一卡，空闲 CPU 轨迹槽位立即补发；不得另建分片 launcher。见 `docs/MULTI-GPU-TP1-CN.md`。
 - 批量历史 extraction 使用 `enrichment.scripts.launch_extraction`；queue worker 由 launcher 调度。该 launcher 固定 `anchors-20261017` 批次及 GPU 0–3，不是通用批次创建工具。
 - 诊断先查找已有 `hidden/evaluation/`、`runtime/scripts/` 工具，核对参数、硬编码范围和副作用。历史 speed-test/验收脚本不能替代生产入口。
 - `difficulty/scripts/train.sh` 是 `difficulty-train` 的正式 Bash `source` 包装，只委托统一 CLI。`difficulty/training/config.yaml` 是明确授权的 difficulty 专用配置，不改变 rollout 的根配置约定。`dycon difficulty-train` 完成配置校验、dataset/split 身份绑定、服务管理和 attempt 产物登记。`

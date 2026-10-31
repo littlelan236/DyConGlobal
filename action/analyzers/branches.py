@@ -25,6 +25,7 @@ CODE_FILES = (
     "action/datasets/trajectories.py", "action/analyzers/trajectories.py",
     "difficulty/datasets/selection.py", "application/execution/evidence.py",
     "core/action_identity.py", "core/io.py", "core/locking.py", "core/cli.py",
+    "rollout/consensus.py", "rollout/entropy.py", "rollout/loop_escape.py",
 )
 
 
@@ -139,7 +140,19 @@ def decision_record(embedded, decision, message, scope, binding, proof):
             counts = Counter(actions[str(b)] for b in retained if str(b) in actions)
             if counts != Counter({v["action"]: v["count"] for v in votes}):
                 raise ValueError("Recorded consensus votes differ from branch actions")
-    return {**binding, "decision_id": identifier(embedded["decision_id"]),
+    policy = (decision.get("consensus_config") or {}).get("representative_policy")
+    retention = ((consensus or {}).get("entropy") or {})
+    extra_policy = ({"representative_policy": policy,
+                     "retention_rule": retention.get("retention_rule"),
+                     "decision_pool_entropy": retention.get("entropy"),
+                     "decision_pool_count": retention.get("eligible_count"),
+                     "decision_keep_count": retention.get("keep_count")}
+                    if policy is not None or retention else {})
+    if extra_policy:
+        from rollout.consensus import validate_consensus_evidence
+
+        validate_consensus_evidence(decision)
+    return {**binding, **extra_policy, "decision_id": identifier(embedded["decision_id"]),
             "session_id": identifier(embedded["session_id"]), "step_id": embedded.get("step_id"),
             "branch_count": count, "retained_branch_ids": retained,
             "selected_branch_id": selected, "actions": actions, "unavailable": unavailable,
@@ -152,6 +165,10 @@ def step_statistics(record, scope, *, legacy=False):
                                  "assistant_index", "message_index", "step_id", "decision_id",
                                  "session_id", "branch_count", "selected_branch_id", "consensus_status")}
     winner = actions.get(str(record["selected_branch_id"]))
+    for key in ("representative_policy", "retention_rule", "decision_pool_entropy", "decision_pool_count",
+                "decision_keep_count"):
+        if key in record:
+            row[key] = record[key]
     for view in ("all", "retained"):
         if scope != "both" and scope != view:
             continue
@@ -222,11 +239,14 @@ def summarize(rows, trajectories, scope, *, legacy=False):
                   "steps_with_unavailable": sum(r[f"unavailable_{view}"] > 0 for r in rows),
                   "branch_count_histogram": {str(k): v for k, v in sorted(Counter(r[f"branches_{view}"] for r in rows).items())},
               } for view in views}}
-    for field, name in (("source_run_id", "by_source_run"), ("cohort", "by_cohort")):
-        groups = sorted({r[field] for r in rows if r[field] is not None})
+    dimensions = [("source_run_id", "by_source_run"), ("cohort", "by_cohort")]
+    dimensions += [(key, "by_" + key) for key in ("representative_policy", "retention_rule")
+                   if any(key in row for row in rows)]
+    for field, name in dimensions:
+        groups = sorted({r[field] for r in rows if r.get(field) is not None})
         group_keys = keys + (["delta_" + metric for metric in ENTROPY_METRICS]
                              if scope == "both" and not legacy else [])
-        result[name] = {g: {k: metric_summary([r for r in rows if r[field] == g], k) for k in group_keys}
+        result[name] = {g: {k: metric_summary([r for r in rows if r.get(field) == g], k) for k in group_keys}
                         for g in groups}
     result["trajectories_without_parallel_steps"] = sum(t["parallel_steps"] == 0 for t in trajectories)
     if scope == "both" and not legacy:
@@ -239,7 +259,7 @@ def write_csv(path, rows):
     if not rows:
         return
     with Path(path).open("w", encoding="utf-8-sig", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(stream, fieldnames=list(dict.fromkeys(key for row in rows for key in row)))
         writer.writeheader()
         writer.writerows({k: json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else v
                          for k, v in row.items()} for row in rows)
@@ -248,13 +268,16 @@ def write_csv(path, rows):
 @exclusive_artifact("action", "analysis_id")
 def analyze_branches(cfg, analysis_id, run_id=None, rollout_ids=(), rollout_list=None,
                      scope="both", termination_reason=None, formats=("png", "svg"), dpi=180,
-                     line_mode="both", progress_points=101, line_metrics=()):
+                     line_mode=None, progress_points=101, line_metrics=(), plot_layout=None,
+                     entropy_mapping_comparison=None):
     if scope not in {"all", "retained", "both"}:
         raise ValueError("Invalid branch scope")
     if not formats or set(formats) - {"png", "svg"} or not 50 <= dpi <= 600:
         raise ValueError("Use png/svg formats and dpi in [50, 600]")
-    if line_mode not in {"per-run", "all-runs", "both", "none", "per-trajectory"}:
+    if line_mode not in {None, "per-run", "all-runs", "both", "none", "per-trajectory"}:
         raise ValueError("Invalid line mode")
+    if plot_layout not in {None, "panels", "separate"}:
+        raise ValueError("Invalid plot layout")
     if type(progress_points) is not int or not 2 <= progress_points <= 1001:
         raise ValueError("progress-points must be an integer in [2, 1001]")
     root = Path(cfg["project_root"])
@@ -262,7 +285,6 @@ def analyze_branches(cfg, analysis_id, run_id=None, rollout_ids=(), rollout_list
     if out.exists():
         raise FileExistsError(f"Use a new analysis ID: {out}")
     implementation = Path(__file__).resolve().parents[2]
-    before = {f: (implementation / f).read_bytes() for f in CODE_FILES}
     selection = select_trajectories(cfg, run_id, rollout_ids, rollout_list)
     snapshots = selection.pop("source_snapshots")
     configs = {}
@@ -274,6 +296,17 @@ def analyze_branches(cfg, analysis_id, run_id=None, rollout_ids=(), rollout_list
         if sha256(path) != locator["sha256"]:
             raise ValueError("Frozen source config changed during selection")
         configs[run["run_id"]] = read_json(path)
+    if entropy_mapping_comparison is None:
+        entropy_mapping_comparison = bool(configs) and all(
+            config.get("parallel", {}).get("mode") in {"parallel_consensus", "parallel_enthophy"}
+            for config in configs.values())
+    line_mode = line_mode if line_mode is not None else "per-run" if entropy_mapping_comparison else "both"
+    plot_layout = plot_layout if plot_layout is not None else "separate" if entropy_mapping_comparison else "panels"
+    if entropy_mapping_comparison and (line_mode != "per-run" or plot_layout != "separate"):
+        raise ValueError("Entropy mapping comparison requires --line-mode per-run --plot-layout separate; "
+                         "use --no-entropy-mapping-comparison for other plot modes")
+    code_files = CODE_FILES + (("action/evaluation/entropy_mappings.py",) if entropy_mapping_comparison else ())
+    before = {f: (implementation / f).read_bytes() for f in code_files}
     rows, records, trajectories, excluded = [], [], [], []
     seen = set()
     for source in selection["sources"]:
@@ -301,6 +334,10 @@ def analyze_branches(cfg, analysis_id, run_id=None, rollout_ids=(), rollout_list
             binding = {k: source[k] for k in ("source_run_id", "rollout_id", "instance_id", "cohort")}
             record = decision_record(embedded, decision, message, scope,
                                      {**binding, "assistant_index": index, "message_index": mi}, proof)
+            if entropy_mapping_comparison:
+                from action.evaluation.entropy_mappings import decision_mapping_input
+
+                record["entropy_mapping_input"] = decision_mapping_input(decision, record, configs[run])
             records.append(record)
             row = step_statistics(record, scope)
             row.update({"trajectory_assistant_steps": total_assistant_steps,
@@ -314,7 +351,9 @@ def analyze_branches(cfg, analysis_id, run_id=None, rollout_ids=(), rollout_list
     if not rows:
         raise ValueError("Selected trajectories contain no canonical parallel steps after filtering")
     from action.evaluation.branch_curves import resolve_line_metrics
-    resolved_metrics = resolve_line_metrics(rows, line_mode, line_metrics)
+    include_branch_counts = plot_layout == "separate"
+    resolved_metrics = resolve_line_metrics(rows, line_mode, line_metrics,
+                                           include_branch_counts=include_branch_counts)
     summary = summarize(rows, trajectories, scope)
     out.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix=".branch-stats-", dir=out.parent) as temporary:
@@ -333,6 +372,8 @@ def analyze_branches(cfg, analysis_id, run_id=None, rollout_ids=(), rollout_list
                     "formats": list(dict.fromkeys(formats)), "dpi": dpi,
                     "line_mode": line_mode, "progress_points": progress_points,
                     "line_metrics": resolved_metrics,
+                    "plot_layout": plot_layout,
+                    "branch_count_curves": include_branch_counts,
                     "curve_schema_version": 4,
                     "plot_unit": "source_run_id + rollout_id; no task grouping",
                     "statistics": {
@@ -357,6 +398,12 @@ def analyze_branches(cfg, analysis_id, run_id=None, rollout_ids=(), rollout_list
                     "retention": "historical recorded retained_branch_ids; no rescoring or threshold simulation",
                     "winner": "actual canonical selected action; never the largest all-branch vote group",
                     "missing": "no-action branches excluded from action types, not a synthetic extra action; missing winner is null"}
+        if entropy_mapping_comparison:
+            from action.evaluation.entropy_mappings import VERSION, MAPPING_RULES
+
+            analysis["entropy_mapping_comparison"] = {
+                "version": VERSION, "rules": list(MAPPING_RULES),
+                "interpretation": "counterfactual_on_observed_pool"}
         write_json(stage / "analysis.json", analysis)
         write_json(stage / "selection.json", selection)
         write_json(stage / "summary.json", summary)
@@ -374,12 +421,17 @@ def analyze_branches(cfg, analysis_id, run_id=None, rollout_ids=(), rollout_list
         from action.evaluation.branch_histograms import render_histograms
         render_histograms(stage / "plots", summary, analysis)
         from action.evaluation.branch_curves import build_curve_tables, build_trajectory_curves, render_line_plots
-        raw_curves, normalized_curves = build_curve_tables(rows, trajectories, progress_points)
-        trajectory_curves = build_trajectory_curves(rows)
+        raw_curves, normalized_curves = build_curve_tables(
+            rows, trajectories, progress_points, include_branch_counts=include_branch_counts)
+        trajectory_curves = build_trajectory_curves(rows, include_branch_counts=include_branch_counts)
         (stage / "curves").mkdir()
         for filename, entries in curve_exports(raw_curves, normalized_curves, analysis, trajectory_curves):
             write_csv(stage / "curves" / filename, entries)
         render_line_plots(stage / "plots", raw_curves, normalized_curves, analysis, trajectory_curves, trajectories)
+        if entropy_mapping_comparison:
+            from action.evaluation.entropy_mappings import write_mapping_artifacts
+
+            write_mapping_artifacts(stage, records, trajectories, analysis)
         verify_frozen_sources(root, stage, analysis, selection)
         _verify_decision_sources(root, records, selection)
         for run in selection["source_runs"]:
@@ -393,8 +445,17 @@ def analyze_branches(cfg, analysis_id, run_id=None, rollout_ids=(), rollout_list
             "files": {str(p.relative_to(stage)): sha256(p) for p in sorted(stage.rglob("*")) if p.is_file()},
         })
         stage.rename(out)
-    return {"analysis_id": analysis_id, "output": str(out), "trajectories": len(trajectories),
-            "steps": len(rows), "metrics": summary["metrics"]}
+    result = {"analysis_id": analysis_id, "output": str(out), "trajectories": len(trajectories),
+              "steps": len(rows), "metrics": summary["metrics"]}
+    if plot_layout == "separate" and line_mode != "none":
+        index = read_json(out / "plots/plot-index.json")
+        result.update(plot_index=str(out / "plots/plot-index.json"),
+                      figure_count=index["figure_count"], image_file_count=index["file_count"])
+    if entropy_mapping_comparison:
+        gallery = read_json(out / "entropy-mappings/gallery-index.json")
+        result.update(html_report=str(out / "index.html"),
+                      total_figure_count=gallery["figure_count"], total_image_file_count=gallery["file_count"])
+    return result
 
 
 def curve_exports(raw_curves, normalized_curves, analysis, trajectory_curves=()):
@@ -464,14 +525,25 @@ def check_branch_analysis(cfg, analysis_id):
         raise ValueError("Branch histogram summary mismatch")
     if not legacy:
         from action.evaluation.branch_curves import build_curve_tables, build_trajectory_curves, trajectory_plot_index
-        raw_curves, normalized_curves = build_curve_tables(rows, trajectories, analysis["progress_points"])
-        trajectory_curves = build_trajectory_curves(rows)
+        include_branch_counts = analysis.get("branch_count_curves", False)
+        raw_curves, normalized_curves = build_curve_tables(
+            rows, trajectories, analysis["progress_points"], include_branch_counts=include_branch_counts)
+        trajectory_curves = build_trajectory_curves(rows, include_branch_counts=include_branch_counts)
         for filename, entries in curve_exports(raw_curves, normalized_curves, analysis, trajectory_curves):
             with (out / "curves" / filename).open(encoding="utf-8-sig", newline="") as stream:
                 stored = list(csv.DictReader(stream))
             canonical = [{k: "" if v is None else str(v) for k, v in r.items()} for r in entries]
             if canonical != stored:
                 raise ValueError("Curve values/denominators differ from frozen steps: " + filename)
+        if analysis.get("plot_layout") == "separate" and analysis["line_mode"] != "none":
+            from action.evaluation.branch_curves import separate_plot_index
+            index = separate_plot_index(trajectories, analysis)
+            if read_json(out / "plots/plot-index.json") != index:
+                raise ValueError("Per-metric plot coverage differs from frozen selection")
+            for entry in index["entries"]:
+                for filename in entry["files"]:
+                    if not owned_path(out, filename).is_file() or filename not in receipt["files"]:
+                        raise ValueError("Missing per-metric figure: " + filename)
         if analysis.get("curve_schema_version", 2) >= 4 and analysis["line_mode"] == "per-trajectory":
             index = trajectory_plot_index(trajectories, analysis)
             if read_json(out / "plots/trajectory-index.json") != index:
@@ -480,6 +552,10 @@ def check_branch_analysis(cfg, analysis_id):
                 for filename in entry["files"]:
                     if not owned_path(out, filename).is_file() or filename not in receipt["files"]:
                         raise ValueError("Missing per-trajectory figure: " + filename)
+    if analysis.get("entropy_mapping_comparison"):
+        from action.evaluation.entropy_mappings import check_mapping_artifacts
+
+        check_mapping_artifacts(out, root, records, trajectories, analysis, selection, receipt)
     implementation = Path(__file__).resolve().parents[2]
     matches = all((implementation / f).is_file() and sha256(implementation / f) == h
                   for f, h in analysis["code"].items())
