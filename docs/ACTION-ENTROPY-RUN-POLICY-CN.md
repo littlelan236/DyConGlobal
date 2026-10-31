@@ -40,7 +40,7 @@ clone 保留 source 的 repeat_count，不同时指定 task/partition/tasks-file
 
 start/resume/analysis 只读本 run 快照，不重新读取外部策略文件或临时更改参数。更换策略创建新 run。旧 run 缺少新字段时仍使用原固定比例及 estimator-score 代表，不补写旧配置、hash 或 receipt。
 
-共享模型、capture、estimator artifact、容量等仍须满足现有前提。新输入仅接受上例字段：schema_version、enabled、mode、fallback_policy、consensus 的三个参数和 entropy.retention_rule。拒绝未知字段、重复 YAML 键、null、冲突的 --set 来源及无效组合，不开放任意模型/任务/seed/资源覆盖。
+共享模型、capture、estimator artifact、容量等仍须满足现有前提。新输入仅接受上例字段：schema_version、enabled、mode、fallback_policy、consensus 的三个参数和 entropy.retention_rule，以及下述新映射专用的 entropy.full_retention_threshold。拒绝未知字段、重复 YAML 键、null、冲突的 --set 来源及无效组合，不开放任意模型/任务/seed/资源覆盖。
 
 ## 获胜组内代表策略
 
@@ -70,6 +70,26 @@ start/resume/analysis 只读本 run 快照，不重新读取外部策略文件�
 按 `(score, branch_id)` 升序保留前 k 条，score 越低越优；边界同分按 branch ID，不能仅用 score<=cutoff 而超额保留。两种代表与三映射可独立组合；固定比例共识另有两种代表组合。
 
 ## 证据与检查
+
+### effective_count_full_above_v1（2026-10-31）
+
+新增映射先完整计算 `effective_count_v1` 的最终整数分支预算
+`base_keep_count=min(N,max(m,stable_ceil(exp(H))))`。仅当该预算**严格大于**
+`entropy.full_retention_threshold`（默认 10、可配置正整数）时，改为保留候选池全部 N 条。
+本实验 branch_count=32，完整合法池触发时保留全部 32 条；无效或 loop escape 排除的分支不会被恢复。
+否则与 `effective_count_v1` 一致；候选不足仍按原规则报告不可用。
+例如原 k=10 保留 10，原 k=11 改为 32。比较发生在取整、最小值和候选数量裁剪之后。
+
+```yaml
+entropy:
+  retention_rule: effective_count_full_above_v1
+  full_retention_threshold: 10
+```
+
+参数仅用于此映射，通过 `--parallel-config` 写入新 run 快照及策略 SHA，旧映射不接受它。
+decision entropy 元数据新增 `base_keep_count`、`full_retention_threshold` 和
+`full_retention_triggered`；`raw_keep` 仍为 `exp(H)`，`keep_count` 为最终预算。
+协调器、loop escape 可行性检查和 full/compact evidence 重放均使用冻结阈值。
 
 decision 记录候选池、canonical 类别、原始 H、规则、raw_keep、k、cutoff、保留 IDs、投票、代表比较键与 run 策略绑定，compact receipt 保留重放输入。执行工具前完成 native 证据与选择校验；启动验收及 artifact verify 按本 run 冻结规则重放。
 

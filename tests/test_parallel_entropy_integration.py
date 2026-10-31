@@ -151,6 +151,20 @@ def test_prepare_lengths_does_not_publish_a_winner_and_rechecks_native_proof(tmp
         harness.controller.close()
 
 
+@pytest.mark.parametrize("threshold,expected", [(1, 4), (2, 2)])
+def test_coordinator_propagates_custom_full_retention_threshold(tmp_path, threshold, expected):
+    harness = Integration(tmp_path, "effective_count_full_above_v1", "estimator_score")
+    harness.cfg["parallel"]["entropy"]["full_retention_threshold"] = threshold
+    try:
+        summary = harness.run()["extra"]["dycon_parallel"]
+        assert summary["consensus"]["retained_count"] == expected
+        assert summary["consensus"]["entropy"]["full_retention_threshold"] == threshold
+        validate_consensus_evidence(summary, consensus_options(harness.cfg["parallel"]))
+        validate_selection(summary, 42, harness.cfg["parallel"])
+    finally:
+        harness.controller.close()
+
+
 def test_entropy_empty_pool_retains_original_failure_and_auditable_unavailable_entropy(tmp_path):
     harness = Integration(tmp_path, RETENTION_RULES[0], "estimator_score")
     harness.client.scores = {i: float("nan") for i in range(4)}

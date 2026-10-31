@@ -11,7 +11,8 @@ from core.config import Config, Parallel, ParallelConsensus, Strict, UniqueLoade
 from core.io import hash_json
 
 RepresentativePolicy = Literal["estimator_score", "min_step_tokens"]
-RetentionRule = Literal["effective_count_v1", "shannon_exp_keep_v1", "baseline_floor_v1"]
+RetentionRule = Literal["effective_count_v1", "shannon_exp_keep_v1", "baseline_floor_v1",
+                        "effective_count_full_above_v1"]
 
 
 def effective_policy(parallel):
@@ -27,6 +28,13 @@ class RunConsensus(ParallelConsensus):
 
 class RunEntropy(Strict):
     retention_rule: RetentionRule
+    full_retention_threshold: int | None = Field(default=None, ge=1, strict=True)
+
+    @model_validator(mode="after")
+    def threshold_rule(self):
+        if self.retention_rule != "effective_count_full_above_v1" and self.full_retention_threshold is not None:
+            raise ValueError("full_retention_threshold requires effective_count_full_above_v1")
+        return self
 
 
 class RunParallel(Parallel):
@@ -117,6 +125,10 @@ def apply_run_parallel(cfg, path=None, *, from_run=None, overrides=()):
                 continue
             if isinstance(value, dict):
                 target = parallel.get(key) or {}
+                if (key == "entropy" and "retention_rule" in value and
+                        value["retention_rule"] != "effective_count_full_above_v1" and
+                        "full_retention_threshold" not in value):
+                    target = {k: v for k, v in target.items() if k != "full_retention_threshold"}
                 parallel[key] = {**target, **value}
             else:
                 parallel[key] = value
@@ -136,6 +148,8 @@ def apply_run_parallel(cfg, path=None, *, from_run=None, overrides=()):
         raw_bytes = (run_path(result["project_root"], from_run) / "parallel-config.yaml").read_bytes()
         result["parallel_policy"]["inherited_from_run"] = from_run
     parallel = result.get("parallel", {})
+    if (parallel.get("entropy") or {}).get("retention_rule") == "effective_count_full_above_v1":
+        parallel["entropy"].setdefault("full_retention_threshold", 10)
     if parallel.get("mode") not in {"parallel_consensus", "parallel_enthophy"}:
         raise ValueError("Run parallel policies require a consensus rollout mode")
     parallel["consensus"] = {**ParallelConsensus().model_dump(), **(parallel.get("consensus") or {})}

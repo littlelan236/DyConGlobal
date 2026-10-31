@@ -1,0 +1,11 @@
+playwright==1.32.1
+greenlet==2.0.1
+pyee==9.0.4
+numpy==1.24.4
+Pillow==9.5.0
+beartype==0.12.0
+gymnasium==0.28.1
+jax-jumpy==1.0.0
+cloudpickle==2.2.1
+typing_extensions==4.7.1
+farama-notifications==0.0.4

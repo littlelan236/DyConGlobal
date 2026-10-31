@@ -713,3 +713,15 @@ skillsbench_images:
         after: ./cs {build_proxy_jvm_args} install scala:2.13.12 scalac:2.13.12
       note: Coursier native/JVM downloader needs explicit proxy JVM properties; keep
         original Coursier and Scala versions.
+
+# WebArena Verified image preparation only; root rollout backend remains independent.
+webarena_images:
+  source_root: benchmarks/webarena-verified
+  revision: 6473f72db5dcefc97b5725b59e734504edc28a21
+  store: webarena-verified150-h15-n35-20261031
+  wikipedia_build: true
+  hard_per_type: 15
+  non_hard_per_type: 35
+  seed: 20261031
+  workers: 8
+  host_proxy: http://127.0.0.1:17890

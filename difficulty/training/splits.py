@@ -1,8 +1,8 @@
 """Immutable dataset-owned split artifacts shared by model training attempts."""
 
-from collections import Counter
 import json
 import math
+from collections import Counter
 from pathlib import Path
 
 from core.io import hash_json, identifier, now, owned_path, read_json, sha256, write_json
@@ -12,6 +12,8 @@ from difficulty.training.split import make_event_split, make_split, make_task_th
 
 def _build_split(rollouts, samples, strategy, seed, validation_fraction, test_fraction,
                  validation_tasks, parent=None):
+    if any(row.get('benchmark') == 'webarena_verified' for row in rollouts) and strategy != 'task_random_v1':
+        raise ValueError('WebArena requires task_random_v1 grouped by intent_template_id to prevent template leakage')
     if strategy == "event_random_v1":
         return make_event_split(samples, validation_fraction, test_fraction, seed)
     if strategy == "task_random_v1":

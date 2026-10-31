@@ -7,16 +7,18 @@ eligibility is additionally bound to a completed, exact-patch resolved outcome.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import json
+from collections import Counter
 from pathlib import Path
 
 from application.execution.evidence import RunEvidence
-from difficulty.datasets.selection import select_run
+from application.execution.subject import subject_digest, verify_subject
 from core.io import artifact_reference, identifier, now, owned_path, read_json, sha256, write_json
 from core.locking import file_lock
+from difficulty.datasets.identity import benchmark as row_benchmark
+from difficulty.datasets.identity import task_descriptor
 from difficulty.datasets.paths import dataset_directory
-from difficulty.datasets.identity import benchmark as row_benchmark, task_descriptor
+from difficulty.datasets.selection import select_run
 from enrichment.online_trace import publication_directory
 
 
@@ -93,6 +95,10 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
                 raise ValueError('Resolved canonical trajectory checksum mismatch')
             trajectory = read_json(path)
             workspace_subject = row.get('evaluation_subject', {}).get('kind') == 'workspace'
+            web_subject = row.get('evaluation_subject', {}).get('kind') == 'web_trace'
+            verify_subject(root, row)
+            if web_subject and not read_json(owned_path(root, row['subject_path'])).get('complete'):
+                raise ValueError('Resolved WebArena training requires a complete web trace subject')
             expected_terminal = 'AgentCompleted' if workspace_subject else 'Submitted'
             if trajectory.get('info', {}).get('exit_status') != expected_terminal:
                 raise ValueError('Resolved source does not have its benchmark terminal state')
@@ -101,7 +107,7 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
             evaluation = catalog['evaluations'][row['selected_evaluation_id']]
             outcome = evaluation['outcomes'][rid]
             report = owned_path(root, evaluation['report_path'])
-            digest_key = 'subject_sha256' if workspace_subject else 'patch_sha256'
+            digest_key, _ = subject_digest(row)
             if (outcome['status'] != 'completed' or outcome['resolved'] is not True
                     or outcome.get(digest_key) != row.get(digest_key)
                     or sha256(report) != evaluation['report_sha256']):
@@ -118,6 +124,7 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
                 'submission_status': 'submitted'}
             if workspace_subject:
                 rollouts[rid]['task_package_sha256'] = task['instance']['package_sha256']
+            if workspace_subject or web_subject:
                 rollouts[rid]['evaluation_subject_sha256'] = row['subject_sha256']
             if label_normalization == 'trajectory_fraction':
                 rollouts[rid]['total_reasoning_tokens'] = reasoning_totals.get(rid, 0)
@@ -149,7 +156,9 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
                 raise ValueError('Remaining-step label differs from canonical action suffix')
             if event['anchor'] != 'think_close' or event['alignment_status'] != 'exact':
                 raise ValueError('Requires exact action-close hidden evidence')
-            sample = {**event, **{k: row[k] for k in ('benchmark', 'agent', 'revision', 'repo', 'instance_id')
+            workspace_subject = row.get('evaluation_subject', {}).get('kind') == 'workspace'
+            sample = {**event, **{k: row[k] for k in ('benchmark', 'agent', 'revision', 'repo', 'instance_id',
+                                  'intent_template_id', 'source_task_id', 'task_revision', 'source_task_sha256')
                                   if k in row},
                 'source_kind': row['source_kind'], 'task_group': row['task_group'],
                 'agent_step': step, 'occurrence': 0,

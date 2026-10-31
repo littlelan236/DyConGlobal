@@ -557,3 +557,40 @@ cd /home/wangtianyi/DyConGlobal
 因此，修复后的新验证 run **不是 75×3**。`75×3` 只属于原问题 run 的冻结计划；本轮修复已经完成 75-task 环境覆盖，但尚未启动修复后的完整 75×3 agent rollout。完整 75×3 必须在新的 run 中创建，且先通过 G0–G4 gate。
 
 `skillsbench audit` 当前生成 schema-4 receipt：逐 step 分母是全部 canonical assistant responses（含最终回答），并列出 missing、duplicate、unexpected、unfinished、API terminal coverage；parallel 还单独列出所有候选和未选工具执行情况。官方 verifier 的 resolved truth 与基础设施/capture truth 分开保存。
+
+
+## WebArena Verified selected-task image preparation (2026-10-31)
+
+Configure `webarena_images` in root `config.yaml`: pinned official sparse checkout,
+NAS store, `hard_per_type`, `non_hard_per_type`, seed, transfer workers and host proxy.
+The current cohort selects RETRIEVE/NAVIGATE/MUTATE with 15 Hard + 35 non-Hard each
+(150 unique tasks). SHA256-ranked sampling is uniform within each stratum and
+deterministic for the seed; difficulty means membership in the official Hard subset.
+
+```bash
+.venvs/runner/bin/dycon webarena-images plan
+.venvs/runner/bin/dycon webarena-images prepare
+.venvs/runner/bin/dycon webarena-images status
+.venvs/runner/bin/dycon webarena-images verify
+```
+
+`plan` freezes selected task metadata and 150 evaluator definitions under
+`paths.nas_root/webarena_images.store/`. `prepare` resolves only the selected sites'
+official compose images, freezes source digests once, selects the configured platform,
+and uses the existing resumable registry transfer/OCI validation. Tasks share site
+images: 150 tasks do not mean 150 images, and a diverse subset can still need all
+six site images. Shared blobs are downloaded once; Docker is not loaded or restarted.
+The source commit pins task/config bytes, while image digests record actual registry
+resolution time because upstream compose uses floating tags.
+
+NAS `selection.json`/`selection-receipt.json`, `source-locks/`, `images/` and final
+`images-manifest.json` preserve selection, task revisions/SHA and NAS image references.
+Only selected definitions are exported as `evaluator/tasks.json` (0600, parent 0700);
+expected answers must remain evaluator-only when rollout is later implemented.
+`state/webarena-images/STORE/` records progress and deep verification. Incomplete
+prepare/verify returns 2; repeat `prepare` with the same config to resume pinned
+digests. Changed quotas/source/platform require a new store.
+
+This stage prepares shared site image bytes only. Browser agent image, Wikipedia ZIM,
+Map baseline tar files/volumes, environment reset/login, run/Catalog integration and
+official evaluation are separate capabilities and are not declared ready here.

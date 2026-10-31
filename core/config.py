@@ -10,7 +10,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from core.io import artifact_roots, hash_json, identifier, owned_path, read_json, run_path, sha256, write_json
+from core.io import artifact_roots, hash_json, identifier, read_json, sha256, write_json
 from difficulty.probe_config import RidgeProbe
 
 
@@ -267,7 +267,7 @@ class Hidden(Strict):
 
 
 class Benchmark(Strict):
-    backend: Literal["swebench", "skillsbench"] = "swebench"
+    backend: Literal["swebench", "skillsbench", "webarena_verified"] = "swebench"
     snapshot_ref: str | None = None
     partition: Literal["train", "val", "test", "excluded"] | None
 
@@ -431,6 +431,18 @@ class Parallel(Strict):
         return self
 
 
+class WebArenaImages(Strict):
+    source_root: str
+    revision: str
+    store: str
+    hard_per_type: int = Field(gt=0)
+    non_hard_per_type: int = Field(gt=0)
+    seed: int
+    workers: int = Field(default=4, gt=0, le=8)
+    host_proxy: str | None = None
+    wikipedia_build: bool = False
+
+
 class SkillsBenchImages(Strict):
     source_root: str
     revision: str
@@ -453,6 +465,18 @@ class SkillsBenchImages(Strict):
     builder_name: str
 
 
+class WebArena(Strict):
+    environment_pool_ref: str
+    browser_image_ref: str
+    observation_type: Literal["accessibility_tree"] = "accessibility_tree"
+    action_protocol: Literal["bash_browser_id_v1"] = "bash_browser_id_v1"
+    environment_slots: int = Field(default=1, gt=0)
+    reset_policy: Literal["per_attempt"] = "per_attempt"
+    max_browser_actions: int = Field(default=30, gt=0)
+    evaluator_python: str = ".venvs/webarena-eval/bin/python"
+    evaluator_timeout_seconds: int = Field(default=120, gt=0)
+
+
 class Config(Strict):
     schema_version: Literal[1]
     paths: Paths
@@ -464,6 +488,8 @@ class Config(Strict):
     environment: Environment
     images: Images
     skillsbench_images: SkillsBenchImages | None = None
+    webarena_images: WebArenaImages | None = None
+    webarena: WebArena | None = None
     execution: Execution
     timeouts: Timeouts
     enrichment: Enrichment
@@ -478,6 +504,8 @@ class Config(Strict):
     def cross_fields(self):
         from core.backends import capabilities
         capabilities(self.model_dump())
+        if self.benchmark.backend == "webarena_verified" and self.webarena is None:
+            raise ValueError("WebArena Verified requires webarena runtime configuration")
         validate_generation_contract(self.model_dump())
         if self.steering.enabled != bool(self.steering.payload):
             raise ValueError("Enabled steering requires a payload; disabled steering must not have one")
@@ -565,6 +593,10 @@ def resolve(path, overrides=()):
             if field not in raw[section] and not any(item.startswith(section + "." + field + "=")
                                                       for item in overrides):
                 cfg[section].pop(field, None)
+    if "webarena_images" not in raw:
+        cfg.pop("webarena_images", None)
+    if "webarena" not in raw:
+        cfg.pop("webarena", None)
     if "skillsbench_images" not in raw:
         cfg.pop("skillsbench_images", None)
     if "cancellation" not in raw["execution"]:
@@ -628,7 +660,7 @@ def resolve(path, overrides=()):
 def snapshot(cfg, run_id, selection):
     assert_frozen(cfg)
     run_id = identifier(run_id)
-    roots = artifact_roots(cfg, "run")
+    artifact_roots(cfg, "run")
     target_root = Path(cfg.get("paths", {}).get("artifact_roots", {}).get("run", cfg["project_root"])).resolve()
     run = target_root / "runs" / run_id
     run.parent.mkdir(parents=True, exist_ok=True)

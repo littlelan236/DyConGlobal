@@ -5,7 +5,7 @@ import math
 from collections import Counter, defaultdict
 
 from core.io import hash_json
-from difficulty.datasets.identity import task_descriptor, task_group, validate_same_task
+from difficulty.datasets.identity import task_descriptor, task_group, task_key, validate_same_task
 
 
 def rollout_roles(split):
@@ -198,7 +198,16 @@ def make_task_threeway_split(rollouts, samples, validation_fraction=0.2, test_fr
     if len({r["rollout_id"] for r in rollouts}) != len(rollouts):
         raise ValueError("Duplicate rollout ID")
     for rows in by_task.values():
-        validate_same_task(rows)
+        # WebArena split units are templates; validate each exact task identity
+        # within a template without mistaking its other instances for conflicts.
+        if rows[0].get('benchmark') == 'webarena_verified':
+            exact_tasks = defaultdict(list)
+            for row in rows:
+                exact_tasks[task_key(row)].append(row)
+            for exact_rows in exact_tasks.values():
+                validate_same_task(exact_rows)
+        else:
+            validate_same_task(rows)
     n_test = round(len(by_task) * test_fraction)
     n_val = round(len(by_task) * validation_fraction)
     if min(n_test, n_val, len(by_task) - n_test - n_val) < 1:

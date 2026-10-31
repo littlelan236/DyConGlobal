@@ -402,7 +402,7 @@ def verified_wheel_context(cfg, store, unit):
     return context, receipts
 
 
-def _cache_source(cfg, store, state, source):
+def _cache_source(cfg, store, state, source, *, platform=None):
     """Pull a source image through NAS without changing daemon proxy settings."""
     host = 'docker.io'
     repository = source
@@ -423,6 +423,8 @@ def _cache_source(cfg, store, state, source):
     with file_lock(state / (key + '.lock')):
         if not path.exists():
             kwargs = {} if host == 'docker.io' else {'registry': host}
+            if platform:
+                kwargs['platform'] = platform
             root, descriptors = image_metadata(repository, blobs, reference=reference,
                 proxy=cfg['skillsbench_images']['host_proxy'], **kwargs)
             current = root

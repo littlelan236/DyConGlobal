@@ -311,6 +311,7 @@ class DecisionCoordinator:
                     opts.get("consensus", {}).get("tie_policy", "estimator_score"),
                     representative_policy=consensus_config.get("representative_policy"),
                     retention_rule=consensus_config.get("retention_rule"),
+                    full_retention_threshold=consensus_config.get("full_retention_threshold", 10),
                     token_lengths={r["branch_id"]: r.get("completion_tokens") for r in records},
                 )
                 if winner is None:
@@ -365,7 +366,8 @@ class DecisionCoordinator:
                         _, consensus_meta = select_consensus(
                             [], {}, consensus_config["retention_ratio"], consensus_config["min_retained_branches"],
                             consensus_config["tie_policy"], representative_policy=consensus_config.get("representative_policy"),
-                            retention_rule=consensus_config["retention_rule"])
+                            retention_rule=consensus_config["retention_rule"],
+                            full_retention_threshold=consensus_config.get("full_retention_threshold", 10))
                 metadata_by_branch = {
                     item["branch_id"]: item
                     for item in consensus_meta.get("branch_metadata", [])

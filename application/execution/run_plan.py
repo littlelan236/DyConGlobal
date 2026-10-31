@@ -12,27 +12,15 @@ Execution code never re-reads the mutable root YAML for an existing run.
 
 from __future__ import annotations
 
-
-
-from pathlib import Path
 import copy
-
-
+from pathlib import Path
 
 import yaml
 
-
-
 from catalog.store import Catalog
-
 from core.config import load_snapshot, snapshot
-
 from core.io import artifact_roots, hash_json, identifier, now, read_json, run_path, sha256, write_json
-
 from rollout.sampling import load_work_items, make_work_items, write_work_items
-
-
-
 
 
 def _selection_from_tasks(catalog: Catalog, task_ids=(), partition=None, cfg=None):
@@ -40,13 +28,19 @@ def _selection_from_tasks(catalog: Catalog, task_ids=(), partition=None, cfg=Non
     from core.backends import identity
     benchmark = identity(cfg or {})[0]
     revision = None
-    if benchmark == "skillsbench":
+    if benchmark in {"skillsbench", "webarena_verified"}:
         ref = (cfg or {}).get("benchmark", {}).get("snapshot_ref")
         if not ref:
-            raise ValueError("SkillsBench requires benchmark.snapshot_ref")
+            raise ValueError(f"{benchmark} requires benchmark.snapshot_ref")
         revision = read_json(Path(cfg["project_root"]) / ref)["revision"]
     selection = catalog.select_tasks(partition=partition, task_ids=task_ids,
                                      benchmark=benchmark, revision=revision)
+    if benchmark == "webarena_verified":
+        snapshot_tasks = read_json(Path(cfg["project_root"]) / ref)["tasks"]
+        selected = {key: task for key, task in selection["tasks"].items() if key in snapshot_tasks}
+        if task_ids and {task["instance_id"] for task in selected.values()} != set(task_ids):
+            raise ValueError("Requested WebArena tasks are outside the frozen benchmark snapshot")
+        selection["tasks"], selection["task_keys"] = selected, sorted(selected)
 
     tasks = selection["tasks"]
 

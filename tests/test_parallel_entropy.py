@@ -73,6 +73,53 @@ def test_invalid_retention_inputs(kwargs):
         entropy_retention(**{"counts": [32], **kwargs})
 
 
+@pytest.mark.parametrize("counts,threshold,expected", [
+    ([32], 10, 2), ([4] * 2 + [3] * 8, 10, 10),
+    ([4] * 10, 10, 10), ([3] * 10 + [2], 10, 32),
+    ([4] * 8, 7, 32), ([4] * 8, 8, 8),
+    ([2] * 6, 4, 12), ([], 10, 0), ([1], 10, 0),
+])
+def test_effective_count_full_above_uses_final_integer_budget(counts, threshold, expected):
+    base = entropy_retention(counts, rule="effective_count_v1")
+    result = entropy_retention(counts, rule="effective_count_full_above_v1",
+                               full_retention_threshold=threshold)
+    assert result["base_keep_count"] == base["keep_count"]
+    assert result["raw_keep"] == base["raw_keep"]
+    assert result["entropy"] == base["entropy"]
+    assert result["keep_count"] == expected
+    assert result["full_retention_triggered"] == (base["keep_count"] > threshold)
+
+
+@pytest.mark.parametrize("threshold", [0, -1, 1.5, True, None, float("inf"), float("nan")])
+def test_effective_count_full_above_rejects_invalid_threshold(threshold):
+    with pytest.raises(ValueError, match="full_retention_threshold"):
+        entropy_retention([32], rule="effective_count_full_above_v1",
+                          full_retention_threshold=threshold)
+
+
+def test_threshold_decision_replays_custom_value_and_rejects_tampering():
+    candidates = [Candidate(i, "A" if i < 3 else "B") for i in range(4)]
+    scores = {i: float(i) for i in range(4)}
+    opts = consensus_options({"mode": "parallel_enthophy", "entropy": {
+        "retention_rule": "effective_count_full_above_v1", "full_retention_threshold": 1}})
+    winner, meta = select_consensus(candidates, scores,
+        **{k: v for k, v in opts.items() if k != "rule"})
+    assert meta["retained_count"] == 4
+    by_id = {r["branch_id"]: r for r in meta["branch_metadata"]}
+    decision = {"selection_mode": "parallel_enthophy", "consensus_config": opts,
+                "consensus": meta, "selected_branch_id": winner.branch_id,
+                "candidates": [{**by_id[c.branch_id], "status": "eligible", "response": c.raw}
+                               for c in candidates]}
+    validate_consensus_evidence(decision, opts)
+    compact = copy.deepcopy(decision)
+    for row in compact["candidates"]:
+        row.pop("response")
+    validate_consensus_evidence(compact, opts)
+    compact["consensus"]["entropy"]["full_retention_threshold"] = 2
+    with pytest.raises(ValueError, match="evidence differs"):
+        validate_consensus_evidence(compact, opts)
+
+
 @pytest.mark.parametrize("rule", [None, *RETENTION_RULES])
 @pytest.mark.parametrize("policy", ["estimator_score", "min_step_tokens"])
 def test_all_eight_fixed_dynamic_and_representative_combinations(rule, policy):

@@ -10,7 +10,7 @@ STAGES = ("agent_terminal", "subject_bound", "verifier_persisted", "artifacts_co
 
 
 def artifact_kinds(row):
-    return ("trajectory", "subject") if row.get("evaluation_subject", {}).get("kind") == "workspace" else (
+    return ("trajectory", "subject") if row.get("evaluation_subject", {}).get("kind") in {"workspace", "web_trace"} else (
         "trajectory", "patch")
 
 
@@ -26,12 +26,41 @@ def verify_subject(root, row):
             raise ValueError("Changed " + kind)
         if kind == "subject":
             manifest = read_json(path)
-            if manifest.get("schema_version") != 1 or manifest.get("kind") != "workspace":
-                raise ValueError("Invalid workspace subject manifest")
+            if (manifest.get("schema_version") != 1 or manifest.get("kind") not in {"workspace", "web_trace"}
+                    or manifest.get("kind") != row.get("evaluation_subject", {}).get("kind")):
+                raise ValueError("Invalid evaluation subject manifest")
+            paths = set()
             for output in manifest["outputs"]:
+                if output["path"] in paths:
+                    raise ValueError("Duplicate subject output")
+                paths.add(output["path"])
                 file = owned_path(path.parent, output["path"])
                 if file.is_symlink() or not file.is_file() or sha256(file) != output["sha256"]:
                     raise ValueError("Changed subject output")
+                if "size" in output and file.stat().st_size != output["size"]:
+                    raise ValueError("Changed subject output size")
+            if manifest["kind"] == "web_trace":
+                if (manifest.get("task_sha256") is not None and row.get("task_definition_sha256") is not None
+                        and manifest["task_sha256"] != row["task_definition_sha256"]):
+                    raise ValueError("Web trace belongs to a different task definition")
+                if type(manifest.get("complete")) is not bool or type(manifest.get("har_flushed")) is not bool:
+                    raise ValueError("Web trace requires explicit completion and HAR flush state")
+                required = [manifest.get(key) for key in ("answer_path", "har_path", "actions_path")]
+                if any(value is not None and value not in paths for value in required):
+                    raise ValueError("Web trace references an unbound output")
+                if manifest["complete"] and (not all(required) or not manifest["har_flushed"]):
+                    raise ValueError("Complete web trace requires a final answer, flushed HAR and actions")
+                binding = manifest.get("binding", {})
+                for field in ("run_id", "attempt_id", "task_key"):
+                    allowed = {row.get(field)}
+                    if field == "run_id":
+                        allowed.add(row.get("provenance", {}).get("source_run_id"))
+                    if field in binding and binding[field] not in allowed:
+                        raise ValueError("Web trace binding differs from its rollout")
+                if manifest.get("har_path") and manifest["har_flushed"]:
+                    har = read_json(owned_path(path.parent, manifest["har_path"]))
+                    if not isinstance(har, dict) or not isinstance(har.get("log", {}).get("entries"), list):
+                        raise ValueError("Web trace HAR is not a readable HAR log")
     return True
 
 

@@ -7,6 +7,40 @@ from core.io import read_json
 from .run_plan import load_plan
 
 
+def webarena_statistics(loaded):
+    """Count every planned sample, including unfinished and ungraded attempts."""
+    from application.execution.evidence import RunEvidence
+    from rollout.retry import sample_accepted
+
+    run, cfg = loaded['run'], loaded['config']
+    evidence = RunEvidence(cfg['project_root'], loaded['plan']['run_id']).read()
+    counts = dict.fromkeys(('resolved', 'unresolved', 'infra_error', 'ungraded', 'pending', 'unsubmitted'), 0)
+    items = loaded['work_items']['items']
+    for item in items:
+        path = run / 'rollout/tasks' / item['instance_id'] / 'repetitions' / item['repetition_id'] / 'result.json'
+        if not path.exists():
+            counts['pending'] += 1
+            continue
+        result = read_json(path)
+        if result.get('sample_key') != item['sample_key']:
+            raise ValueError('Benchmark report sample identity changed')
+        row = evidence['rollouts'].get(result.get('rollout_id'))
+        if not sample_accepted(cfg, result):
+            counts['infra_error'] += 1
+        elif not row or row.get('submission_status') != 'submitted':
+            counts['unsubmitted'] += 1
+        elif row.get('evaluation_status') == 'completed':
+            counts['resolved' if row.get('resolved') is True else 'unresolved'] += 1
+        elif row.get('evaluation_status') in {'infra_error', 'ConnectionError'}:
+            counts['infra_error'] += 1
+        else:
+            counts['ungraded'] += 1
+    return {'benchmark': 'webarena_verified', 'revision': cfg['execution_context']['revision'],
+            'planned_samples': len(items), 'success_rate_denominator': len(items),
+            'success_rate': counts['resolved'] / len(items) if items else None,
+            **counts, 'policy': 'selected evaluation of the final accepted attempt; all planned samples remain in denominator'}
+
+
 def report(root, run_id):
     loaded = load_plan(root, run_id)
     run = loaded["run"]
@@ -32,4 +66,7 @@ def report(root, run_id):
     workers = run / "serving/worker-pool.json"
     if workers.exists():
         result["serving_workers"] = read_json(workers)
+    if (loaded['config'].get('benchmark', {}).get('backend') == 'webarena_verified'
+            and loaded['plan']['operation'] == 'rollout'):
+        result['benchmark_statistics'] = webarena_statistics(loaded)
     return result

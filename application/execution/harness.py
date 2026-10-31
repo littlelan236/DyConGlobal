@@ -13,6 +13,9 @@ from .run_plan import load_plan
 
 def prepare(root, run_id, rollout_ids=(), source_run=None, incremental=False):
     loaded = load_plan(root, run_id)
+    if loaded['config'].get('benchmark', {}).get('backend') == 'webarena_verified':
+        from application.execution.webarena_harness import prepare as prepare_webarena
+        return prepare_webarena(root, run_id, rollout_ids, source_run, incremental)
     if loaded['config'].get('benchmark',{}).get('backend')=='skillsbench':
         raise ValueError('SkillsBench uses the live official verifier before sandbox cleanup; exported files are not a complete state snapshot for post-hoc re-evaluation')
     root = Path(root).resolve()
@@ -110,6 +113,9 @@ def prepare(root, run_id, rollout_ids=(), source_run=None, incremental=False):
 
 def run(root, run_id, eval_id, gold=False, incremental=False):
     loaded = load_plan(root, run_id)
+    if loaded['config'].get('benchmark', {}).get('backend') == 'webarena_verified':
+        from application.execution.webarena_harness import run as run_webarena
+        return run_webarena(root, run_id, eval_id, gold, incremental)
     if loaded['config'].get('benchmark',{}).get('backend')=='skillsbench':
         raise ValueError('SkillsBench post-hoc re-evaluation requires a qualified complete state snapshot; run the live verifier within the original attempt')
     selection = read_json(loaded["run"] / "harness" / "selection.json")

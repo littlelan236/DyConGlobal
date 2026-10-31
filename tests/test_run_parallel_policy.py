@@ -233,3 +233,83 @@ def test_swe_policy_clone_preserves_unused_legacy_image_builder_metadata(paralle
     loaded = load_plan(cfg['project_root'], cloned.name)['config']
     assert loaded['skillsbench_images'] == cfg['skillsbench_images']
     assert sha256(source / 'resolved-config.json') == old
+
+
+@pytest.mark.parametrize("threshold", [None, 7, 10])
+def test_threshold_policy_freezes_default_and_clone_switches_rules(parallel_cfg, threshold):
+    entropy = {"retention_rule": "effective_count_full_above_v1"}
+    if threshold is not None:
+        entropy["full_retention_threshold"] = threshold
+    path = policy_file(parallel_cfg, entropy=entropy)
+    run = create_run(parallel_cfg, "threshold-policy", operation="rollout", task_ids=["policy-task"],
+                     parallel_config=path)
+    old = sha256(run / "resolved-config.json")
+    frozen = load_plan(parallel_cfg["project_root"], run.name)["config"]
+    assert frozen["parallel"]["entropy"]["full_retention_threshold"] == (threshold or 10)
+    inherited = create_run(parallel_cfg, "threshold-inherited", operation="rollout", from_run=run.name)
+    assert load_plan(parallel_cfg["project_root"], inherited.name)["config"]["parallel"]["entropy"] == entropy | {
+        "full_retention_threshold": threshold or 10}
+    switched = create_run(parallel_cfg, "threshold-switched", operation="rollout", from_run=run.name,
+                          parallel_config=policy_file(parallel_cfg, "switched", rule="effective_count_v1"))
+    assert load_plan(parallel_cfg["project_root"], switched.name)["config"]["parallel"]["entropy"] == {
+        "retention_rule": "effective_count_v1"}
+    assert sha256(run / "resolved-config.json") == old
+
+
+@pytest.mark.parametrize("threshold", [0, -1, 1.5, True, None])
+def test_threshold_policy_rejects_invalid_values(parallel_cfg, threshold):
+    path = policy_file(parallel_cfg, entropy={"retention_rule": "effective_count_full_above_v1",
+                                             "full_retention_threshold": threshold})
+    with pytest.raises(ValueError):
+        create_run(parallel_cfg, "invalid-threshold", operation="rollout", task_ids=["policy-task"],
+                   parallel_config=path)
+
+
+def test_threshold_parameter_requires_its_own_mapping(parallel_cfg):
+    path = policy_file(parallel_cfg, entropy={"retention_rule": "effective_count_v1",
+                                             "full_retention_threshold": 10})
+    with pytest.raises(ValueError, match="full_retention_threshold"):
+        apply_run_parallel(parallel_cfg, path)
+
+
+def test_cli_clone_applies_tp1_overrides_to_source_instead_of_root(parallel_cfg, capsys):
+    from core.cli import main
+
+    cfg = copy.deepcopy(parallel_cfg)
+    root = Path(cfg["project_root"])
+    raw = yaml.safe_load((root / "config.yaml").read_text())
+    for field in ("trajectory_sharding", "replica_base_urls", "max_cpu_workers_per_gpu"):
+        raw["serving"].pop(field, None)
+    (root / "config.yaml").write_text(yaml.safe_dump(raw))
+    root_sha = sha256(root / "config.yaml")
+    cfg["serving"].update(trajectory_sharding="per_gpu_tp1", tensor_parallel_size=1,
+                           gpus=[0, 1], max_cpu_workers_per_gpu=2,
+                           base_url="http://127.0.0.1:18200/v1",
+                           replica_base_urls=["http://127.0.0.1:18200/v1", "http://127.0.0.1:18201/v1"])
+    cfg["config_hash"] = hash_json({k: v for k, v in cfg.items() if k != "config_hash"})
+    source = create_run(cfg, "tp1-source", operation="rollout", task_ids=["policy-task"])
+    source_sha = sha256(source / "resolved-config.json")
+    main(["--config", str(root / "config.yaml"),
+          "--set", "serving.base_url=http://127.0.0.1:18220/v1",
+          "--set", "serving.replica_base_urls=[http://127.0.0.1:18220/v1,http://127.0.0.1:18221/v1]",
+          "run", "create", "tp1-clone", "--operation", "rollout", "--from-run", source.name])
+    serving = load_plan(root, "tp1-clone")["config"]["serving"]
+    assert serving["replica_base_urls"] == ["http://127.0.0.1:18220/v1", "http://127.0.0.1:18221/v1"]
+    assert serving["trajectory_sharding"] == "per_gpu_tp1"
+    assert serving["gpus"] == [0, 1]
+    assert sha256(root / "config.yaml") == root_sha
+    assert sha256(source / "resolved-config.json") == source_sha
+
+
+@pytest.mark.parametrize("benchmark", ["legacy-tactRefractor-swebench", "SWE-bench_Verified"])
+def test_frozen_swe_cohort_retains_original_benchmark_alias(parallel_cfg, benchmark):
+    from core.backends import execution_context
+
+    assert execution_context(parallel_cfg, {"legacy-task": {"benchmark": benchmark}}) is None
+
+
+def test_swe_backend_still_rejects_other_benchmark_families(parallel_cfg):
+    from core.backends import execution_context
+
+    with pytest.raises(ValueError, match="another benchmark family"):
+        execution_context(parallel_cfg, {"web-task": {"benchmark": "webarena_verified"}})

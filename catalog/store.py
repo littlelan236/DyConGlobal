@@ -29,6 +29,13 @@ class Task(Strict):
 
     @model_validator(mode="after")
     def consistent_instance(self):
+        if self.benchmark == "webarena_verified":
+            if self.repo is not None or self.base_commit is not None:
+                raise ValueError("WebArena tasks must not contain SWE repository placeholders")
+            from catalog.webarena import validate_payload
+            validate_payload(self.instance, self.instance_id, self.revision)
+            identifier(self.instance_id)
+            return self
         if self.benchmark == "skillsbench":
             if self.repo is not None or self.base_commit is not None:
                 raise ValueError("SkillsBench tasks must not contain SWE repository placeholders")
@@ -47,7 +54,7 @@ class Task(Strict):
     @model_serializer(mode="wrap")
     def preserve_swe_shape(self, handler):
         value = handler(self)
-        if self.benchmark == "skillsbench":
+        if self.benchmark in {"skillsbench", "webarena_verified"}:
             value.pop("repo", None)
             value.pop("base_commit", None)
         return value
@@ -97,8 +104,9 @@ class Catalog:
     def select_tasks(self, *, partition=None, task_ids=(), benchmark=None, revision=None):
         data = self.read()
         if benchmark is not None:
+            from core.backends import benchmark_family
             data["tasks"] = {k: t for k, t in data["tasks"].items()
-                             if (t["benchmark"] == "skillsbench") == (benchmark == "skillsbench")
+                             if benchmark_family(t["benchmark"]) == benchmark
                              and (revision is None or t["revision"] == revision)}
         requested = set(task_ids)
         matches = [t["instance_id"] for t in data["tasks"].values() if t["instance_id"] in requested]

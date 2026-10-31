@@ -109,6 +109,9 @@ def verify(root,run_id):
         proof=read_json(run/'harness/selection-receipt.json')
         if hash_json(selection)!=proof['selection_sha256']:raise ValueError('Harness selection changed')
         for row in selection['rollouts'].values():
+            if row.get('evaluation_subject', {}).get('kind') == 'web_trace':
+                from application.execution.subject import verify_subject
+                verify_subject(root, row)
             for kind in artifact_kinds(row):
                 if sha256(owned_path(root,row[kind+'_path']))!=row[kind+'_sha256']:
                     raise ValueError('Selected canonical artifact changed')

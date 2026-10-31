@@ -15,6 +15,19 @@ def main(argv=None):
     parser.add_argument("--set", action="append", default=[])
     parser.add_argument("--run-id", dest="analysis_run_id", help="Bind an analysis command to a frozen run")
     sub = parser.add_subparsers(dest="command", required=True)
+    webarena = sub.add_parser("webarena", help="WebArena Verified import, runtime and frozen-run preflight")
+    wa_sub = webarena.add_subparsers(dest="webarena_command", required=True)
+    wa = wa_sub.add_parser("import", help="Import public tasks and isolate pinned official evaluation definitions")
+    wa.add_argument("--source", type=Path, required=True)
+    wa.add_argument("--subset", choices=["full", "hard"], default="full")
+    wa.add_argument("--task-id", action="append", default=[])
+    wa = wa_sub.add_parser("preflight", help="Run the frozen browser/site/reset/cleanup checks without model requests")
+    wa.add_argument("run_id")
+    wa = wa_sub.add_parser("evaluator-prepare", help="Install and pin an isolated official evaluator runtime")
+    wa.add_argument("--source", type=Path)
+    wa_sub.add_parser("browser-prepare", help="Build and publish the fixed browser worker image into NAS")
+    wa = wa_sub.add_parser("environments-prepare", help="Publish an immutable pool from available NAS site images")
+    wa.add_argument("--site", action="append", default=[])
     skillsbench = sub.add_parser("skillsbench", help="SkillsBench task import and OpenHands profile checks")
     sb_sub = skillsbench.add_subparsers(dest="skillsbench_command", required=True)
     sb = sb_sub.add_parser("import", help="Freeze explicit tasks from the pinned official checkout")
@@ -152,6 +165,9 @@ def main(argv=None):
                    help="Select one repetition per run (zero-based index or rep-000); repeat for each multi-repetition run")
     q.add_argument("--format", choices=["json", "markdown"], default="json")
     q.add_argument("--output", type=Path, help="Optional new report file; refuses overwrite")
+    q = run_sub.add_parser("merge", help="Merge accepted samples from SOURCE_RUN into DESTINATION_RUN")
+    q.add_argument("source_run", metavar="SOURCE_RUN")
+    q.add_argument("destination_run", metavar="DESTINATION_RUN")
     run_sub.add_parser("list")
     run_sub.add_parser("active-status", help="Query all live runs and their progress")
     harness = sub.add_parser("harness", help="Prepare, run and inspect run-local harness results")
@@ -267,6 +283,8 @@ def main(argv=None):
     for cmd in ["tasks-import", "rollouts-import", "evaluations-import"]:
         sub.add_parser(cmd).add_argument("list")
     sub.add_parser("model-register").add_argument("checkpoint")
+    wav_images = sub.add_parser("webarena-images", help="Freeze selected Verified tasks and cache shared site images in NAS")
+    wav_images.add_argument("action", choices=["plan", "prepare", "build-wikipedia", "status", "verify"])
     skills_images = sub.add_parser("skillsbench-images", help="Prepare pinned SkillsBench images in NAS")
     skills_images.add_argument("action", choices=["plan", "prepare", "status", "verify"])
     skills_images.add_argument("--task-id", action="append", default=[])
@@ -500,6 +518,16 @@ def main(argv=None):
             parser.error(str(exc))
         print(rendered)
         return
+    if a.command == "run" and a.run_command == "merge":
+        if a.analysis_run_id or a.set:
+            parser.error("run merge reads only the two frozen run snapshots; do not pass --run-id or --set")
+        from application.execution.merge import merge_runs
+        try:
+            result = merge_runs(Path(a.config).resolve().parent, a.source_run, a.destination_run)
+        except (ValueError, OSError) as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     explicit_run = a.analysis_run_id or getattr(a, "run_id", None)
     if a.command == "harness" and a.harness_command == "metadata-prefetch":
         if a.analysis_run_id or a.set:
@@ -539,6 +567,7 @@ def main(argv=None):
     use_snapshot = ((a.command == "run" and a.run_command not in {"create", "list", "active-status"})
                     or (a.command in run_commands and not (
                         a.command == "artifact" and getattr(a, "scope", "run") != "run"))
+                    or (a.command == "webarena" and a.webarena_command == "preflight")
                     or a.analysis_run_id is not None
                     or (a.command in {"enrich", "token-trace", "trajectory-token-audit", "hidden", "dataset-index", "token-join"} and explicit_run is not None))
     if use_snapshot:
@@ -547,7 +576,32 @@ def main(argv=None):
         from application.execution.run_plan import load_plan
         cfg = load_plan(Path(a.config).resolve().parent, explicit_run)["config"]
     else:
-        cfg = resolve(a.config, a.set)
+        # Frozen clones validate their overrides against the source snapshot in
+        # create_run; the current root may use an entirely different topology.
+        cloning = a.command == "run" and a.run_command == "create" and a.from_run is not None
+        cfg = resolve(a.config, () if cloning else a.set)
+    if a.command == "webarena":
+        if a.set or a.analysis_run_id:
+            parser.error("webarena uses root configuration for registry operations and frozen configuration for preflight")
+        if a.webarena_command == "import":
+            from catalog.webarena import import_tasks
+            result = import_tasks(cfg, a.source, subset=a.subset, task_ids=a.task_id)
+        elif a.webarena_command == "evaluator-prepare":
+            from benchmark_evaluation.webarena import prepare_runtime
+            result = prepare_runtime(cfg, source=a.source)
+        elif a.webarena_command == "browser-prepare":
+            from runtime.images.webarena_browser import prepare_browser
+            result = prepare_browser(cfg)
+        elif a.webarena_command == "environments-prepare":
+            from runtime.images.webarena_environments import prepare_environments
+            result = prepare_environments(cfg, sites=a.site)
+        else:
+            from runtime.containers.webarena_adapter import preflight
+            result = preflight(Path(cfg["project_root"]), a.run_id)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if a.webarena_command == "preflight" and not result.get("passed"):
+            raise SystemExit(2)
+        return
     if a.command == "skillsbench":
         if a.set or a.analysis_run_id:
             parser.error("skillsbench registry commands read the editable root config; no run override")
@@ -632,6 +686,18 @@ def main(argv=None):
         elif a.skillsbench_command == "gpu-smoke":
             from runtime.agents.skillsbench import capture_gpu_smoke
             print(json.dumps(capture_gpu_smoke(cfg["project_root"], a.run_id), ensure_ascii=False, indent=2))
+        return
+    if a.command == "webarena-images":
+        if a.set or a.analysis_run_id:
+            parser.error("webarena-images reads root config.yaml; no run override")
+        if not cfg.get("webarena_images"):
+            parser.error("Configure webarena_images in root config.yaml")
+        from runtime.images import webarena
+        result = (webarena.status(cfg, deep=a.action == "verify")
+                  if a.action in {"status", "verify"} else getattr(webarena, a.action.replace("-", "_"))(cfg))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if a.action != "plan" and result["status"] != "complete":
+            raise SystemExit(2)
         return
     if a.command == "skillsbench-images":
         if a.set or a.analysis_run_id:

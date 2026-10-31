@@ -99,17 +99,29 @@ def _finish_attempt(cfg, run_id, task, sample, context, out, runtime, state,
     if candidates:
         rid, row = candidates[0]
         canonical = root / row['trajectory_path']
-        for kind in ('trajectory', 'patch'):
+        from application.execution.subject import artifact_kinds
+        for kind in artifact_kinds(row):
             if sha256(root / row[kind + '_path']) != row[kind + '_sha256']:
                 raise ValueError('Recovered canonical bytes changed')
+        if task.get('benchmark') == 'webarena_verified':
+            from application.execution.subject import verify_subject
+            verify_subject(root, row)
         if path.exists() and sha256(path) != row['trajectory_sha256']:
             raise ValueError('Recovered raw and canonical bytes disagree')
     else:
+        subject_spec = {}
+        if task.get('benchmark') == 'webarena_verified':
+            subject_path = out / 'web-subject' / 'subject.json'
+            if not subject_path.exists():
+                from runtime.agents.webarena import finalize_subject
+                subject_path, _ = finalize_subject(task, out, context, None, '',
+                                                   state.get('agent_exit_status', 'Unknown'))
+            subject_spec = {'subject': str(subject_path), 'subject_sha256': sha256(subject_path)}
         rid = import_rollout(root, {
             'source': str(path), 'task': task, 'run_id': run_id,
             'attempt_id': context['attempt_id'], 'purposes': ['baseline'],
             'model_fingerprint': cfg['model']['fingerprint'], 'sample': sample.as_dict(),
-            'attempt_context': context, 'run_local': True,
+            'attempt_context': context, 'run_local': True, **subject_spec,
         })
         row = RunEvidence(root, run_id).read()['rollouts'][rid]
         canonical = root / row['trajectory_path']
@@ -161,6 +173,10 @@ def _finish_attempt(cfg, run_id, task, sample, context, out, runtime, state,
         status = 'CleanupError'
     if state.get('stats_error'):
         status = 'StatisticsError'
+    if task.get('benchmark') == 'webarena_verified' and (
+            state.get('web_subject_error') or state.get('web_subject_errors') or
+            (state['agent_exit_status'] == 'Submitted' and not read_json(root / row['subject_path'])['complete'])):
+        status = 'WebTraceError'
     timings = state.setdefault('timings', {})
     timings['capture_finalize_seconds'] = time.monotonic() - stamp
     result = {
@@ -175,7 +191,7 @@ def _finish_attempt(cfg, run_id, task, sample, context, out, runtime, state,
     if dependency_failure:
         result['dependency_failure'] = dependency_failure
         result['failure_type'] = 'dependency_error'
-    result['disposition'] = 'blocked' if status in {'CaptureError', 'StatisticsError', 'CleanupError'} else disposition(cfg, status)
+    result['disposition'] = 'blocked' if status in {'CaptureError', 'StatisticsError', 'CleanupError', 'WebTraceError'} else disposition(cfg, status)
     write_json(out / 'attempt.json', result)
     return result
 
@@ -186,11 +202,16 @@ def _execute_attempt(cfg, run_id, task, factory, runtime, sample, context, out):
         from runtime.agents.skillsbench import execute_attempt
 
         return execute_attempt(cfg, run_id, task, runtime, sample, context, out, factory)
+    webarena = task.get('benchmark') == 'webarena_verified'
     from hidden.backends.vllm.online import CaptureClient, capture_request_metadata
     from rollout.agent import DurableAgent
     from rollout.model import make_model
     from runtime.containers.factory import TaskContext
-    from runtime.containers.rollout_adapter import RolloutEnvironment
+    if webarena:
+        from runtime.containers.webarena_adapter import WebArenaEnvironment
+        RolloutEnvironment = WebArenaEnvironment
+    else:
+        from runtime.containers.rollout_adapter import RolloutEnvironment
 
     run = Path(cfg['project_root']) / 'runs' / run_id
     path = out / 'raw.traj.json'
@@ -250,16 +271,24 @@ def _execute_attempt(cfg, run_id, task, factory, runtime, sample, context, out):
                 capture_context = False
                 capture_status = 'failed'
                 capture_failure(exc)
+        agent_cfg = cfg['agent']
+        if webarena:
+            from runtime.agents.webarena import WebArenaAgent
+            DurableAgent = WebArenaAgent
+            profile = cfg['execution_context']['profile']
+            agent_cfg = {**agent_cfg, **{key: profile[key] for key in (
+                'system_template', 'instance_template', 'observation_template', 'format_error_template')}}
+            local_cfg['agent'] = agent_cfg
         agent = DurableAgent(
             make_model(local_cfg, factory.deadline, capture_context, runtime), env,
-            system_template=cfg['agent']['system_template'], instance_template=cfg['agent']['instance_template'],
+            system_template=agent_cfg['system_template'], instance_template=agent_cfg['instance_template'],
             step_limit=cfg['agent']['step_limit'], cost_limit=cfg['agent']['cost_limit'],
             max_consecutive_format_errors=cfg['agent']['max_consecutive_format_errors'],
             loop_repeat_limit=cfg['agent'].get('loop_repeat_limit'), loop_max_period=cfg['agent'].get('loop_max_period', 7),
             output_path=path)
         _phase(runtime, sample, 'agent')
         stage_start = time.monotonic()
-        info = agent.run(task['instance']['problem_statement'])
+        info = agent.run(task['instance']['intent'] if webarena else task['instance']['problem_statement'])
         status, patch = info.get('exit_status', 'Unknown'), info.get('submission', '')
     except Exception as exc:
         if agent is not None and getattr(exc, 'response_message', None) is not None:
@@ -281,6 +310,16 @@ def _execute_attempt(cfg, run_id, task, factory, runtime, sample, context, out):
                 agent.save(path, extra)
             elif not path.exists():
                 write_json(path, {**extra, 'messages': []})
+            if webarena:
+                try:
+                    from runtime.agents.webarena import finalize_subject
+                    subject_path, subject_errors = finalize_subject(
+                        task, out, context, env, patch, status)
+                    if subject_errors:
+                        state['web_subject_errors'] = subject_errors
+                    state['subject_path'] = str(subject_path)
+                except Exception as exc:
+                    state['web_subject_error'] = repr(exc)
             stamp = time.monotonic()
             if counts_recorded(run):
                 try:
@@ -565,6 +604,7 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
 def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_only=False):
     from core.backends import identity
     skillsbench = identity(cfg) == ("skillsbench", "openhands")
+    webarena = identity(cfg) == ("webarena_verified", "minisweagent")
     if not skillsbench:
         os.environ["MSWEA_GLOBAL_CONFIG_DIR"] = str(Path(cfg["project_root"]) / "state/miniswe-config")
         os.environ["MSWEA_SILENT_STARTUP"] = "1"
@@ -576,6 +616,9 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
     if skillsbench:
         from runtime.agents.skillsbench import SkillsBenchFactory
         ContainerFactory = SkillsBenchFactory
+    elif webarena:
+        from runtime.containers.webarena_adapter import WebArenaFactory
+        ContainerFactory = WebArenaFactory
     else:
         from runtime.containers.factory import ContainerFactory
     from runtime.serving.manager import ServingManager
@@ -643,7 +686,8 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
     verify_model(cfg)
     run = root / "runs" / run_id
     write_json(run / "process.json", {"pid": os.getpid(), "supervisor_pid": os.getppid()})
-    factory = factory or (ContainerFactory(cfg, run_id) if skillsbench else ContainerFactory(cfg))
+    factory = factory or (ContainerFactory(cfg, run_id) if skillsbench else
+                          ContainerFactory(cfg, run_id) if webarena else ContainerFactory(cfg))
     outcomes = dict(settled)
     update_status(run / "status.json", "rollout")
     try:
@@ -654,6 +698,12 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
             write_json(run / 'validation/startup-preflight.json', checked)
             if checked['blockers']:
                 raise ValueError('SkillsBench preflight rejected run: ' + '; '.join(checked['blockers']))
+        elif webarena:
+            from runtime.containers.webarena_adapter import preflight
+            checked = preflight(root, run_id, factory=factory, tasks=list(selection['tasks'].values()))
+            write_json(run / 'validation/webarena-preflight.json', checked)
+            if not checked.get('passed'):
+                raise ValueError('WebArena preflight rejected run: ' + '; '.join(map(str, checked.get('blockers', []))))
         sharded = cfg['serving'].get('trajectory_sharding', 'none') == 'per_gpu_tp1'
         if sharded:
             from runtime.serving.pool import ServingPool

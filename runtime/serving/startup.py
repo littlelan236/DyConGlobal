@@ -14,6 +14,7 @@ from runtime.containers.rollout_adapter import RolloutEnvironment
 
 
 def check_tool_chain(cfg, run_id, task, factory, runtime):
+    webarena = task.get("benchmark") == "webarena_verified"
     root = Path(cfg["project_root"])
     out = Path(runtime.get("startup_output", root / "runs" / run_id / "startup"))
     out.mkdir(parents=True, exist_ok=True)
@@ -37,21 +38,40 @@ def check_tool_chain(cfg, run_id, task, factory, runtime):
             capture_select=inv["capture_select"],
         )
         controller.start(metadata)
+    system = (cfg["execution_context"]["profile"]["system_template"] if webarena else
+              cfg["agent"]["system_template"])
     messages = [
-        {"role": "system", "content": cfg["agent"]["system_template"]},
+        {"role": "system", "content": system},
         {
             "role": "user",
             "content": "This is a startup tool check. Think briefly about the current directory and environment, "
             "then call bash exactly once to run: pwd; printf 'DYCON_STARTUP_OK\\n'. Do not modify any files.",
         },
     ]
-    env = RolloutEnvironment(
+    environment_class = RolloutEnvironment
+    if webarena:
+        import copy
+
+        from runtime.containers.webarena_adapter import WebArenaEnvironment
+        environment_class = WebArenaEnvironment
+        cfg = copy.deepcopy(cfg)
+        profile = cfg['execution_context']['profile']
+        cfg['agent'].update({key: profile[key] for key in (
+            'system_template', 'instance_template', 'observation_template', 'format_error_template')})
+    env = environment_class(
         factory, task["instance"], TaskContext(run_id, task["instance_id"], "startup", "rollout", out)
     )
+    if webarena:
+        messages[1]["content"] = (
+            "This is a browser protocol startup check. Call bash exactly once with "
+            "command=\"browser scroll [down]\".\nInitial observation:\n" + env.initial_observation
+        )
     try:
         message = make_model(cfg, factory.deadline, metadata, runtime).query(messages)
         messages.append(message)
         actions = message["extra"]["actions"]
+        if webarena and (len(actions) != 1 or actions[0].get("command", "").strip() != "browser scroll [down]"):
+            raise ValueError("WebArena startup requires exactly one prescribed browser scroll action")
         from core.io import hash_json
 
         recorder = runtime.get("capture_controller") if message.get("extra", {}).get("dycon_parallel") else None
@@ -62,7 +82,7 @@ def check_tool_chain(cfg, run_id, task, factory, runtime):
             recorder.record_parallel_action(message["extra"]["dycon_parallel"], "completed",
                                             {"observations_sha256": hash_json(observations)})
         if not observations or not any(
-            "DYCON_STARTUP_OK" in o["output"] and o["returncode"] == 0 for o in observations
+            (webarena or "DYCON_STARTUP_OK" in o["output"]) and o["returncode"] == 0 for o in observations
         ):
             raise ValueError("Startup tool did not execute successfully in the real container")
         path = out / "trajectory.json"
@@ -145,9 +165,9 @@ def check_tool_chain(cfg, run_id, task, factory, runtime):
                 session_id=sid,
             )
         receipt["passed"] = True
-        if cap and runtime.get("validation_mixed"):
+        if cap and runtime.get("validation_mixed") and not webarena:
             receipt["mixed_batch"] = check_mixed_batches(cfg, run_id, factory, runtime)
-        if (runtime.get("validation_mixed") and cfg.get("parallel", {}).get("enabled")
+        if (runtime.get("validation_mixed") and not webarena and cfg.get("parallel", {}).get("enabled")
                 and cfg["parallel"]["branch_count"] > 1
                 and cfg["parallel"].get("validation_repetitions", 0)):
             from runtime.serving.parallel_validation import validate_parallel_queries

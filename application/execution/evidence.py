@@ -5,9 +5,9 @@ import copy
 from contextlib import contextmanager
 from pathlib import Path
 
+from application.execution.subject import artifact_kinds, subject_digest, verify_subject
 from core.io import artifact_reference, hash_json, identifier, owned_path, read_json, sha256, write_json
 from core.locking import file_lock
-from application.execution.subject import artifact_kinds, subject_digest, verify_subject
 
 
 class RunEvidence:
@@ -54,7 +54,7 @@ class RunEvidence:
             if key in data["tasks"] and data["tasks"][key] != task:
                 raise ValueError("Conflicting run task definition")
             data["tasks"][key] = task
-            if row.get("evaluation_subject", {}).get("kind") == "workspace":
+            if row.get("evaluation_subject", {}).get("kind") in {"workspace", "web_trace"}:
                 data["schema_version"] = 2
             data["rollouts"][rollout_id] = row
 

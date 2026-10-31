@@ -10,9 +10,22 @@ from pathlib import Path
 
 from core.io import hash_json, read_json, sha256
 
+SWE_TASK_BENCHMARKS = frozenset({
+    "swebench", "swebench_verified", "swebench_lite", "swebench_full",
+    "SWE-bench_Verified", "SWE-bench_NonVerified600", "SWE-bench_Lite", "SWE-bench",
+    "legacy-tactRefractor-swebench",
+    "fixture",  # Explicit synthetic family used by the repository's regression fixtures.
+})
+
+
+def benchmark_family(name):
+    return "swebench" if name in SWE_TASK_BENCHMARKS else name
+
+
 CAPABILITIES = {
     ("swebench", "minisweagent"): {"subject": "patch", "action_analysis": True},
     ("skillsbench", "openhands"): {"subject": "workspace", "action_analysis": False},
+    ("webarena_verified", "minisweagent"): {"subject": "web_trace", "action_analysis": False},
 }
 
 
@@ -27,7 +40,7 @@ def capabilities(cfg, operation=None):
         raise ValueError(f"Unsupported benchmark/agent combination: {pair}")
     result = copy.deepcopy(CAPABILITIES[pair])
     if operation == "action" and not result["action_analysis"]:
-        raise ValueError("action analysis does not support SkillsBench/OpenHands")
+        raise ValueError(f"action analysis does not support {pair[0]}/{pair[1]}")
     if pair[1] == "openhands" and cfg.get("steering", {}).get("enabled"):
         raise ValueError("OpenHands steering has not been qualified")
     return result
@@ -36,10 +49,66 @@ def capabilities(cfg, operation=None):
 def execution_context(cfg, tasks):
     capabilities(cfg)
     benchmark, agent = identity(cfg)
-    if benchmark == "swebench":
-        if any(t["benchmark"] == "skillsbench" for t in tasks.values()):
-            raise ValueError("SkillsBench tasks require skillsbench + openhands")
-        return None  # Preserve legacy run and task hashes byte for byte.
+    if benchmark in {"swebench", "webarena_verified"}:
+        expected = "swebench" if benchmark == "swebench" else "webarena_verified"
+        if any(benchmark_family(t["benchmark"]) != expected for t in tasks.values()):
+            raise ValueError(f"{benchmark} backend cannot execute tasks from another benchmark family")
+        if benchmark == "swebench":
+            return None  # Preserve legacy run and task hashes byte for byte.
+        options = cfg.get("webarena")
+        if not options:
+            raise ValueError("WebArena Verified requires webarena runtime configuration")
+        root = Path(cfg["project_root"]).resolve()
+
+        def project_file(ref):
+            path = (root / ref).resolve()
+            if not path.is_relative_to(root) or not path.is_file():
+                raise ValueError("WebArena references must name existing project files")
+            return path
+
+        from runtime.containers.webarena_adapter import validate_pool_manifest, validate_reference
+        browser_path, pool_path = project_file(options["browser_image_ref"]), project_file(options["environment_pool_ref"])
+        browser_ref = validate_reference(read_json(browser_path))
+        pool = validate_pool_manifest(read_json(pool_path))
+        snapshot_ref = cfg["benchmark"].get("snapshot_ref")
+        if not snapshot_ref:
+            raise ValueError("WebArena Verified requires benchmark.snapshot_ref")
+        snapshot_path = project_file(snapshot_ref)
+        snapshot = read_json(snapshot_path)
+        if snapshot.get("schema_version") != 1 or snapshot.get("benchmark") != benchmark:
+            raise ValueError("Invalid WebArena Verified snapshot")
+        if snapshot.get("revision") != pool.get("revision"):
+            raise ValueError("WebArena environment pool and task snapshot revisions differ")
+        for key, task in tasks.items():
+            if task["benchmark"] != benchmark or task["revision"] != snapshot["revision"] or snapshot["tasks"].get(key) != task:
+                raise ValueError("Task does not belong to frozen WebArena snapshot")
+            if not set(task["instance"]["sites"]) <= set(pool["sites"]):
+                raise ValueError("WebArena task requires sites missing from the frozen environment pool")
+        evaluator = snapshot.get("evaluator")
+        if not evaluator or sha256(project_file(evaluator["path"])) != evaluator["sha256"]:
+            raise ValueError("Frozen WebArena evaluator dataset is missing or changed")
+        from catalog.webarena import validate_profile
+        profile_ref = cfg["agent"].get("profile_ref") or snapshot.get("profile_ref")
+        if not profile_ref:
+            raise ValueError("WebArena Verified requires an immutable browser agent profile")
+        profile_path = project_file(profile_ref)
+        profile = validate_profile(read_json(profile_path))
+        if snapshot.get("profile_sha256") != sha256(profile_path):
+            raise ValueError("Browser profile differs from the imported snapshot")
+        from benchmark_evaluation.webarena import runtime_reference
+        context = {"schema_version": 1, "benchmark": benchmark, "agent": agent,
+                   "revision": snapshot["revision"], "snapshot_sha256": sha256(snapshot_path),
+                   "profile_sha256": sha256(profile_path), "profile": profile,
+                   "task_keys": sorted(tasks), "decoder": copy.deepcopy(cfg.get("parallel", {})),
+                   "generation": copy.deepcopy(cfg["generation"]),
+                   "evaluator": copy.deepcopy(evaluator),
+                   "evaluator_runtime": runtime_reference(cfg),
+                   "evaluator_python": options["evaluator_python"],
+                   "evaluator_timeout_seconds": options["evaluator_timeout_seconds"],
+                   "webarena_runtime": {"browser_image": browser_ref, "environment_pool": pool,
+                       "browser_image_sha256": sha256(browser_path), "environment_pool_sha256": sha256(pool_path),
+                       "max_browser_actions": options["max_browser_actions"]}}
+        return {**context, "context_sha256": hash_json(context)}
     ref = cfg["agent"].get("profile_ref")
     snapshot_ref = cfg["benchmark"].get("snapshot_ref")
     if not ref or not snapshot_ref:

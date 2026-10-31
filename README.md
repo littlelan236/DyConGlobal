@@ -11,7 +11,8 @@ Coding-agent rollout、官方 SWE-bench harness、在线 hidden capture、离线
 | [最小运行清单](docs/MINIMUM-RUN-CN.md) | 每个功能模块的最少操作、统一 run 入口、产物与恢复 |
 | [任务入口与接口约定](docs/ENTRYPOINTS.md) | 全部 CLI、输入格式、环境、token/site/label 契约及能力边界 |
 | [多 GPU、每卡 TP=1](docs/MULTI-GPU-TP1-CN.md) | 单 run 按空闲卡分配完整轨迹、每卡 CPU worker 上限、状态与克隆配置 |
-| [WebArena Verified 接入评估](docs/WEBARENA-VERIFIED-COMPATIBILITY-ASSESSMENT-CN.md) | 仅接入 Verified 的任务、mini agent、NAS 容器与离线 harness 评估；尚未实现 |
+| [WebArena Verified 接入评估](docs/WEBARENA-VERIFIED-COMPATIBILITY-ASSESSMENT-CN.md) | Verified 任务、mini agent、NAS 容器与离线 harness 的实现边界与依据 |
+| [WebArena Verified 运行指南](docs/WEBARENA-VERIFIED-OPERATIONS-CN.md) | 固定版本安装、Full/Hard/Smoke 导入、浏览器环境验收及离线评分 |
 | [容器环境修复](docs/container-environment-repair-cn.md) | Docker/NAS 镜像、依赖、线程、网络、harness 环境问题的定位与验收 |
 
 指定失败任务的审计重跑使用 `dycon run retry-failed`；流程与证据布局见 [capture 控制修订与失败重跑](docs/CAPTURE-CONTROL-RETRY-CN.md)。已有 run 的参数调整仅走正式离线修订入口，保留变更前快照和 receipt。

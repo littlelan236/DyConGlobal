@@ -29,6 +29,15 @@ def import_rollout(root, spec):
     rid = "r-" + hash_json({"task_key": task_key, "trajectory_sha256": digest})[:32]
     termination = info.get("exit_status", "Unknown")
     workspace_subject = spec.get("subject")
+    if task["benchmark"] == "webarena_verified" and not workspace_subject:
+        raise ValueError("WebArena trajectories require a web_trace subject; patch fallback is forbidden")
+    subject_kind = read_json(workspace_subject).get("kind") if workspace_subject else None
+    if workspace_subject and subject_kind not in {"workspace", "web_trace"}:
+        raise ValueError("Unknown evaluation subject kind")
+    if task["benchmark"] == "webarena_verified" and subject_kind != "web_trace":
+        raise ValueError("WebArena trajectories require a web_trace subject")
+    if subject_kind == "web_trace" and task["benchmark"] != "webarena_verified":
+        raise ValueError("Web trace subjects belong only to WebArena Verified tasks")
     submission = info.get("submission") or "" if not workspace_subject else ""
     with file_lock(root / f"state/import-{rid}.lock"):
         run_catalog = RunEvidence(root, run_id)
@@ -66,7 +75,7 @@ def import_rollout(root, spec):
             "purposes": spec.get("purposes", []),
             "trajectory_path": artifact_reference(root, trajectory),
             "trajectory_sha256": digest,
-            "submission_status": "not_applicable" if workspace_subject else (
+            "submission_status": "not_applicable" if subject_kind == "workspace" else (
                 "submitted" if termination == "Submitted" else "unsubmitted"),
             "termination_reason": termination,
             "evaluation_status": "not_run",
@@ -83,26 +92,32 @@ def import_rollout(root, spec):
         }
         if task["benchmark"] == "skillsbench":
             row["task_package_sha256"] = task["instance"]["package_sha256"]
+        if task["benchmark"] == "webarena_verified":
+            row.update({key: task["instance"][key] for key in (
+                "source_task_id", "task_revision", "intent_template_id", "source_task_sha256")})
+            row["task_definition_sha256"] = hash_json(task)
         if workspace_subject:
             from application.execution.subject import verify_subject
             manifest_path = Path(workspace_subject).resolve()
             if sha256(manifest_path) != spec["subject_sha256"]:
-                raise ValueError("Workspace subject changed before import")
+                raise ValueError("Evaluation subject changed before import")
             subject_root = artifact_root / "submissions" / rid
             subject_root.mkdir(parents=True, exist_ok=True)
             target = subject_root / "subject.json"
             if target.exists() and sha256(target) != spec["subject_sha256"]:
-                raise ValueError("Conflicting immutable workspace subject")
+                raise ValueError("Conflicting immutable evaluation subject")
             if not target.exists():
                 shutil.copyfile(manifest_path, target)
             for output in read_json(manifest_path)["outputs"]:
-                src = manifest_path.parent / output["path"]
-                dst = subject_root / output["path"]
+                src = owned_path(manifest_path.parent, output["path"])
+                dst = owned_path(subject_root, output["path"])
+                if src.is_symlink() or not src.is_file() or sha256(src) != output["sha256"]:
+                    raise ValueError("Evaluation subject output changed before import")
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 if not dst.exists():
                     shutil.copyfile(src, dst)
-            row.update({"evaluation_subject": {"kind": "workspace", "schema_version": 1,
-                                                "re_evaluation": False},
+            row.update({"evaluation_subject": {"kind": subject_kind, "schema_version": 1,
+                                                "re_evaluation": subject_kind == "web_trace"},
                         "subject_path": artifact_reference(root, target),
                         "subject_sha256": sha256(target)})
             verify_subject(root, row)
@@ -126,7 +141,7 @@ def import_rollout(root, spec):
                 row[key] = execution[key]
             row["provenance"]["attempt_context"] = execution
         run_catalog.register_rollout(rid, row, task)
-        if workspace_subject and spec.get("evaluation") is not None:
+        if subject_kind == "workspace" and spec.get("evaluation") is not None:
             report = Path(spec["evaluation_report"]).resolve()
             if not report.is_relative_to(run_path(root, run_id).resolve()):
                 raise ValueError("SkillsBench evaluation report must be run-local")

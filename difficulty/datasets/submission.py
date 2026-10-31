@@ -12,11 +12,11 @@ from pathlib import Path
 
 import numpy as np
 
+from application.execution.subject import artifact_kinds, subject_digest, verify_subject
 from core.io import cache_roots, hash_json, owned_path, read_json, sha256, write_json
 from core.locking import file_lock
-from difficulty.receipts import verify_receipt
 from difficulty.datasets.identity import task_group, task_key, validate_same_task
-from application.execution.subject import verify_subject
+from difficulty.receipts import verify_receipt
 
 
 def load_selection(cfg, settings):
@@ -65,9 +65,10 @@ def load_selection(cfg, settings):
                     raise ValueError('Resolved selection does not bind a successful workspace subject')
             else:
                 outcomes = [r.get('outcomes', {}).get(row['rollout_id']) for r in reports if isinstance(r, dict)]
+                digest_key, digest = subject_digest(row)
                 if not any(o and o.get('resolved') is True and o.get('status') == 'completed'
-                           and o.get('patch_sha256') == row['patch_sha256'] for o in outcomes):
-                    raise ValueError('Resolved selection does not bind a successful exact patch')
+                           and o.get(digest_key) == digest for o in outcomes):
+                    raise ValueError('Resolved selection does not bind a successful exact evaluation subject')
         if cfg.get('model', {}).get('fingerprint') and row['model_fingerprint'] != cfg['model']['fingerprint']:
             raise ValueError('Training input hidden model differs from configured model fingerprint')
         expected_terminal = "AgentCompleted" if is_workspace else "Submitted"
@@ -84,8 +85,12 @@ def load_selection(cfg, settings):
         if len(steps) != row["canonical_valid_assistant_steps"]:
             raise ValueError("Canonical step count changed")
         row["_message_indices"] = steps
-        if is_workspace:
+        if 'subject' in artifact_kinds(row):
             verify_subject(cfg["project_root"], row)
+            if row.get('evaluation_subject', {}).get('kind') == 'web_trace':
+                manifest = read_json(owned_path(cfg['project_root'], row['subject_path']))
+                if not (resolved_only or row.get('training_eligibility') == 'resolved_only') or not manifest.get('complete'):
+                    raise ValueError('WebArena training requires resolved-only complete web trace subjects')
         else:
             paths[str(owned_path(cfg["project_root"], row["patch_path"]))] = row["patch_sha256"]
         for path, digest in row["source_files"].items():
@@ -105,7 +110,7 @@ def load_selection(cfg, settings):
         if sample["message_index"] != row["_message_indices"][step]:
             raise ValueError("Sample message/step mismatch")
         if any(sample.get(k) != row.get(k) for k in ("benchmark", "revision", "repo", "instance_id",
-                                                       "source_kind", "trajectory_sha256")):
+                                                       "source_kind", "trajectory_sha256", "intent_template_id")):
             raise ValueError("Sample/rollout identity mismatch")
         if sample["task_group"] != task_group(row):
             raise ValueError("Sample logical task mismatch")

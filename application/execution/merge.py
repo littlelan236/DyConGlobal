@@ -1,0 +1,316 @@
+"""Merge accepted sample artifacts from one finished rollout run into another."""
+
+from __future__ import annotations
+
+import copy
+import json
+import shutil
+from collections import Counter
+from pathlib import Path
+
+from core.io import artifact_reference, hash_json, identifier, now, read_json, run_path, sha256, write_json
+from core.locking import file_lock
+from .evidence import RunEvidence
+from .run_plan import load_plan
+from rollout.retry import sample_accepted
+
+
+PENDING_STATUSES = {"Pending", "Running"}
+PENDING_DISPOSITIONS = {"pending", "retry_pending", "infrastructure_retry", "interrupted"}
+TERMINAL_RUN_STAGES = {"complete", "failed", "cancelled", "validated"}
+
+
+def sample_state(cfg, value):
+    """Classify a sample for merge precedence without treating AgentCompleted as failure."""
+    if not value or value.get("exit_status") in PENDING_STATUSES or value.get("disposition") in PENDING_DISPOSITIONS:
+        return "pending"
+    if sample_accepted(cfg, value):
+        return "accepted"
+    return "failed"
+
+
+def choose_sample(destination, source, destination_cfg, source_cfg):
+    """Apply source non-pending over pending and source accepted over failed."""
+    dst_state = sample_state(destination_cfg, destination)
+    src_state = sample_state(source_cfg, source)
+    if (dst_state == "pending" and src_state != "pending") or (dst_state == "failed" and src_state == "accepted"):
+        return "source"
+    return "destination"
+
+
+def _copy_file(source, destination):
+    source, destination = Path(source), Path(destination)
+    if not source.is_file():
+        raise ValueError(f"Missing source artifact: {source}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        if sha256(source) != sha256(destination):
+            raise ValueError(f"Conflicting merge artifact: {destination}")
+        return
+    shutil.copyfile(source, destination)
+
+
+def _copy_tree(source, destination):
+    source, destination = Path(source), Path(destination)
+    if not source.is_dir():
+        raise ValueError(f"Missing source artifact directory: {source}")
+    for item in source.rglob("*"):
+        relative = item.relative_to(source)
+        target = destination / relative
+        if item.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif item.is_file():
+            _copy_file(item, target)
+        else:
+            raise ValueError(f"Unsupported merge artifact: {item}")
+
+
+def _destination_sample(item, source_result, destination_run, attempt_id):
+    value = copy.deepcopy(source_result)
+    for key in ("run_id", "task_key", "instance_id", "repetition_id", "repetition_index",
+                "sample_key", "sample_seed", "seed_policy"):
+        value[key] = item[key]
+    source_attempt = source_result.get("attempt_id")
+    value["attempt_id"] = attempt_id
+    if value.get("last_attempt_id") == source_attempt:
+        value["last_attempt_id"] = attempt_id
+    value["source_run_id"] = source_result.get("run_id")
+    value["source_sample_key"] = source_result.get("sample_key")
+    value["source_attempt_id"] = source_attempt
+    value["merged_from"] = {"run_id": source_result.get("run_id"), "attempt_id": source_attempt}
+    return value
+
+
+def _copy_attempt(source_work, destination_work, source_attempt, destination_attempt, item, destination_run):
+    source_dir = source_work / "attempts" / source_attempt
+    if not source_dir.is_dir():
+        return
+    destination_dir = destination_work / "attempts" / destination_attempt
+    _copy_tree(source_dir, destination_dir)
+    # Attempt metadata is state, not immutable model output, so bind it to B.
+    for name in ("attempt-context.json", "agent-outcome.json", "attempt.json", "execution-state.json"):
+        path = destination_dir / name
+        if not path.exists():
+            continue
+        try:
+            value = read_json(path)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        for key in ("run_id", "task_key", "sample_key", "repetition_id", "sample_seed"):
+            if key in item:
+                value[key] = item[key]
+        if "attempt_id" in value:
+            value["attempt_id"] = destination_attempt
+        value["source_run_id"] = value.get("source_run_id") or source_dir.parts[-3]
+        value["source_attempt_id"] = source_attempt
+        write_json(path, value)
+
+
+def _copy_rollout_artifacts(root, source_run, destination_run, source_row, destination_row):
+    """Copy canonical trajectory/patch/subject bytes under B's run-owned paths."""
+    source_root = run_path(root, source_run)
+    destination_root = run_path(root, destination_run)
+    for kind in ("trajectory", "patch"):
+        field = kind + "_path"
+        if field not in source_row:
+            continue
+        source = root / source_row[field]
+        destination = destination_root / "rollout" / ("trajectories" if kind == "trajectory" else "patches") / destination_row["rollout_id"] / source.name
+        _copy_file(source, destination)
+        destination_row[field] = artifact_reference(root, destination)
+        destination_row[kind + "_sha256"] = sha256(destination)
+    if "subject_path" in source_row:
+        source = root / source_row["subject_path"]
+        destination = destination_root / "rollout" / "submissions" / destination_row["rollout_id"] / source.name
+        _copy_tree(source.parent, destination.parent)
+        destination_row["subject_path"] = artifact_reference(root, destination)
+        destination_row["subject_sha256"] = sha256(destination)
+
+
+def _append_event(run, event):
+    events = run / "events"
+    events.mkdir(parents=True, exist_ok=True)
+    numbers = []
+    for path in events.glob("*.json"):
+        try:
+            numbers.append(int(path.stem))
+        except ValueError:
+            continue
+    path = events / f"{max(numbers, default=0) + 1:06d}.json"
+    write_json(path, event)
+    return path
+
+
+def _rebuild_progress(destination_run, destination_cfg, work_items, samples):
+    accepted = sum(sample_state(destination_cfg, value) == "accepted" for value in samples.values())
+    failed = sum(value.get("disposition") in {"failed", "blocked"} for value in samples.values())
+    progress_path = destination_run / "progress.json"
+    previous = read_json(progress_path) if progress_path.exists() else {}
+    progress = {
+        "schema_version": 2,
+        "updated_at": now(),
+        "samples": samples,
+        "planned_samples": len(work_items),
+        "accepted_samples": accepted,
+        "failed_samples": failed,
+        "pending_samples": len(work_items) - accepted - failed,
+        "physical_attempts": sum(value.get("physical_attempts", 0) for value in samples.values()),
+        "resample_retry_count": sum(value.get("resample_retry_count", 0) for value in samples.values()),
+        "infrastructure_retry_count": sum(value.get("infrastructure_retry_count", 0) for value in samples.values()),
+        "limits_exceeded_count": previous.get("limits_exceeded_count", 0),
+        "reasoning_loop_count": previous.get("reasoning_loop_count", 0),
+        "resample_trigger_count": previous.get("resample_trigger_count", 0),
+        "ready_samples": len(work_items) - accepted - failed,
+        "running_attempts": 0,
+        "active_generation_samples": 0,
+        "finalizing_attempts": 0,
+        "admission_waiting_samples": 0,
+        "counts_path": previous.get("counts_path", str(destination_run / "rollout/limits-exceeded-counts.json")),
+        "observability_errors": previous.get("observability_errors", []),
+        "environment_dependency_failure_count": previous.get("environment_dependency_failure_count", 0),
+        "phase_projection_path": str(destination_run / "rollout/phases.json"),
+    }
+    write_json(progress_path, progress)
+    write_json(destination_run / "rollout" / "phases.json", {
+        "updated_at": progress["updated_at"], "ready_samples": progress["ready_samples"],
+        "running_attempts": 0, "active_generation_samples": 0,
+        "finalizing_attempts": 0, "admission_waiting_samples": 0,
+    })
+    return progress
+
+
+def merge_runs(root, source_run_id, destination_run_id):
+    """Merge accepted source samples into a finished destination run."""
+    root = Path(root).resolve()
+    source_run_id, destination_run_id = identifier(source_run_id), identifier(destination_run_id)
+    if source_run_id == destination_run_id:
+        raise ValueError("Source and destination runs must differ")
+    lock_ids = sorted((source_run_id, destination_run_id))
+    with file_lock(root / "state/run-locks" / (lock_ids[0] + ".lock")):
+        with file_lock(root / "state/run-locks" / (lock_ids[1] + ".lock")):
+            source = load_plan(root, source_run_id)
+            destination = load_plan(root, destination_run_id)
+            if source["plan"]["operation"] != "rollout" or destination["plan"]["operation"] != "rollout":
+                raise ValueError("run merge requires rollout runs")
+            for loaded, label in ((source, "source"), (destination, "destination")):
+                stage = read_json(loaded["run"] / "status.json").get("stage")
+                if stage not in TERMINAL_RUN_STAGES:
+                    raise ValueError(f"{label} run is not finished: {stage}")
+            if source["plan"]["repeat_count"] != destination["plan"]["repeat_count"]:
+                raise ValueError("Runs must have the same repeat_count")
+            source_tasks = {row["task_key"]: row["task"] for row in source["tasks"]["tasks"]}
+            destination_tasks = {row["task_key"]: row["task"] for row in destination["tasks"]["tasks"]}
+            if source_tasks != destination_tasks:
+                raise ValueError("Runs must have identical frozen task definitions")
+            source_cfg, destination_cfg = source["config"], destination["config"]
+            source_progress = read_json(source["run"] / "progress.json")
+            destination_progress = read_json(destination["run"] / "progress.json")
+            source_samples = source_progress.get("samples", {})
+            destination_samples = destination_progress.get("samples", {})
+            source_by_identity = {(v.get("task_key"), v.get("repetition_id")): v for v in source_samples.values()}
+            destination_by_identity = {(v.get("task_key"), v.get("repetition_id")): (k, v) for k, v in destination_samples.items()}
+            source_evidence = RunEvidence(root, source_run_id).read()
+            destination_evidence = RunEvidence(root, destination_run_id)
+            source_rows = source_evidence["rollouts"]
+            changed = []
+            stats = Counter()
+            with destination_evidence.transaction() as evidence:
+                for identity, source_result in source_by_identity.items():
+                    if identity not in destination_by_identity:
+                        continue
+                    destination_key, destination_result = destination_by_identity[identity]
+                    choice = choose_sample(destination_result, source_result, destination_cfg, source_cfg)
+                    stats[f"{choice}_kept"] += 1
+                    if choice != "source":
+                        continue
+                    source_rid = source_result.get("rollout_id")
+                    source_row = source_rows.get(source_rid)
+                    if not source_row and sample_state(source_cfg, source_result) == "accepted":
+                        raise ValueError(f"Accepted source sample lacks evidence: {source_rid}")
+                    source_attempt = source_result.get("attempt_id") or "unknown"
+                    merge_attempt = f"merge-{source_run_id[:24]}-{source_attempt}"
+                    destination_item = next(item for item in destination["work_items"]["items"]
+                                            if item["sample_key"] == destination_key)
+                    if not source_row:
+                        source_work = source["run"] / "rollout/tasks" / source_result["instance_id"] / "repetitions" / source_result["repetition_id"]
+                        destination_work = destination["run"] / "rollout/tasks" / destination_item["instance_id"] / "repetitions" / destination_item["repetition_id"]
+                        _copy_attempt(source_work, destination_work, source_attempt, merge_attempt, destination_item, destination_run_id)
+                        destination_result = _destination_sample(destination_item, source_result, destination_run_id, merge_attempt)
+                        write_json(destination_work / "result.json", destination_result)
+                        destination_samples[destination_key] = destination_result
+                        changed.append({"task_key": destination_item["task_key"], "repetition_id": destination_item["repetition_id"], "sample_key": destination_key, "rollout_id": None, "source_attempt_id": source_attempt, "destination_attempt_id": merge_attempt})
+                        stats["source_overrides"] += 1
+                        continue
+                    destination_row = copy.deepcopy(source_row)
+                    destination_row["run_id"] = destination_run_id
+                    destination_row["rollout_id"] = source_rid
+                    destination_row["sample_key"] = destination_key
+                    destination_row["attempt_id"] = merge_attempt
+                    destination_row["provenance"] = {
+                        **copy.deepcopy(source_row.get("provenance", {})),
+                        "source_run_id": source_run_id,
+                        "source_rollout_id": source_rid,
+                        "source_attempt_id": source_attempt,
+                        "merged_into_run": destination_run_id,
+                    }
+                    if source_rid in evidence["rollouts"]:
+                        existing = evidence["rollouts"][source_rid]
+                        if existing.get("task_key") != destination_row.get("task_key"):
+                            raise ValueError(f"Conflicting rollout evidence: {source_rid}")
+                    else:
+                        _copy_rollout_artifacts(root, source_run_id, destination_run_id, source_row, destination_row)
+                        evidence["rollouts"][source_rid] = destination_row
+                    evidence["tasks"][destination_row["task_key"]] = copy.deepcopy(destination_tasks[destination_row["task_key"]])
+                    # Preserve evaluation evidence under a destination-owned report path.
+                    source_eval_id = source_row.get("selected_evaluation_id")
+                    if source_eval_id and source_eval_id in source_evidence["evaluations"]:
+                        source_eval = source_evidence["evaluations"][source_eval_id]
+                        merged_eval_id = identifier(f"merge-{source_run_id[:18]}-{source_eval_id[:24]}")
+                        report_source = root / source_eval["report_path"]
+                        report_target = destination["run"] / "reports" / (merged_eval_id + ".json")
+                        _copy_file(report_source, report_target)
+                        outcome = copy.deepcopy(source_eval["outcomes"].get(source_rid, {}))
+                        outcome["subject_sha256"] = destination_row.get("subject_sha256", outcome.get("subject_sha256"))
+                        evidence["evaluations"][merged_eval_id] = {
+                            "report_path": artifact_reference(root, report_target),
+                            "report_sha256": sha256(report_target),
+                            "outcomes": {source_rid: outcome},
+                            "provenance": {"merged_from_run": source_run_id, "merged_from_evaluation": source_eval_id},
+                        }
+                        destination_row["selected_evaluation_id"] = merged_eval_id
+                        destination_row["evaluation_status"] = source_row.get("evaluation_status")
+                        destination_row["resolved"] = source_row.get("resolved")
+                    source_work = source["run"] / "rollout/tasks" / source_result["instance_id"] / "repetitions" / source_result["repetition_id"]
+                    destination_work = destination["run"] / "rollout/tasks" / destination_item["instance_id"] / "repetitions" / destination_item["repetition_id"]
+                    _copy_attempt(source_work, destination_work, source_attempt, merge_attempt, destination_item, destination_run_id)
+                    destination_result = _destination_sample(destination_item, source_result, destination_run_id, merge_attempt)
+                    destination_result["rollout_id"] = source_rid
+                    destination_result["source_rollout_id"] = source_rid
+                    write_json(destination_work / "result.json", destination_result)
+                    destination_samples[destination_key] = destination_result
+                    changed.append({"task_key": destination_item["task_key"], "repetition_id": destination_item["repetition_id"],
+                                    "sample_key": destination_key, "rollout_id": source_rid,
+                                    "source_attempt_id": source_attempt, "destination_attempt_id": merge_attempt})
+                    stats["source_overrides"] += 1
+            from rollout.retry import rebuild_counts
+            counts = rebuild_counts(destination["run"], destination["work_items"])
+            progress = _rebuild_progress(destination["run"], destination_cfg, destination["work_items"]["items"], destination_samples)
+            for field in ("limits_exceeded_count", "reasoning_loop_count", "resample_trigger_count"):
+                progress[field] = counts[field]
+            write_json(destination["run"] / "progress.json", progress)
+            receipt = {
+                "schema_version": 1, "source_run_id": source_run_id, "destination_run_id": destination_run_id,
+                "created_at": now(), "rule": "source non-pending overrides destination pending; source accepted overrides destination failed; destination accepted wins",
+                "changed": changed, "stats": dict(stats), "destination_progress_sha256": hash_json(progress),
+            }
+            receipt_id = "merge-" + hash_json({"source": source_run_id, "destination": destination_run_id, "changed": changed})[:24]
+            receipt_path = destination["run"] / "execution" / "merges" / (receipt_id + ".json")
+            write_json(receipt_path, receipt)
+            _append_event(destination["run"], {"event": "run.merge", "run_id": destination_run_id,
+                                               "source_run_id": source_run_id, "receipt": str(receipt_path),
+                                               "changed": len(changed), "at": receipt["created_at"]})
+            return {"source_run_id": source_run_id, "destination_run_id": destination_run_id,
+                    "receipt": str(receipt_path), "changed": len(changed), "stats": dict(stats),
+                    "progress": {k: progress[k] for k in ("planned_samples", "accepted_samples", "failed_samples", "pending_samples")}}

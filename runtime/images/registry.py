@@ -137,8 +137,8 @@ def persist_bytes(directory, raw, expected=None):
     return digest
 
 
-def image_metadata(repository, directory, *, reference="latest", proxy=None, registry="docker.io"):
-    """Retain the original index, every platform/attestation manifest and config."""
+def image_metadata(repository, directory, *, reference="latest", proxy=None, registry="docker.io", platform=None):
+    """Retain the original index and metadata; optionally fetch one runtime platform."""
     import json
 
     client = Registry(proxy, registry=registry)
@@ -159,7 +159,15 @@ def image_metadata(repository, directory, *, reference="latest", proxy=None, reg
             descriptor = {"digest": digest, "size": len(raw), "mediaType": obj["mediaType"]}
             descriptors[digest] = {**descriptor, "repository": repository}
             if obj["mediaType"] in INDEX_TYPES:
-                for child in obj["manifests"]:
+                children = obj["manifests"]
+                if platform:
+                    operating_system, architecture = platform.split('/')[:2]
+                    children = [child for child in children
+                                if child.get('platform', {}).get('os') == operating_system
+                                and child.get('platform', {}).get('architecture') == architecture]
+                    if len(children) != 1:
+                        raise ValueError(f'Expected exactly one registry manifest for {platform}')
+                for child in children:
                     visit(child["digest"], child)
             elif obj["mediaType"] in MANIFEST_TYPES:
                 config = obj["config"]
