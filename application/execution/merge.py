@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 from collections import Counter
 from pathlib import Path
@@ -12,7 +13,7 @@ from core.io import artifact_reference, hash_json, identifier, now, read_json, r
 from core.locking import file_lock
 from .evidence import RunEvidence
 from .run_plan import load_plan
-from rollout.retry import sample_accepted
+from rollout.retry import disposition as rollout_disposition, sample_accepted
 
 
 PENDING_STATUSES = {"Pending", "Running"}
@@ -83,6 +84,13 @@ def _destination_sample(item, source_result, destination_run, attempt_id):
 
 def _copy_attempt(source_work, destination_work, source_attempt, destination_attempt, item, destination_run):
     source_dir = source_work / "attempts" / source_attempt
+    # Runs migrated from schema 1 retain their legacy layout without the
+    # repetitions/ directory. Copy those immutable attempt bytes into the
+    # destination schema-2 repetitions layout.
+    if not source_dir.is_dir():
+        legacy_dir = source_work.parent / "attempts" / source_attempt
+        if legacy_dir.is_dir():
+            source_dir = legacy_dir
     if not source_dir.is_dir():
         return
     destination_dir = destination_work / "attempts" / destination_attempt
@@ -181,6 +189,81 @@ def _rebuild_progress(destination_run, destination_cfg, work_items, samples):
     return progress
 
 
+def _legacy_samples(run_id, loaded, progress, evidence, cfg):
+    """Reconstruct merge samples for migrated schema-1 progress."""
+    samples = progress.get("samples")
+    if isinstance(samples, dict) and samples:
+        return samples
+    items = loaded["work_items"]["items"]
+    by_identity = {(item["task_key"], item.get("repetition_id", "rep-000")): item for item in items}
+    by_task = {item["task_key"]: item for item in items}
+    task_rows = {row["task_key"]: row for row in loaded["tasks"]["tasks"]}
+    rebuilt = {}
+    for rollout_id, row in evidence.get("rollouts", {}).items():
+        task_key = row.get("task_key")
+        repetition_id = row.get("repetition_id", "rep-000")
+        item = by_identity.get((task_key, repetition_id)) or by_task.get(task_key)
+        if item is None:
+            continue
+        status = row.get("termination_reason") or row.get("exit_status") or "Submitted"
+        result = {
+            "run_id": run_id,
+            "task_key": task_key,
+            "instance_id": item.get("instance_id") or task_rows.get(task_key, {}).get("instance_id"),
+            "repetition_id": repetition_id,
+            "repetition_index": item.get("repetition_index", 0),
+            "sample_key": item["sample_key"],
+            "sample_seed": item.get("sample_seed"),
+            "seed_policy": item.get("seed_policy", "legacy_unrecorded"),
+            "attempt_id": row.get("attempt_id") or "attempt-000",
+            "rollout_id": rollout_id,
+            "exit_status": status,
+            "agent_exit_status": row.get("agent_exit_status", status),
+            "disposition": rollout_disposition(cfg, status),
+        }
+        previous = rebuilt.get(item["sample_key"])
+        if previous is None or str(result["attempt_id"]) >= str(previous["attempt_id"]):
+            rebuilt[item["sample_key"]] = result
+    return rebuilt
+
+
+def _owned_pid_active(pid, run_id):
+    """Return true only when a recorded PID is live and still names this run."""
+    if not pid:
+        return False
+    try:
+        pid = int(pid)
+        os.kill(pid, 0)
+        command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\\0", b" ")
+        return run_id.encode() in command
+    except (OSError, ValueError):
+        return False
+
+
+def _legacy_rollout_is_stale(loaded, progress):
+    """Allow a migrated legacy rollout only when no owned process/lock remains."""
+    run = loaded["run"]
+    if read_json(run / "status.json").get("stage") != "rollout":
+        return False
+    if isinstance(progress.get("samples"), dict) and progress.get("samples"):
+        return False
+    latest = run / "execution/latest.json"
+    if not latest.exists():
+        return False
+    try:
+        attempt_id = read_json(latest)["attempt"]
+        attempt = run / "execution/attempts" / attempt_id
+        for name in ("supervisor.json", "process.json"):
+            path = attempt / name
+            if path.exists() and _owned_pid_active(read_json(path).get("pid"), run.name):
+                return False
+        with file_lock(run / "execution/supervisor.lock", nonblocking=True):
+            with file_lock(run / "execution/active-supervisor.lock", nonblocking=True):
+                return True
+    except (OSError, KeyError, TypeError, ValueError):
+        return False
+
+
 def merge_runs(root, source_run_id, destination_run_id):
     """Merge accepted source samples into a finished destination run."""
     root = Path(root).resolve()
@@ -194,9 +277,12 @@ def merge_runs(root, source_run_id, destination_run_id):
             destination = load_plan(root, destination_run_id)
             if source["plan"]["operation"] != "rollout" or destination["plan"]["operation"] != "rollout":
                 raise ValueError("run merge requires rollout runs")
-            for loaded, label in ((source, "source"), (destination, "destination")):
+            source_progress = read_json(source["run"] / "progress.json")
+            destination_progress = read_json(destination["run"] / "progress.json")
+            for loaded, label, progress in ((source, "source", source_progress),
+                                             (destination, "destination", destination_progress)):
                 stage = read_json(loaded["run"] / "status.json").get("stage")
-                if stage not in TERMINAL_RUN_STAGES:
+                if stage not in TERMINAL_RUN_STAGES and not (label == "source" and _legacy_rollout_is_stale(loaded, progress)):
                     raise ValueError(f"{label} run is not finished: {stage}")
             if source["plan"]["repeat_count"] != destination["plan"]["repeat_count"]:
                 raise ValueError("Runs must have the same repeat_count")
@@ -205,14 +291,12 @@ def merge_runs(root, source_run_id, destination_run_id):
             if source_tasks != destination_tasks:
                 raise ValueError("Runs must have identical frozen task definitions")
             source_cfg, destination_cfg = source["config"], destination["config"]
-            source_progress = read_json(source["run"] / "progress.json")
-            destination_progress = read_json(destination["run"] / "progress.json")
-            source_samples = source_progress.get("samples", {})
+            source_evidence = RunEvidence(root, source_run_id).read()
+            destination_evidence = RunEvidence(root, destination_run_id)
+            source_samples = _legacy_samples(source_run_id, source, source_progress, source_evidence, source_cfg)
             destination_samples = destination_progress.get("samples", {})
             source_by_identity = {(v.get("task_key"), v.get("repetition_id")): v for v in source_samples.values()}
             destination_by_identity = {(v.get("task_key"), v.get("repetition_id")): (k, v) for k, v in destination_samples.items()}
-            source_evidence = RunEvidence(root, source_run_id).read()
-            destination_evidence = RunEvidence(root, destination_run_id)
             source_rows = source_evidence["rollouts"]
             changed = []
             stats = Counter()

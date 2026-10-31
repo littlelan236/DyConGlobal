@@ -11,28 +11,28 @@ paths:
   - /data3/wangtianyi/DyConGlobal
 benchmark:
   partition: null
-  snapshot_ref: catalog/snapshots/skillsbench-agent75-oracle-passed-20261029/manifest.json
-  backend: skillsbench
+  snapshot_ref: catalog/snapshots/webarena-verified-45f88ef3d293898a8b57/manifest.json
+  backend: webarena_verified
 model:
   path: /VM/wangtianyi/DyConGlobal/models/Qwen3.5-9B
   fingerprint: f97643c15ea3cb04517379dd13482b48548458c3a3f6c3a7eb93dcaa6adf86a2
   served_name: Qwen3.5-9B
   trust_remote_code: false
 serving:
-  base_url: http://127.0.0.1:8110/v1
+  base_url: http://127.0.0.1:19110/v1
   api_key_env: DYCON_API_KEY
   management: managed
   python: .venvs/easysteer/bin/python
   dtype: float16
   kv_cache_memory_bytes: null
-  max_num_seqs: 64
+  max_num_seqs: 4
   max_num_batched_tokens: 2048
   gpus:
   - 2
   - 3
   tensor_parallel_size: 2
-  gpu_memory_utilization: 0.4
-  max_model_len: 262144
+  gpu_memory_utilization: 0.3
+  max_model_len: 32768
   startup_seconds: 1200
   shutdown_seconds: 30
   tool_parser: qwen3_xml
@@ -45,16 +45,16 @@ generation:
   min_p: 0.0
   presence_penalty: 0.0
   repetition_penalty: 1.0
-  max_tokens: 98304
+  max_tokens: 4096
   seed: 42
   enable_thinking: true
   preserve_thinking: true
-  thinking_token_budget: 81920
+  thinking_token_budget: 1024
   require_reasoning_close: true
 agent:
   loop_repeat_limit: 8
   loop_max_period: 7
-  step_limit: 250
+  step_limit: 35
   cost_limit: 0.0
   max_consecutive_format_errors: 10
   system_template: 'You are a helpful assistant that can interact with a computer
@@ -365,8 +365,8 @@ agent:
     {%- endif %}
 
     '
-  backend: openhands
-  profile_ref: runtime/agent-profiles/openhands-startup-qualified-v2-20261030/manifest.json
+  backend: minisweagent
+  profile_ref: runtime/agent-profiles/minisweagent-webarena-fee4ebed9437fb5c7f9c/manifest.json
 environment:
   docker_host: unix:///run/user/1018/docker.sock
   docker_executable: /usr/bin/docker
@@ -398,18 +398,18 @@ execution:
     kill_verify_seconds: 5.0
     cleanup_seconds: 15.0
   limits_retry:
-    enabled: true
+    enabled: false
     retry_statuses:
     - LimitsExceeded
     - reasoning_loop
     seed_policy: repetition_round_offset_v1
-  rollout_workers: 4
+  rollout_workers: 1
   harness_workers: 8
   infrastructure_retry_limit: 3
   pipeline_wall_seconds: 0
   startup_failure_limit: 3
 timeouts:
-  container_start_seconds: 120
+  container_start_seconds: 900
   container_lifetime_seconds: 28800
   bootstrap_seconds: 600
   tool_command_seconds: 120
@@ -546,7 +546,7 @@ steering:
   enabled: false
   payload: null
 capture:
-  enabled: true
+  enabled: false
   backend: easysteer
   mode: online
   graph_mode: FULL
@@ -713,8 +713,6 @@ skillsbench_images:
         after: ./cs {build_proxy_jvm_args} install scala:2.13.12 scalac:2.13.12
       note: Coursier native/JVM downloader needs explicit proxy JVM properties; keep
         original Coursier and Scala versions.
-
-# WebArena Verified image preparation only; root rollout backend remains independent.
 webarena_images:
   source_root: benchmarks/webarena-verified
   revision: 6473f72db5dcefc97b5725b59e734504edc28a21
@@ -725,3 +723,13 @@ webarena_images:
   seed: 20261031
   workers: 8
   host_proxy: http://127.0.0.1:17890
+webarena:
+  environment_pool_ref: runtime/webarena-environments/9ec76a08d0a9af6b0d37da6b126ae33054a969594b17c6f3d0295860873cd268/manifest.json
+  browser_image_ref: runtime/webarena-browser/webarena-browser-d1012c1709bf2e055d8a/reference.json
+  environment_slots: 1
+  max_browser_actions: 30
+  observation_type: accessibility_tree
+  action_protocol: bash_browser_id_v1
+  reset_policy: per_attempt
+  evaluator_python: .venvs/webarena-eval/bin/python
+  evaluator_timeout_seconds: 120

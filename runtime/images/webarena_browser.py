@@ -105,21 +105,28 @@ def export_image(client, image_id, store, provenance):
             if member.name == "manifest.json":
                 manifest = json.load(source)
                 continue
-            if member.name.endswith(".json") or member.name.endswith("/layer.tar"):
+            if (member.name.startswith("blobs/sha256/") or member.name.endswith(".json") or member.name.endswith("/layer.tar")):
                 fd, name = tempfile.mkstemp(prefix=".browser-export-", dir=blobs)
                 try:
                     with os.fdopen(fd, "wb") as output:
                         shutil.copyfileobj(source, output, 8 * 1024 * 1024)
                         output.flush()
                         os.fsync(output.fileno())
-                    entries[member.name] = publish_blob(Path(name), blobs)
+                    with open(name, "rb") as layer_file:
+                        magic = layer_file.read(4)
+                    media = "application/vnd.oci.image.layer.v1.tar"
+                    if magic.startswith(b"\x1f\x8b"):
+                        media += "+gzip"
+                    elif magic == b"\x28\xb5\x2f\xfd":
+                        media += "+zstd"
+                    entries[member.name] = {**publish_blob(Path(name), blobs), "mediaType": media}
                 finally:
                     Path(name).unlink(missing_ok=True)
     if not isinstance(manifest, list) or len(manifest) != 1:
         raise ValueError("Browser export must contain exactly one Docker image")
     raw = manifest[0]
     config = {**entries[raw["Config"]], "mediaType": "application/vnd.oci.image.config.v1+json"}
-    layers = [{**entries[name], "mediaType": "application/vnd.oci.image.layer.v1.tar"}
+    layers = [{**entries[name], "mediaType": entries[name]["mediaType"]}
               for name in raw["Layers"]]
     value = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
              "config": config, "layers": layers}
@@ -188,7 +195,10 @@ def prepare_browser(cfg):
         base = client.images.get(base_store.image_id)
         # FROM uses the digest of the resolved base, retained as build provenance.
         base_reference = "docker.io/library/python@" + base_store.image_id
-        build_args = {"PLAYWRIGHT_IMAGE": base.id}
+        # BuildKit resolves FROM references through the daemon registry path; tag the leased local image so the build never falls back to Docker Hub.
+        local_base = "dycon/webarena-python-base:" + base_store.image_id.split(":", 1)[1][:12]
+        base.tag(local_base.split(":", 1)[0], tag=local_base.split(":", 1)[1])
+        build_args = {"PYTHON_IMAGE": local_base}
         forwarding = contextlib.nullcontext()
         if proxy:
             # Rootless build containers cannot reach a host loopback proxy.
@@ -206,17 +216,38 @@ def prepare_browser(cfg):
                 "host_proxy": proxy, "build_proxy": endpoint, "manage_build_proxy": True}
             forwarding = build_proxy(settings, directory / "network-proxy")
             build_args.update(HTTP_PROXY=endpoint, HTTPS_PROXY=endpoint)
-        print("Building isolated browser image", flush=True)
-        with forwarding:
-            image, logs = client.images.build(path=str(context), rm=True, forcerm=True,
-                tag="dycon/webarena-browser:" + BROWSER_SOURCE[:12], buildargs=build_args,
-                platform=cfg["environment"]["platform"])
-        (directory / "build.log").write_text("\n".join(json.dumps(row) for row in logs), encoding="utf-8")
-        provenance = {"browser_source_revision": BROWSER_SOURCE,
+        build_inputs = {"browser_source_revision": BROWSER_SOURCE,
             "browser_source_sha256": files, "base_image": base_reference, "base_image_id": base.id,
             "worker_sha256": sha256(context / "worker.py"),
             "requirements_sha256": sha256(context / "browser-requirements.txt"),
-            "dockerfile_sha256": sha256(context / "Dockerfile"), "build_image_id": image.id}
+            "dockerfile_sha256": sha256(context / "Dockerfile")}
+        image = None
+        previous_receipt = directory / "receipt.json"
+        if previous_receipt.exists():
+            from runtime.images.nas import NasImageStore
+            previous = NasImageStore(cfg, read_json(previous_receipt)["reference"]).record["provenance"]
+            if all(previous.get(key) == value for key, value in build_inputs.items()):
+                try:
+                    image = client.images.get(previous["build_image_id"])
+                except docker.errors.ImageNotFound:
+                    pass
+        if image is None:
+            print("Building isolated browser image", flush=True)
+            tag = "dycon/webarena-browser:" + BROWSER_SOURCE[:12]
+            with forwarding, (directory / "build.log").open("w", encoding="utf-8") as log:
+                for row in client.api.build(path=str(context), rm=True, forcerm=True,
+                        tag=tag, buildargs=build_args, decode=True,
+                        platform=cfg["environment"]["platform"]):
+                    log.write(json.dumps(row) + "\n")
+                    log.flush()
+                    if row.get("stream"):
+                        print(row["stream"], end="", flush=True)
+                    if row.get("error"):
+                        raise docker.errors.BuildError(row["error"], [row])
+            image = client.images.get(tag)
+        else:
+            print("Reusing provenance-matched local browser image " + image.id, flush=True)
+        provenance = {**build_inputs, "build_image_id": image.id}
         smoke = client.containers.create(image.id, entrypoint=["python", "/opt/webarena/browser-selftest.py"],
             network_disabled=True, shm_size="2g", cap_drop=["ALL"], security_opt=["no-new-privileges"],
             labels={"dycon.project": str(root), "dycon.backend": "webarena_verified",

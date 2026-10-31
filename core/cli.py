@@ -96,6 +96,17 @@ def main(argv=None):
     sb.add_argument("run_id")
     sb.add_argument("profile_id")
     sb.add_argument("--profile-ref", type=Path)
+    swebench = sub.add_parser("swebench", help="SWE-bench task and agent integration")
+    sw_sub = swebench.add_subparsers(dest="swebench_command", required=True)
+    sw = sw_sub.add_parser("openhands-profile", help="Create an immutable SWE-bench OpenHands profile")
+    sw.add_argument("profile_id")
+    sw.add_argument("--bridge-address", required=True)
+    sw.add_argument("--dependency-snapshot", type=Path)
+    sw.add_argument("--network-mode", choices=["none", "bridge"], default="none")
+    sw.add_argument("--workspace", default="/testbed")
+    sw.add_argument("--task-cwd", default="/testbed")
+    sw.add_argument("--patch-max-bytes", type=int, default=16 * 1024 * 1024)
+    sw_sub.add_parser("preflight", help="Validate a frozen SWE-bench OpenHands run").add_argument("run_id")
     sb = sb_sub.add_parser("cleanup-network", help="Reconcile a stopped run owned legacy proxy")
     sb.add_argument("run_id")
     sb = sb_sub.add_parser("audit", help="Verify real tools, native capture and winner-only execution")
@@ -861,6 +872,43 @@ def main(argv=None):
         from application.execution.report import report
         result = report(cfg["project_root"], a.run_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if a.command == "swebench":
+        if a.set or a.analysis_run_id:
+            parser.error("swebench profile/preflight commands use the root or frozen configuration")
+        if a.swebench_command == "openhands-profile":
+            from core.io import identifier
+            from runtime.agents.swebench_openhands import SWEOpenHandsProfile, validate_profile
+            identifier(a.profile_id)
+            dependency = str(a.dependency_snapshot.resolve()) if a.dependency_snapshot else None
+            if a.dependency_snapshot:
+                from runtime.agents.dependencies import verify_snapshot
+                verify_snapshot(a.dependency_snapshot)
+            profile = validate_profile(SWEOpenHandsProfile(
+                bridge_advertise=a.bridge_address, bridge_listen=a.bridge_address,
+                dependency_snapshot=dependency, workspace=a.workspace, task_cwd=a.task_cwd,
+                network_mode=a.network_mode, patch_max_bytes=a.patch_max_bytes,
+                request_roles="unqualified").model_dump())
+            target = Path(cfg["project_root"]) / "runtime/agent-profiles" / a.profile_id / "manifest.json"
+            if target.exists() and validate_profile(read_json(target)) != profile:
+                raise FileExistsError("SWE OpenHands profile is immutable; choose a new profile ID")
+            if not target.exists():
+                write_json(target, profile)
+            print(json.dumps({"profile_ref": str(target.relative_to(cfg["project_root"])),
+                              "profile_sha256": sha256(target), "request_roles_qualified": False}, indent=2))
+        else:
+            from application.execution.run_plan import load_plan
+            from runtime.backends.registry import adapter_for
+            loaded = load_plan(cfg["project_root"], a.run_id)
+            adapter = adapter_for(loaded["config"], loaded["config"].get("selection", {}).get("tasks"))
+            context = adapter.open_run(loaded["config"], a.run_id)
+            try:
+                result = adapter.preflight(context, loaded["config"]["selection"]["tasks"])
+            finally:
+                adapter.close_run(context)
+            print(json.dumps(result.receipt, ensure_ascii=False, indent=2))
+            if not result.passed:
+                raise SystemExit(2)
         return
     if a.command == "run":
         from application.execution.run_plan import create_run, list_runs, show_run

@@ -202,3 +202,7 @@ desktop.ini
 # Downloaded executables; keep the maintained env/curl wrapper scripts
 /runtime/skillsbench-tools/uv
 /runtime/skillsbench-tools/uvx
+
+# WebArena machine-local image and environment manifests
+/runtime/webarena-browser/
+/runtime/webarena-environments/

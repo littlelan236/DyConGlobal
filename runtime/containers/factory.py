@@ -219,6 +219,14 @@ class ContainerFactory:
         policy = self.policy_for(instance)
         e = policy.environment
         self.lock_images([instance])
+        volumes = ({e["wheelhouse"]: {"bind": "/opt/dycon-wheels", "mode": "ro"}}
+                   if e["wheelhouse"] else {})
+        socket_path = self.cfg.get("swe_openhands_socket_path")
+        if socket_path:
+            socket_path = str(Path(socket_path).resolve())
+            if not Path(socket_path).exists():
+                raise ValueError("SWE OpenHands model socket must exist before container creation")
+            volumes[socket_path] = {"bind": "/run/dycon-model/model.sock", "mode": "rw"}
         return {
             "image_id": self.images[instance["instance_id"]]["image_id"],
             "user": e["user"],
@@ -226,9 +234,7 @@ class ContainerFactory:
             "network_mode": e.get("network_mode", "none"),
             "cwd": e["cwd"],
             "environment": policy.variables(),
-            "volumes": {e["wheelhouse"]: {"bind": "/opt/dycon-wheels", "mode": "ro"}}
-            if e["wheelhouse"]
-            else {},
+            "volumes": volumes,
             "command": ["sleep", str(self.cfg["timeouts"]["container_lifetime_seconds"])],
             "policy_hash": policy.identity(instance["repo"])["policy_hash"],
         }

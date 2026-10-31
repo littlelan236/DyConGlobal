@@ -38,11 +38,11 @@ def test_skillsbench_payload_keeps_benchmark_identity_without_swe_fields(tmp_pat
         Task.model_validate(row)
 
 
-def test_backend_matrix_rejects_unimplemented_combinations_and_action(cfg):
+def test_backend_matrix_allows_swebench_openhands_but_rejects_action(cfg):
     skills = dict(cfg, benchmark={"backend": "skillsbench"}, agent={"backend": "openhands"})
     assert capabilities(skills)["subject"] == "workspace"
-    with pytest.raises(ValueError, match="combination"):
-        capabilities({"benchmark": {"backend": "swebench"}, "agent": {"backend": "openhands"}})
+    swe_openhands = {"benchmark": {"backend": "swebench"}, "agent": {"backend": "openhands"}}
+    assert capabilities(swe_openhands)["subject"] == "patch"
     with pytest.raises(ValueError, match="action analysis"):
         capabilities(skills, operation="action")
 

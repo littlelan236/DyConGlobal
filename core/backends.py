@@ -24,6 +24,7 @@ def benchmark_family(name):
 
 CAPABILITIES = {
     ("swebench", "minisweagent"): {"subject": "patch", "action_analysis": True},
+    ("swebench", "openhands"): {"subject": "patch", "action_analysis": False},
     ("skillsbench", "openhands"): {"subject": "workspace", "action_analysis": False},
     ("webarena_verified", "minisweagent"): {"subject": "web_trace", "action_analysis": False},
     ("swebench_pro_v2", "openhands"): {"subject": "patch", "action_analysis": False},
@@ -57,6 +58,9 @@ def execution_binding(cfg, tasks=None):
 def execution_context(cfg, tasks):
     capabilities(cfg)
     benchmark, agent = identity(cfg)
+    if benchmark == "swebench" and agent == "openhands":
+        from runtime.agents.swebench_openhands import execution_context as swe_context
+        return swe_context(cfg, tasks)
     if benchmark in {"swebench_pro_v2", "terminalbench_2_1"}:
         from catalog.harbor import execution_context as harbor_context
         return harbor_context(cfg, tasks)

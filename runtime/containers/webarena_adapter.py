@@ -12,6 +12,7 @@ import os
 import re
 import threading
 import time
+import traceback
 import uuid
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
@@ -243,9 +244,9 @@ class WebArenaEnvironment:
             self._acquired = True
             factory._active.add(self)
             self.sites = {site: factory.pool["sites"][site] for site in sorted(self.instance["sites"])}
-            self.network = factory.client.networks.create(self.name, internal=True, labels=self.labels)
-            self._start_sites()
+            self.network = factory.client.networks.create(self.name, internal=False, labels=self.labels)
             self._start_browser()
+            self._start_sites()
             task = {"start_urls": render_urls(self.instance, self.sites),
                     "sites": {site: {"base_url": spec["base_url"], "login": spec.get("login", {})}
                               for site, spec in self.sites.items()},
@@ -300,7 +301,6 @@ class WebArenaEnvironment:
                 environment={"WA_ENV_CTRL_EXTERNAL_SITE_URL": spec["base_url"].rstrip("/")},
                 labels={**self.labels, "dycon.role": "site", "dycon.site": site},
                 network=self.network.name,
-                ports={str(spec["port"]) + "/tcp": ("127.0.0.1", None)},
                 volumes=mounts, shm_size="2g" if site == "gitlab" else "256m")
             self._containers.append(container)
             # Reconnect once with the stable alias used by browser URLs.
@@ -308,9 +308,10 @@ class WebArenaEnvironment:
             self.network.connect(container, aliases=[site.replace("_", "-")])
             container.start()
             container.reload()
-            binding = container.attrs["NetworkSettings"]["Ports"][str(spec["port"]) + "/tcp"][0]
-            self._wait_http("http://127.0.0.1:" + binding["HostPort"] + spec.get("health_path", "/"),
-                            timeout=cfg["timeouts"]["container_start_seconds"])
+            site_ip = container.attrs["NetworkSettings"]["Networks"][self.network.name]["IPAddress"]
+            headers = {"Host": site.replace("_", "-"), **spec.get("login", {}).get("headers", {})}
+            self._wait_http("http://" + site_ip + spec.get("health_path", "/"),
+                            timeout=cfg["timeouts"]["container_start_seconds"], headers=headers)
 
     def _baseline(self, reference):
         nas = Path(self.factory.cfg["paths"]["nas_root"]).resolve()
@@ -331,48 +332,53 @@ class WebArenaEnvironment:
             name=self.name + "-browser", labels={**self.labels, "dycon.role": "browser"},
             environment={"DYCON_BROWSER_RPC_TOKEN": self._token},
             network=self.network.name,
-            ports={str(WORKER_PORT) + "/tcp": ("127.0.0.1", None)},
             volumes={str(self.subject_dir.resolve()): {"bind": "/output", "mode": "rw"}},
             shm_size="2g", cap_drop=["ALL"], security_opt=["no-new-privileges"])
         self._containers.append(self.browser)
         self.browser.start()
         self.browser.reload()
-        binding = self.browser.attrs["NetworkSettings"]["Ports"][str(WORKER_PORT) + "/tcp"][0]
-        self.endpoint = "http://127.0.0.1:" + binding["HostPort"]
+        # RPC commands execute inside the browser container, so use loopback.
+        # Hairpinning through the container's own bridge IP is disabled by the
+        # rootless runtime and makes a healthy worker appear unreachable.
+        self.endpoint = "http://127.0.0.1:" + str(WORKER_PORT)
         self._wait_http(self.endpoint + "/health", cfg["timeouts"]["container_start_seconds"])
 
-    def _wait_http(self, url, timeout):
-        import requests
+    def _wait_http(self, url, timeout, headers=None):
         end = time.monotonic() + timeout
-        with requests.Session() as session:
-            session.trust_env = False
-            while True:
-                self._check()
-                try:
-                    response = session.get(url, timeout=min(5, max(0.1, end-time.monotonic())))
-                    if response.status_code < 400:
-                        return
-                except requests.RequestException:
-                    pass
-                if time.monotonic() >= end:
-                    raise TimeoutError("WebArena service did not become healthy: " + url)
-                if self._cancellation:
-                    self._cancellation.event.wait(0.3)
-                else:
-                    time.sleep(0.3)
+        code = ("import json,sys,urllib.request; "
+                "opener=urllib.request.build_opener(urllib.request.ProxyHandler({})); "
+                "request=urllib.request.Request(sys.argv[1],headers=json.loads(sys.argv[3])); "
+                "response=opener.open(request,timeout=float(sys.argv[2])); response.read()")
+        while True:
+            self._check()
+            remaining = min(5, max(0.1, end - time.monotonic()))
+            result = self.browser.exec_run(["python", "-c", code, url, str(remaining), json.dumps(headers or {})])
+            if result.exit_code == 0:
+                return
+            if time.monotonic() >= end:
+                raise TimeoutError("WebArena service did not become healthy: " + url)
+            if self._cancellation:
+                self._cancellation.event.wait(0.3)
+            else:
+                time.sleep(0.3)
 
     def _rpc(self, operation, payload, *, finishing=False):
-        import requests
         if not finishing:
             self._check()
         timeout = self.factory.cfg["timeouts"]["tool_command_seconds"]
-        with requests.Session() as session:
-            session.trust_env = False
-            # A POST may mutate a website. Never transparently retry a timeout.
-            response = session.post(self.endpoint + "/" + operation, json=payload,
-                headers={"Authorization": "Bearer " + self._token}, timeout=timeout)
-            response.raise_for_status()
-            value = response.json()
+        code = ("import os,sys,urllib.request; "
+                "opener=urllib.request.build_opener(urllib.request.ProxyHandler({})); "
+                "request=urllib.request.Request(sys.argv[1],data=sys.argv[2].encode(),"
+                "headers={'Content-Type':'application/json','Authorization':"
+                "'Bearer '+os.environ['DYCON_BROWSER_RPC_TOKEN']}); "
+                "response=opener.open(request,timeout=float(sys.argv[3])); "
+                "sys.stdout.buffer.write(response.read())")
+        # No shell and no transparent retry: each POST may mutate a website.
+        result = self.browser.exec_run(["python", "-c", code, self.endpoint + "/" + operation,
+            json.dumps(payload, ensure_ascii=False), str(timeout)])
+        if result.exit_code != 0:
+            raise RuntimeError("Browser RPC failed: " + result.output.decode(errors="replace")[-4000:])
+        value = json.loads(result.output)
         if value.get("error"):
             raise RuntimeError("Browser worker: " + value["error"])
         return value
@@ -539,7 +545,8 @@ def preflight(root, run_id, *, factory=None, tasks=None):
                     if env is not None:
                         env.close()
     except Exception as exc:
-        blockers.append({"error_type": type(exc).__name__, "error": str(exc)})
+        blockers.append({"error_type": type(exc).__name__, "error": str(exc),
+                         "traceback": traceback.format_exc()})
     finally:
         if factory is not None and own_factory:
             try:

@@ -16,6 +16,7 @@ from tests.conftest import task
 
 @pytest.mark.parametrize("benchmark,agent,adapter,mode", [
     ("swebench", "minisweagent", "native_swe", "replay"),
+    ("swebench", "openhands", "native_swe_openhands", "replay"),
     ("skillsbench", "openhands", "benchflow", "live"),
     ("webarena_verified", "minisweagent", "native_webarena", "artifact_offline"),
 ])
@@ -46,7 +47,7 @@ class Block(importlib.abc.MetaPathFinder):
             raise AssertionError('eager SDK import: ' + fullname)
 sys.meta_path.insert(0, Block())
 from runtime.backends.registry import adapter_for
-for benchmark, agent in [('skillsbench', 'openhands'), ('swebench', 'minisweagent'), ('webarena_verified', 'minisweagent')]:
+for benchmark, agent in [('skillsbench', 'openhands'), ('swebench', 'minisweagent'), ('swebench', 'openhands'), ('webarena_verified', 'minisweagent')]:
     adapter_for({'benchmark': {'backend': benchmark}, 'agent': {'backend': agent}})
 '''
     subprocess.run([sys.executable, "-c", code], check=True)

@@ -164,7 +164,7 @@ class BrowserSession:
             raise ValueError("Playwright did not flush a valid HAR")
         return {"har_flushed": True, "har_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 "entry_count": len(value["log"]["entries"]), "browser_actions": self.step_index,
-                "chromium_version": self.env.browser.version, "playwright_version": __import__("playwright").__version__}
+                "chromium_version": self.env.browser.version, "playwright_version": __import__("importlib.metadata", fromlist=["version"]).version("playwright")}
 
 
 def main():

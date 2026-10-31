@@ -7,6 +7,10 @@ from runtime.backends.contracts import ExecutionBinding
 
 REVISION = "1"
 _BINDINGS = {
+    ("swebench", "openhands"): (
+        "native", "native_swe_openhands", "openhands-acp-1.22.1", "patch", "replay", "swebench-4.1.0", True,
+        "runtime.backends.native.swe_openhands", "NativeSWEOpenHandsAdapter",
+        "runtime.backends.native.swe_openhands.NativeSWEOpenHandsAdapter"),
     ("swebench", "minisweagent"): (
         "native", "native_swe", "mini-swe-agent-2.4.5", "patch", "replay", "swebench-4.1.0", True,
         "runtime.backends.native.swe", "NativeSWEAdapter", "rollout.runner._finish_attempt"),
