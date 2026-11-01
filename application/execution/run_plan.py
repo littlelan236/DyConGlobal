@@ -94,8 +94,8 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
     clone_receipt = None
     frozen_selection = None
     if from_run is not None:
-        if tasks_file or task_ids or partition is not None:
-            raise ValueError('A frozen clone retains its complete source task selection')
+        if tasks_file or partition is not None:
+            raise ValueError('A frozen clone accepts only an optional --task-id subset')
         source = load_plan(root, identifier(from_run))
         if operation != 'rollout' or source['plan']['operation'] != operation:
             raise ValueError('Frozen cloning requires a rollout source and destination')
@@ -108,6 +108,7 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
                    'serving.max_cpu_workers_per_gpu',
                    'generation.max_tokens', 'generation.thinking_token_budget',
                    'generation.require_reasoning_close',
+                   'webarena.environment_pool_ref', 'webarena.browser_image_ref',
                    'parallel.estimator_ref', 'paths.artifact_roots'}
         cfg = copy.deepcopy(source['config'])
         frozen_selection = copy.deepcopy(cfg.pop('selection'))
@@ -123,6 +124,10 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
             parsed = yaml.safe_load(value)
             changes.append({"path": dotted, "before": cfg[section].get(field), "after": parsed})
             cfg[section][field] = parsed
+        if task_ids:
+            # A clone may reuse the source runtime/config while selecting a
+            # different subset from the same frozen benchmark snapshot.
+            frozen_selection = _selection_from_tasks(catalog, task_ids=task_ids, partition=None, cfg=cfg)
         if reverse_task_order:
             frozen_selection["task_keys"].reverse()
         from core.config import Paths, Serving, validate_generation_contract

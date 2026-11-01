@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from minisweagent.environments.docker import DockerEnvironmentConfig
 
 from runtime.containers.factory import ContainerFactory, TaskContext
 
 
 class RolloutEnvironment:
-    def __init__(self, factory: ContainerFactory, instance: dict, context: TaskContext):
+    def __init__(self, factory: ContainerFactory, instance: dict, context: TaskContext,
+                 socket_path: Path | None = None):
         self.factory, self.context = factory, context
+        self.socket_path = socket_path
         cfg = factory.cfg
         try:
-            spec = factory.spec(instance)
+            spec = factory.spec(instance, socket_path=socket_path)
         except ValueError as exc:
             from runtime.containers.dependencies import setup_error
             raise setup_error(cfg, context, str(exc), stage='preflight') from exc
@@ -23,7 +27,7 @@ class RolloutEnvironment:
             executable=cfg["environment"]["docker_executable"],
             pull_timeout=cfg["timeouts"]["container_start_seconds"],
         )
-        self.container = factory.create(instance, context)
+        self.container = factory.create(instance, context, socket_path=socket_path)
         self.container.start()
 
     def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None):

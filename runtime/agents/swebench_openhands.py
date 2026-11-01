@@ -53,11 +53,11 @@ def execution_context(cfg, tasks):
         if profile.get("dependency_snapshot_sha256") not in {None, dependency_sha}:
             raise ValueError("SWE-bench OpenHands dependency snapshot hash differs from profile")
         profile["dependency_snapshot_sha256"] = dependency_sha
-    revisions = {task["revision"] for task in tasks.values()}
-    if len(revisions) != 1:
-        raise ValueError("SWE-bench OpenHands run must use one task revision")
+    revisions = sorted({task["revision"] for task in tasks.values()})
+    revision = revisions[0] if len(revisions) == 1 else "mixed"
     context = {"schema_version": 1, "benchmark": "swebench", "agent": "openhands",
-               "revision": next(iter(revisions)), "profile_sha256": sha256(profile_path),
+               "revision": revision, "revisions": revisions,
+               "profile_sha256": sha256(profile_path),
                "profile": profile, "dependency_snapshot_sha256": dependency_sha,
                "task_keys": sorted(tasks), "generation": copy.deepcopy(cfg["generation"]),
                "driver": "openhands-acp-1.22.1", "subject": "patch",

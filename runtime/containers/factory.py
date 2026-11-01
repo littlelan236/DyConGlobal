@@ -215,13 +215,20 @@ class ContainerFactory:
             )
         return dict(self.images)
 
-    def spec(self, instance: dict) -> dict:
+    def spec(self, instance: dict, *, socket_path: str | Path | None = None) -> dict:
         policy = self.policy_for(instance)
         e = policy.environment
         self.lock_images([instance])
         volumes = ({e["wheelhouse"]: {"bind": "/opt/dycon-wheels", "mode": "ro"}}
                    if e["wheelhouse"] else {})
-        socket_path = self.cfg.get("swe_openhands_socket_path")
+        profile = self.cfg.get("execution_context", {}).get("profile", {})
+        dependency_snapshot = profile.get("dependency_snapshot")
+        if dependency_snapshot:
+            dependency_path = Path(dependency_snapshot).resolve()
+            if not dependency_path.is_dir():
+                raise ValueError("OpenHands dependency snapshot is missing: " + str(dependency_path))
+            volumes[str(dependency_path)] = {"bind": "/opt/dycon-agent-wheels", "mode": "ro"}
+        socket_path = socket_path or self.cfg.get("swe_openhands_socket_path")
         if socket_path:
             socket_path = str(Path(socket_path).resolve())
             if not Path(socket_path).exists():
@@ -239,7 +246,7 @@ class ContainerFactory:
             "policy_hash": policy.identity(instance["repo"])["policy_hash"],
         }
 
-    def create(self, instance: dict, context: TaskContext) -> ManagedContainer:
+    def create(self, instance: dict, context: TaskContext, *, socket_path: str | Path | None = None) -> ManagedContainer:
         self.deadline.check()
         if not instance.get("nas_image"):
             raise ValueError("Missing NAS image reference")
@@ -267,7 +274,7 @@ class ContainerFactory:
             attempts = 1 + self.cfg["execution"].get("infrastructure_retry_limit", 0)
             for attempt in range(attempts):
                 try:
-                    container = self._create(instance, context)
+                    container = self._create(instance, context, socket_path=socket_path)
                     with self._lock:
                         self._leases[container.id] = lease
                     return container
@@ -285,8 +292,8 @@ class ContainerFactory:
             lease.__exit__(*__import__("sys").exc_info())
             raise
 
-    def _create(self, instance: dict, context: TaskContext) -> ManagedContainer:
-        spec = self.spec(instance)
+    def _create(self, instance: dict, context: TaskContext, *, socket_path: str | Path | None = None) -> ManagedContainer:
+        spec = self.spec(instance, socket_path=socket_path)
         context.output_dir.mkdir(parents=True, exist_ok=True)
         write_json(context.output_dir / "container-spec.json", {**spec, "spec_hash": hash_json(spec)})
         write_json(

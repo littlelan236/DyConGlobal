@@ -32,7 +32,7 @@ class UnixModelChannel:
         self.path, self.destination = Path(path), (host, port)
 
     def __enter__(self):
-        self.path.parent.mkdir(parents=True, mode=0o711)
+        self.path.parent.mkdir(parents=True, mode=0o711, exist_ok=True)
         destination = self.destination
 
         class Handler(socketserver.BaseRequestHandler):

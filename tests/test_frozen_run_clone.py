@@ -72,8 +72,15 @@ def test_clone_applies_only_explicit_gpu_and_endpoint_changes(cfg):
     assert len(loaded['work_items']['items']) == 2
 
 
+def test_clone_can_select_a_catalog_subset_without_changing_source(cfg):
+    source = source_run(cfg)
+    new = create_run(cfg, 'subset-clone', operation='rollout', from_run=source.name, task_ids=['a'])
+    loaded = load_plan(cfg['project_root'], new.name)
+    assert [item['instance_id'] for item in loaded['work_items']['items']] == ['a']
+    assert {item['instance_id'] for item in load_plan(cfg['project_root'], source.name)['work_items']['items']} == {'a', 'b'}
+
+
 @pytest.mark.parametrize('kwargs,message', [
-    ({'task_ids':['a']}, 'complete source task selection'),
     ({'repeat_count':2}, 'retains source repeat_count'),
     ({'clone_overrides':['generation.seed=43']}, 'Unsupported frozen-clone override'),
     ({'clone_overrides':['serving.gpus=[0,1,2,3]']}, 'count must equal'),

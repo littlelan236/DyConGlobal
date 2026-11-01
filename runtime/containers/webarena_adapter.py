@@ -330,7 +330,19 @@ class WebArenaEnvironment:
         cfg = self.factory.cfg
         self.browser = self.factory.client.containers.create(self.factory._images["browser"].image_id,
             name=self.name + "-browser", labels={**self.labels, "dycon.role": "browser"},
-            environment={"DYCON_BROWSER_RPC_TOKEN": self._token},
+            environment={
+                "DYCON_BROWSER_RPC_TOKEN": self._token,
+                # The image build may retain the host's package proxy. Internal
+                # WebArena aliases must be reached directly by Chromium.
+                "HTTP_PROXY": "",
+                "HTTPS_PROXY": "",
+                "ALL_PROXY": "",
+                "NO_PROXY": "*",
+                "http_proxy": "",
+                "https_proxy": "",
+                "all_proxy": "",
+                "no_proxy": "*",
+            },
             network=self.network.name,
             volumes={str(self.subject_dir.resolve()): {"bind": "/output", "mode": "rw"}},
             shm_size="2g", cap_drop=["ALL"], security_opt=["no-new-privileges"])
@@ -345,10 +357,12 @@ class WebArenaEnvironment:
 
     def _wait_http(self, url, timeout, headers=None):
         end = time.monotonic() + timeout
-        code = ("import json,sys,urllib.request; "
-                "opener=urllib.request.build_opener(urllib.request.ProxyHandler({})); "
-                "request=urllib.request.Request(sys.argv[1],headers=json.loads(sys.argv[3])); "
-                "response=opener.open(request,timeout=float(sys.argv[2])); response.read()")
+        code = ("import json,sys,http.client,urllib.parse; "
+                "target=urllib.parse.urlsplit(sys.argv[1]); "
+                "connection=http.client.HTTPConnection(target.hostname,target.port or 80,timeout=float(sys.argv[2])); "
+                "connection.request('GET',target.path or '/',headers=json.loads(sys.argv[3])); "
+                "response=connection.getresponse(); response.read(); "
+                "sys.exit(1 if response.status >= 400 else 0)")
         while True:
             self._check()
             remaining = min(5, max(0.1, end - time.monotonic()))

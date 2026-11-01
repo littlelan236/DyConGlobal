@@ -71,15 +71,10 @@ class NativeSWEOpenHandsAdapter(BackendAdapter):
                 executor = execute
             from core.deadline import Deadline
             from rollout.adapters.openhands_bridge import OpenHandsBridge
-            from runtime.agents.model_socket import UnixModelChannel
             deadline = Deadline(cfg["timeouts"]["model_seconds"])
             with OpenHandsBridge(cfg, binding, cfg["execution_context"]["profile"], output,
                                  deadline, attempt.runtime, capture) as bridge:
-                endpoint = bridge.base_url.rsplit("/", 1)[0].removeprefix("http://").split(":")
-                socket_path = output / "model.sock"
-                context.factory.cfg["swe_openhands_socket_path"] = str(socket_path)
-                with UnixModelChannel(socket_path, endpoint[0], int(endpoint[1])):
-                    response = executor(cfg, context, task, attempt, context.factory, capture, bridge)
+                response = executor(cfg, context, task, attempt, context.factory, capture, bridge)
                 response.setdefault("records", bridge.records)
             from rollout.adapters.openhands import canonical_trajectory
             records = response.get("records", [])

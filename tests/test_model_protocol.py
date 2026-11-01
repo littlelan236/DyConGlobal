@@ -108,3 +108,24 @@ def test_real_agent_request_and_submission_protocol(cfg, tmp_path, monkeypatch):
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_webarena_request_messages_keep_task_and_recent_pairs():
+    from rollout.model import _webarena_request_messages
+
+    cfg = {"benchmark": {"backend": "webarena_verified"}, "agent": {"webarena_context_chars": 100}}
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "task"},
+    ]
+    for index in range(5):
+        messages.extend([
+            {"role": "assistant", "content": f"action-{index}"},
+            {"role": "tool", "content": "observation-" + ("x" * 40)},
+        ])
+
+    selected = _webarena_request_messages(cfg, messages)
+    assert [m["content"] for m in selected[:2]] == ["system", "task"]
+    assert selected[-2]["content"] == "action-4"
+    assert selected[-1]["content"].startswith("observation-")
+    assert all(m["role"] != "tool" or i > 1 for i, m in enumerate(selected))

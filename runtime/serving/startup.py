@@ -70,8 +70,17 @@ def check_tool_chain(cfg, run_id, task, factory, runtime):
         message = make_model(cfg, factory.deadline, metadata, runtime).query(messages)
         messages.append(message)
         actions = message["extra"]["actions"]
-        if webarena and (len(actions) != 1 or actions[0].get("command", "").strip() != "browser scroll [down]"):
-            raise ValueError("WebArena startup requires exactly one prescribed browser scroll action")
+        if webarena:
+            valid_scroll = False
+            if len(actions) == 1:
+                try:
+                    from runtime.containers.webarena_adapter import parse_command
+                    kind, payload = parse_command(actions[0].get("command", "").strip())
+                    valid_scroll = kind == "action" and payload == "scroll down"
+                except (TypeError, ValueError):
+                    valid_scroll = False
+            if not valid_scroll:
+                raise ValueError("WebArena startup requires exactly one prescribed browser scroll action")
         from core.io import hash_json
 
         recorder = runtime.get("capture_controller") if message.get("extra", {}).get("dycon_parallel") else None

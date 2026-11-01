@@ -24,7 +24,10 @@ def cfg(tmp_path):
     raw["hidden"]["adapter"] = "vllm_eager"
     raw["hidden"]["vllm"] = {"gpus": [0], "tensor_parallel_size": 1}
     raw["steering"].update(enabled=False, payload=None)
-    raw["serving"]["management"] = "external"
+    raw["serving"].update(
+        management="external", gpus=[0], tensor_parallel_size=1,
+        trajectory_sharding="none", replica_base_urls=[], max_cpu_workers_per_gpu=1,
+    )
     raw["images"].update(
         reserve_bytes=0,
         minimum_load_bytes=1,
@@ -73,8 +76,8 @@ def task(iid="t-1", partition="train"):
 
 
 def import_fixture(cfg, *, resolved=None, iid="t-1"):
-    from catalog.store import Catalog
     from application.execution.evidence import RunEvidence
+    from catalog.store import Catalog
     from rollout.artifacts import import_rollout
 
     root = Path(cfg["project_root"])

@@ -1,14 +1,40 @@
 """Native mini-swe-agent model, augmented with request provenance."""
 
 import copy
+import json
 import os
 import time
-import json
-from pathlib import Path
 from functools import lru_cache
+from pathlib import Path
 
 from hidden.backends.vllm.online import build_capture_select
 from runtime.steering.easysteer.payload import steering_payload
+
+
+def _webarena_request_messages(cfg, messages):
+    # Bound prompt growth while retaining the current browser task state.
+    if cfg.get("benchmark", {}).get("backend") != "webarena_verified":
+        return messages
+    if len(messages) <= 4:
+        return messages
+    budget = int(cfg.get("agent", {}).get("webarena_context_chars", 80_000))
+    prefix = list(messages[:2])
+    selected = []
+    used = sum(len(str(m.get("content") or "")) for m in prefix)
+    tail = list(messages[2:])
+    if len(tail) % 2:
+        tail = tail[:-1]
+    for index in range(len(tail) - 2, -1, -2):
+        pair = tail[index:index + 2]
+        pair_size = sum(len(str(m.get("content") or "")) for m in pair)
+        if selected and used + pair_size > budget:
+            break
+        if not selected and used + pair_size > budget:
+            selected = pair
+            break
+        selected[0:0] = pair
+        used += pair_size
+    return prefix + selected
 
 
 @lru_cache(maxsize=32)
@@ -145,6 +171,8 @@ def make_model(cfg, deadline, capture_context=None, runtime=None, sample=None):
                 capture.update(step_id=self._dycon_capture_step, query_id=uuid4().hex)
                 self._dycon_capture_step += 1
 
+            request_messages = _webarena_request_messages(cfg, messages)
+
             def attach(message):
                 record = {
                     "tools": tools_schema(),
@@ -155,7 +183,7 @@ def make_model(cfg, deadline, capture_context=None, runtime=None, sample=None):
                     "model_fingerprint": cfg["model"]["fingerprint"],
                     "steering_payload_sha256": cfg["steering"].get("payload_sha256"),
                 }
-                prepared = self._prepare_messages_for_api(messages)
+                prepared = self._prepare_messages_for_api(request_messages)
                 if capture is None:
                     record["messages"] = prepared
                 else:
@@ -233,9 +261,9 @@ def make_model(cfg, deadline, capture_context=None, runtime=None, sample=None):
                         return msg
 
                     message = attach(coordinator.run(
-                        self._prepare_messages_for_api(messages), capture, generate, parse, self._calculate_cost))
+                        self._prepare_messages_for_api(request_messages), capture, generate, parse, self._calculate_cost))
                 else:
-                    message = attach(super().query(messages, **kwargs))
+                    message = attach(super().query(request_messages, **kwargs))
                 check_capture(message)
                 return message
             except FormatError as exc:

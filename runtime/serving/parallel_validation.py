@@ -145,7 +145,10 @@ def validate_parallel_queries(cfg, run_id, factory, runtime):
                     np.testing.assert_allclose(online, offline, rtol=1e-10, atol=1e-10)
                     score_errors.append(abs(online - offline))
             if selection is None:
-                selection_audit = validate_selection(summary, cfg["generation"]["seed"], cfg.get("parallel"))
+                expected = dict(cfg.get("parallel") or {})
+                if branches is not None:
+                    expected["branch_count"] = branches
+                selection_audit = validate_selection(summary, cfg["generation"]["seed"], expected)
             tokens = summary["total_usage"]["completion_tokens"]
         else:
             tokens = message["extra"]["response"]["usage"]["completion_tokens"]

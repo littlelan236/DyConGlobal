@@ -6,6 +6,7 @@ stdio subprocess transport; the OpenHands CLI owns the single agent/tool loop.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 
 class ACPEvents:
@@ -32,9 +33,18 @@ async def run_session(command, args, env, cwd, instruction, *, seconds, probe=Fa
     client = ACPEvents()
     result = record if record is not None else {}
     result["events"] = client.events
-    process = await asyncio.create_subprocess_exec(command, *args, env=env, cwd=cwd,
+    process_cwd = cwd if cwd is None or Path(cwd).is_dir() else None
+    process = await asyncio.create_subprocess_exec(command, *args, env=env, cwd=process_cwd,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE, limit=1024 * 1024)
+    stderr_chunks = []
+    async def collect_stderr():
+        while True:
+            line = await process.stderr.readline()
+            if not line:
+                return
+            stderr_chunks.append(line.decode(errors="replace"))
+    stderr_task = asyncio.create_task(collect_stderr())
     request_id = 1000
 
     async def request(method, params, timeout=60):
@@ -46,8 +56,22 @@ async def run_session(command, args, env, cwd, instruction, *, seconds, probe=Fa
         while True:
             line = await asyncio.wait_for(process.stdout.readline(), timeout=timeout)
             if not line:
-                raise RuntimeError("ACP process exited before " + method)
-            value = json.loads(line.decode())
+                with __import__("contextlib").suppress(Exception):
+                    await process.wait()
+                await asyncio.sleep(0.1)
+                detail = "".join(stderr_chunks)[-4000:]
+                raise RuntimeError("ACP process exited before " + method + f" (rc={process.returncode}): " + (detail or "<no stderr>"))
+            text = line.decode(errors="replace").strip()
+            if not text:
+                continue
+            try:
+                value = json.loads(text)
+            except json.JSONDecodeError:
+                result.setdefault("protocol_noise", []).append(text[:1000])
+                continue
+            if not isinstance(value, dict):
+                result.setdefault("protocol_noise", []).append(repr(value)[:1000])
+                continue
             if value.get("method") == "session/update":
                 client.events.append({"session_id": value.get("params", {}).get("sessionId"),
                                       "update": value.get("params", {}).get("update")})
@@ -80,3 +104,7 @@ async def run_session(command, args, env, cwd, instruction, *, seconds, probe=Fa
             except TimeoutError:
                 process.kill()
                 await process.wait()
+        if not stderr_task.done():
+            stderr_task.cancel()
+        with __import__("contextlib").suppress(asyncio.CancelledError):
+            await stderr_task

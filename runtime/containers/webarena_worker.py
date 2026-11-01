@@ -117,7 +117,11 @@ class BrowserSession:
                         locator.press(step["value"])
                     else:
                         raise ValueError("Unsupported login UI step")
-            page.locator(login["verify_selector"]).first.wait_for(state="visible")
+            # Header-based auth can render the authenticated user link inside
+            # a collapsed menu. DOM attachment proves the account is present;
+            # UI login still requires a visible post-login control.
+            state = "attached" if method == "header" else "visible"
+            page.locator(login["verify_selector"]).first.wait_for(state=state)
         finally:
             page.close()
 

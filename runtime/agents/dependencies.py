@@ -251,9 +251,10 @@ def build_snapshot(cfg, snapshot_id, wheelhouse, cli_archive, uv, python_runtime
     return {'path': str(target), 'manifest': manifest}
 
 
-def install_command():
-    """Install in a private prefix without touching the task's Python packages."""
+def install_command(wheelhouse="/opt/dycon-wheels"):
+    """Install the pinned private OpenHands runtime from a mounted snapshot."""
     import shlex
+    root = shlex.quote(wheelhouse)
     probe = ('import importlib.metadata as m, json; '
         'expected={"openhands":"1.16.0","openhands-sdk":"1.22.1",'
         '"openhands-tools":"1.22.1","httpx":"0.28.1","httpcore":"1.0.9"}; '
@@ -261,16 +262,16 @@ def install_command():
         'import openhands.sdk, openhands.tools, openhands_cli.acp_impl; print(json.dumps(actual))')
     return ('export LITELLM_LOCAL_MODEL_COST_MAP=true OPENHANDS_SUPPRESS_BANNER=1 && '
         'export UV_PYTHON_DOWNLOADS=never UV_OFFLINE=1 UV_NO_CACHE=1; '
-        'PYTHON_BIN=""; for candidate in /opt/dycon-wheels/python/bin/python3.12 '
+        f'PYTHON_BIN=""; for candidate in {root}/python/bin/python3.12 '
         '$(command -v python3.12 2>/dev/null) $(command -v python3 2>/dev/null); do '
         'if "$candidate" -c "import sys; assert sys.version_info[:2] == (3,12)" >/dev/null 2>&1; then '
         'PYTHON_BIN="$candidate"; break; fi; done; '
         'test -n "$PYTHON_BIN" || '
         '{ echo "No executable CPython 3.12 in the task image or bound runtime publication" >&2; exit 86; }; '
-        '/opt/dycon-wheels/uv venv --python $PYTHON_BIN --no-managed-python /opt/dycon-openhands && '
-        '/opt/dycon-wheels/uv pip sync --python /opt/dycon-openhands/bin/python '
-        '--no-index --find-links /opt/dycon-wheels/wheels --require-hashes '
-        '/opt/dycon-wheels/requirements.txt && '
+        f'{root}/uv venv --python $PYTHON_BIN --no-managed-python /opt/dycon-openhands && '
+        f'{root}/uv pip sync --python /opt/dycon-openhands/bin/python '
+        f'--no-index --find-links {root}/wheels --require-hashes '
+        f'{root}/requirements.txt && '
         'ln -sf /opt/dycon-openhands/bin/openhands /usr/local/bin/openhands && '
         '/opt/dycon-openhands/bin/python -c ' + shlex.quote(probe) + ' && openhands --help >/dev/null')
 

@@ -154,11 +154,14 @@ def _probe_runtime():
     from webarena_verified.core.utils.checksum import compute_evaluator_checksum
 
     package = Path(api.__file__).parents[1]
+    # Exclude the host project distribution discovered from the adapter import root.
+    project_distribution = "dycon-global"
     return {"package_version": importlib.metadata.version("webarena-verified"),
             "files": {path.relative_to(package).as_posix(): sha256(path)
                       for path in sorted(package.rglob("*.py"))},
             "dependencies": sorted(str(d.metadata["Name"]) + "==" + d.version
-                                   for d in importlib.metadata.distributions()),
+                                   for d in importlib.metadata.distributions()
+                                   if d.metadata.get("Name", "").lower() != project_distribution),
             "evaluator_checksum": compute_evaluator_checksum()}
 
 

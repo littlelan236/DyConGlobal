@@ -564,7 +564,7 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
             number = max((n for n, _ in existing), default=-1) + 1
             attempt_id = f'{sample.attempt_prefix}-{number:03d}'
             out = attempts / attempt_id
-            out.mkdir()
+            out.mkdir(exist_ok=True)
             context = AttemptContext(run_id, task_key, sample.sample_key, sample.repetition_id,
                                      attempt_id, round_id, seed, sample.sample_seed,
                                      SEED_POLICY if enabled(cfg) else sample.seed_policy).as_dict()
