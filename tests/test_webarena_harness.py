@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
@@ -203,3 +204,70 @@ def test_real_official_har_parser_error_stays_unknown(pinned_official):
     result = evaluate(cfg, task, subject, scratch / "result")
     assert result["status"] == "infra_error", result
     assert result["resolved"] is None
+
+
+
+@pytest.mark.parametrize("case", ["mixed_default", "explicit_unsubmitted", "only_unsubmitted"])
+def test_prepare_mixed_run_only_defaults_to_submitted(tmp_path, monkeypatch, case):
+    from application.execution import webarena_harness as harness
+    subject = _subject(tmp_path / "trace")
+    good = _row(tmp_path, subject)
+    bad = {**copy.deepcopy(good), "submission_status": "not_submitted"}
+    rows = {"bad": bad} if case == "only_unsubmitted" else {"ok": good, "bad": bad}
+    run = tmp_path / "runs/grade"
+    monkeypatch.setattr(harness, "load_plan", lambda *a: {
+        "run": run, "tasks": {"tasks": [{"task_key": "task"}]}})
+
+    def select(ids):
+        selected = {rid: rows[rid] for rid in ids} if ids else rows
+        return {"rollouts": selected, "tasks": {"task": {"benchmark": "webarena_verified"}},
+                "evidence_revision": 1, "evidence_sha256": "a" * 64}
+
+    monkeypatch.setattr(harness, "RunEvidence", lambda *a: SimpleNamespace(select=select))
+    if case == "explicit_unsubmitted":
+        with pytest.raises(ValueError, match="actual agent submission"):
+            harness.prepare(tmp_path, "grade", ("bad",))
+    elif case == "only_unsubmitted":
+        with pytest.raises(ValueError, match="no eligible submitted"):
+            harness.prepare(tmp_path, "grade")
+    else:
+        assert harness.prepare(tmp_path, "grade")["rollout_count"] == 1
+        assert read_json(run / "harness/selection.json")["rollout_ids"] == ["ok"]
+
+
+def test_evaluator_result_uses_owned_external_run_alias(tmp_path, monkeypatch):
+    from benchmark_evaluation import webarena as adapter
+    from core.io import owned_path
+
+    root, storage = tmp_path / "project", tmp_path / "external-storage"
+    run = storage / "runs/external"
+    run.mkdir(parents=True)
+    (root / "runs").mkdir(parents=True)
+    (root / "runs/external").symlink_to(run, target_is_directory=True)
+    definition = {"task_id": 108, "revision": 2}
+    write_json(root / "dataset.json", [definition])
+    write_json(root / "runtime.json", {"schema_version": 1, "revision": REVISION,
+        "python": str(root / "fake-python")})
+    cfg = {"project_root": str(root), "run_storage_root": str(storage),
+           "webarena": {"evaluator_python": "fake-python"}, "execution_context": {
+               "evaluator": {"path": "dataset.json", "sha256": sha256(root / "dataset.json"),
+                             "revision": REVISION},
+               "evaluator_runtime": {"path": "runtime.json", "sha256": sha256(root / "runtime.json")}}}
+    selection = {"tasks": []}
+    write_json(run / "resolved-config.json", {**cfg, "config_hash": hash_json(cfg),
+        "selection": selection, "selection_sha256": hash_json(selection)})
+    subject = _subject(root / "trace")
+    task = {"benchmark": "webarena_verified", "instance": {"source_task_id": 108,
+        "task_revision": 2, "source_task_sha256": hash_json(definition), "sites": ["shopping_admin"]}}
+
+    def worker(command, *args):
+        write_json(command[-1], {"status": "failure", "score": 0.0,
+                                "webarena_verified_evaluator_checksum": "test-fixture"})
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(adapter, "_invoke_worker", worker)
+    result = adapter.evaluate(cfg, task, subject, run / "harness/evaluations/e0/subjects/r0")
+    assert result["status"] == "completed" and result["resolved"] is False, result
+    assert result["official_result_path"] == "runs/external/harness/evaluations/e0/subjects/r0/official-result.json"
+    path = owned_path(root, result["official_result_path"])
+    assert sha256(path) == result["official_result_sha256"]

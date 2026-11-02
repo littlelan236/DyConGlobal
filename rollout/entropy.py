@@ -6,7 +6,7 @@ RETENTION_RULES = ("effective_count_v1", "shannon_exp_keep_v1", "baseline_floor_
                    "normalized_entropy_v1", "effective_count_linear_v1", "effective_count_quadratic_v1", "effective_count_type_linear_v1", "shannon_saturating_a25_v1", "effective_count_sigmoid_v1", "effective_count_sigmoid_4_v1", "effective_count_tilt_a1_v1", "effective_count_scale_a08_v1", "effective_count_sigmoid_c7_v1", "entropy_logistic_c18_a8_v1", "effective_width_logistic_c6_b2_v1", "effective_width_hill_c6_p8_v1", "effective_width_hill_c7_p4_v1", "effective_width_power_p2_v1")
 
 
-RETENTION_RULES += ("effective_count_full_above_v1",)
+RETENTION_RULES += ("effective_count_full_above_v1", "effective_count_plus_n_v1")
 
 
 def stable_ceil(value):
@@ -18,8 +18,11 @@ def stable_ceil(value):
 
 
 def entropy_retention(counts, minimum=2, rule="shannon_exp_keep_v1", retention_ratio=0.5,
-                      full_retention_threshold=10):
+                      full_retention_threshold=10, n=0):
     """Return an auditable top-k budget from an empirical action histogram."""
+    offset = n
+    if rule == "effective_count_plus_n_v1" and (type(offset) is not int or offset < 0):
+        raise ValueError("n must be a nonnegative integer")
     if rule not in RETENTION_RULES:
         raise ValueError("Unknown entropy retention rule: " + str(rule))
     if rule == "effective_count_full_above_v1" and (
@@ -37,7 +40,7 @@ def entropy_retention(counts, minimum=2, rule="shannon_exp_keep_v1", retention_r
         h = 0.0
     raw = None
     if n:
-        if rule in {"effective_count_v1", "effective_count_full_above_v1"}:
+        if rule in {"effective_count_v1", "effective_count_full_above_v1", "effective_count_plus_n_v1"}:
             raw = math.exp(h)
         elif rule == "shannon_exp_keep_v1":
             raw = n - (n - minimum) * math.exp(-h)
@@ -105,6 +108,10 @@ def entropy_retention(counts, minimum=2, rule="shannon_exp_keep_v1", retention_r
             raw = minimum + (n - minimum) * fraction
     keep = min(n, max(minimum, stable_ceil(raw))) if n >= minimum else 0
     threshold_meta = {}
+    if rule == "effective_count_plus_n_v1":
+        threshold_meta = {"base_keep_count": keep, "n": offset}
+        if n >= minimum:
+            keep = min(n, keep + offset)
     if rule == "effective_count_full_above_v1":
         triggered = keep > full_retention_threshold
         threshold_meta = {"base_keep_count": keep,

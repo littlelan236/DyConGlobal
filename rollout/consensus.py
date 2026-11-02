@@ -26,6 +26,8 @@ def consensus_options(parallel):
         options["retention_rule"] = parallel["entropy"]["retention_rule"]
         if options["retention_rule"] == "effective_count_full_above_v1":
             options["full_retention_threshold"] = parallel["entropy"].get("full_retention_threshold", 10)
+        if options["retention_rule"] == "effective_count_plus_n_v1":
+            options["n"] = parallel["entropy"].get("n", 0)
     return options
 
 
@@ -39,6 +41,7 @@ def select_consensus(
     representative_policy=None,
     retention_rule=None,
     full_retention_threshold=10,
+    n=0,
     token_lengths=None,
 ):
     """Select one exact-action representative and return auditable metadata."""
@@ -100,7 +103,7 @@ def select_consensus(
         eligible = valid
         entropy_meta = entropy_retention([len(ids) for ids in histogram.values()],
                                          int(min_retained_branches), retention_rule, float(retention_ratio),
-                                         full_retention_threshold=full_retention_threshold)
+                                         full_retention_threshold=full_retention_threshold, n=n)
         entropy_meta["candidate_branch_ids"] = sorted(identities)
         entropy_meta["groups"] = [
             {"action_hash": key, "action": identities[ids[0]][1], "branch_ids": sorted(ids), "count": len(ids)}
@@ -279,7 +282,7 @@ def validate_consensus_evidence(decision, options=None):
         candidates, scores, config["retention_ratio"], config["min_retained_branches"], config["tie_policy"],
         representative_policy=config.get("representative_policy"),
         retention_rule=config.get("retention_rule"), token_lengths=lengths,
-        full_retention_threshold=config.get("full_retention_threshold", 10))
+        full_retention_threshold=config.get("full_retention_threshold", 10), n=config.get("n", 0))
     if winner is None and not candidates:
         # Non-action format/limit responses retain the existing retry contract.
         if decision.get("consensus", {}).get("status") != "no_eligible_branch":

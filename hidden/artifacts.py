@@ -152,3 +152,52 @@ def read_branch_index(root, session_id):
         states = {(r["decision_id"], r["branch_id"]): r["close_capture"] for r in revision["branches"]}
         rows = [{**row, "close_capture": states[(row["decision_id"], row["branch_id"])]} for row in rows]
     return {"samples": rows, "coverage": coverage, "receipt": receipt}
+
+
+def iter_arrays_grouped(samples):
+    """Yield (key, arrays) from (key, root, row), opening each tar shard once.
+
+    Reuses the same NPZ/checksum contract as read_arrays; row order is explicitly
+    returned by key, rather than being inferred from physical I/O order.
+    """
+    from collections import defaultdict
+
+    groups = defaultdict(list)
+    for key, root, row in samples:
+        locator = row.get("tensor_locator")
+        relative = locator["shard"] if locator else row.get("path", row.get("tensor"))
+        if not relative:
+            raise ValueError("Hidden row has no tensor locator")
+        groups[(str(Path(root).resolve()), relative, bool(locator))].append((key, row))
+    for (root, relative, sharded), rows in sorted(groups.items()):
+        if not sharded:
+            digests = {row.get("sha256") for _, row in rows}
+            if None in digests or len(digests) != 1:
+                raise ValueError("Loose hidden file has missing/conflicting SHA")
+            arrays = read_arrays(root, rows[0][1])
+            for key, _row in rows:
+                yield key, arrays
+            continue
+        digests = {row["tensor_locator"].get("shard_sha256") for _, row in rows}
+        path = owned_path(root, relative)
+        if None in digests or len(digests) != 1 or sha256(path) != next(iter(digests)):
+            raise ValueError("Hidden tar shard checksum mismatch")
+        with tarfile.open(path, "r:") as archive:
+            members = {}
+            wanted = {row["tensor_locator"]["member"] for _, row in rows}
+            for member in archive.getmembers():
+                if member.name in wanted:
+                    if member.name in members:
+                        raise ValueError("Duplicate hidden member name in tar shard")
+                    members[member.name] = member
+            for key, row in rows:
+                locator = row["tensor_locator"]
+                member = members.get(locator["member"])
+                if member is None or not member.isfile():
+                    raise ValueError("Hidden tar member is missing or not a regular file")
+                data = archive.extractfile(member).read()
+                if (locator["member_sha256"] != row.get("sha256") or
+                        hashlib.sha256(data).hexdigest() != locator["member_sha256"]):
+                    raise ValueError("Hidden tensor member checksum mismatch")
+                with np.load(io.BytesIO(data), allow_pickle=False) as arrays:
+                    yield key, {name: arrays[name] for name in arrays.files}

@@ -103,3 +103,31 @@ CUDA_VISIBLE_DEVICES='' .venvs/runner/bin/python -m pytest -q \
 ```
 
 `run start --check-only` 会启动 managed serving，仍需要 GPU。此次实现调试不执行该入口，不启动 GPU rollout/harness run。
+
+
+## Effective count 加法偏移映射（2026-11-01）
+
+Run 独立策略新增 `effective_count_plus_n_v1`，必须显式配置非负整数 `entropy.n`：
+
+```yaml
+entropy:
+  retention_rule: effective_count_plus_n_v1
+  n: 6
+```
+
+先按 `effective_count_v1` 完整计算整数预算 `k_base`（沿用原始 Shannon 熵、
+16 ULP 整数边界处理和 `min_retained_branches` 下限），再取
+`k = min(N, k_base + n)`。`N` 为 loop escape 后、estimator top-k 前的有效分支数。
+有效分支不足原下限时仍保留原有 insufficient/unavailable 行为，不用偏移量补足。
+例如 N=32、全部 action 相同、下限为 2 时，n=6 保留 8；k_base=30 时保留 32。
+此规则不使用 `full_retention_threshold`，切换映射的 clone 会移除不适用的旧字段。
+
+输入和 n 随新 run 冻结；选择、loop escape 可用性检查与证据回放都使用同一个偏移量。
+entropy 证据额外记录 `base_keep_count`、`n`，`raw_keep` 保留原 exp(H)。
+旧 run 的快照、缺少此映射的选择行为均不补写。
+
+
+冻结 clone 同时允许 `--set parallel.max_inflight_branches=CAPACITY`。
+该值不得超过新 run 的 `serving.max_num_seqs`；当候选分支总数大于容量时，
+仍须启用 `dynamic_branch_admission`。例如 32 个候选分支、max_num_seqs=24 时，
+设置 max_inflight_branches=24，通过已有动态准入机制分批运行，不改变候选池大小。

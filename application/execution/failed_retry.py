@@ -37,12 +37,19 @@ def superseded(index, sample_key, outcome):
     return True
 
 
-def request_failed_retry(root, run_id, *, request_id, exit_statuses, task_ids=(), reason):
+def request_failed_retry(root, run_id, *, request_id, exit_statuses, task_ids=(), sample_keys=(), expected_attempts=None, reason):
     root = Path(root).resolve()
     run_id, request_id = identifier(run_id), identifier(request_id)
     if not reason or not reason.strip() or not exit_statuses:
         raise ValueError('Explicit reason and failure exit statuses are required')
     selectors = {'exit_statuses': sorted(set(exit_statuses)), 'task_ids': sorted(set(task_ids))}
+    expected_attempts = dict(expected_attempts or {})
+    if expected_attempts and set(expected_attempts) != set(sample_keys):
+        raise ValueError('Expected attempts must bind exactly the selected sample keys')
+    if sample_keys:
+        selectors['sample_keys'] = sorted(set(sample_keys))
+    if expected_attempts:
+        selectors['expected_attempts'] = expected_attempts
     run = root / 'runs' / run_id
     target = run / 'rollout/operator-retries' / request_id / 'request.json'
     with ExitStack() as locks:
@@ -70,8 +77,29 @@ def request_failed_retry(root, run_id, *, request_id, exit_statuses, task_ids=()
             if old['selectors'] != selectors or old['reason'] != reason:
                 raise ValueError('Retry request ID binds different selectors/reason')
             return old
+        # Validate all exact selectors before archiving or publishing any request.
+        if sample_keys:
+            selected = {item['sample_key']: item for item in loaded['work_items']['items']
+                        if item['sample_key'] in sample_keys}
+            if set(selected) != set(sample_keys):
+                raise ValueError('Unknown exact sample key')
+            for key, item in selected.items():
+                if task_ids and item['instance_id'] not in task_ids:
+                    raise ValueError('Exact sample does not match task selector')
+                path = run / 'rollout/tasks' / item['instance_id'] / 'repetitions' / item['repetition_id'] / 'result.json'
+                if not path.exists():
+                    raise ValueError('Exact sample has no terminal outcome')
+                outcome = read_json(path)
+                if outcome.get('exit_status') not in exit_statuses:
+                    raise ValueError('Exact sample does not match failure status')
+                if expected_attempts and outcome.get('attempt_id') != expected_attempts[key]:
+                    raise ValueError('Exact sample current attempt changed')
+                if sample_accepted(loaded['config'], outcome) or outcome.get('disposition') not in {'failed','blocked'}:
+                    raise ValueError('Only failed/blocked results may be explicitly retried')
         items = []
         for item in loaded['work_items']['items']:
+            if sample_keys and item['sample_key'] not in sample_keys:
+                continue
             if task_ids and item['instance_id'] not in task_ids:
                 continue
             work = run / 'rollout/tasks' / item['instance_id'] / 'repetitions' / item['repetition_id']

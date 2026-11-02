@@ -71,6 +71,8 @@ def execute(cfg, context, task, attempt, factory, capture, bridge):
             for key, value in agent_env.items():
                 args.extend(["--env", key + "=" + value])
             args.extend([env.container.id, "/opt/dycon-openhands/bin/python", "/tmp/dycon-model-socket.py"])
+            from rollout.progress import attempt_phase
+            attempt_phase(attempt.runtime, "agent")
             instruction = task["instance"]["problem_statement"]
             result = asyncio.run(run_session(docker_exec, args[1:], os.environ.copy(),
                                              profile["task_cwd"], instruction,

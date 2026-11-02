@@ -48,6 +48,7 @@ class Model(Strict):
     fingerprint: str | None
     served_name: str | None
     trust_remote_code: bool
+    verify_identity: bool = True
 
 
 class Serving(Strict):
@@ -590,7 +591,8 @@ def resolve(path, overrides=()):
         for key in keys[:-1]:
             target = target[key]
         allowed_identity_fields = {"benchmark.backend", "benchmark.snapshot_ref",
-                                   "agent.backend", "agent.profile_ref", "serving.allow_mig_sharing"}
+                                   "agent.backend", "agent.profile_ref", "serving.allow_mig_sharing",
+                                   "model.verify_identity"}
         if keys[-1] not in target and dotted not in allowed_identity_fields:
             raise ValueError(f"Unknown config field: {dotted}")
         target[keys[-1]] = yaml.safe_load(value)
@@ -613,6 +615,9 @@ def resolve(path, overrides=()):
         cfg.pop("harbor", None)
     if "skillsbench_images" not in raw:
         cfg.pop("skillsbench_images", None)
+    # Preserve legacy config hashes when the optional identity switch is absent.
+    if "verify_identity" not in raw["model"]:
+        cfg["model"].pop("verify_identity", None)
     if "cancellation" not in raw["execution"]:
         cfg["execution"].pop("cancellation", None)
     if "limits_retry" not in raw["execution"]:

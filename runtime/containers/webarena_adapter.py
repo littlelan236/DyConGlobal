@@ -70,7 +70,7 @@ def validate_pool_manifest(value):
 
 
 def parse_command(command):
-    """Freeze the single-command grammar before the permissive upstream parser."""
+    """Canonicalize one browser command before the pinned upstream parser."""
     if not isinstance(command, str) or "\n" in command or "\r" in command or "\x00" in command:
         raise ValueError("Issue exactly one browser command on one line")
     if not command.startswith("browser "):
@@ -78,26 +78,63 @@ def parse_command(command):
     action = command[len("browser "):].strip()
     if action.startswith("stop "):
         payload = action[len("stop "):].strip()
-        if not payload.startswith("[") or not payload.endswith("]"):
-            raise ValueError("Use browser stop [JSON_OBJECT]")
-        answer = json.loads(payload[1:-1])
+        # JSON and the documented [JSON] wrapper carry the same public answer.
+        if payload.startswith("[") and payload.endswith("]"):
+            payload = payload[1:-1]
+        answer = json.loads(payload)
         validate_answer(answer)
         return "stop", answer
+    if action.startswith("type"):
+        # Preserve the original bracket grammar byte-for-byte. In particular,
+        # do not wrap [text] again or turn its submit flag into part of the text.
+        if re.search(r"\]\s*(?:browser\s+|&&|;|\|)", action):
+            raise ValueError("Multiple actions are not supported")
+        if re.fullmatch(r"type\s*\[\d+\]\s*\[.+\](?:\s*\[[01]\])?", action):
+            return "action", action
+        match = re.fullmatch(r"type\s+\[(\d+)\]\s+(.+)", action)
+        if match:
+            element_id, text = match.groups()
+            # A malformed bracket command must not fall through as plain text.
+            if text.startswith("[") or re.search(r"&&|;|\|", text):
+                raise ValueError("Use browser type [ID] [text] [0|1]")
+            submit = None
+            suffix = re.fullmatch(r"(.+)\s+(?:\[([01])\]|([01]))", text)
+            if suffix:
+                text, bracketed, bare = suffix.groups()
+                submit = bracketed or bare
+            if len(text) >= 2 and text[0] in ("'", '"') and text[-1] == text[0]:
+                text = text[1:-1]
+            if not text.strip() or "[" in text or "]" in text:
+                raise ValueError("Use browser type [ID] [text] [0|1]")
+            action = f"type [{element_id}] [{text}]"
+            if submit is not None:
+                action += f" [{submit}]"
+            return "action", action
+        raise ValueError("Use browser type [ID] [text] [0|1]")
+    # Tab indices and scroll direction are scalar arguments; normalize concise
+    # forms to the exact grammar used by the pinned browser environment.
+    match = re.fullmatch(r"tab_focus\s+(\d+)", action)
+    if match:
+        action = f"tab_focus [{match.group(1)}]"
+    match = re.fullmatch(r"goto\s+(https?://[^\[\]\s]+)", action)
+    if match:
+        action = f"goto [{match.group(1)}]"
+    match = re.fullmatch(r"press\s+([A-Za-z0-9_+.-]+)", action)
+    if match:
+        action = f"press [{match.group(1)}]"
+    match = re.fullmatch(r"scroll\s+(up|down)", action)
+    if match:
+        action = f"scroll [{match.group(1)}]"
     patterns = (
         r"(?:click|hover)\s*\[\d+\]",
-        r"type\s*\[\d+\]\s*\[.+\](?:\s*\[[01]\])?",
         r"press\s*\[[^\[\]]+\]",
-        r"scroll\s*\[?(?:up|down)\]?",
+        r"scroll\s*\[(?:up|down)\]",
         r"goto\s*\[https?://[^\[\]\s]+\]",
         r"tab_focus\s*\[\d+\]",
         r"(?:new_tab|go_back|go_forward|close_tab)",
     )
     if not any(re.fullmatch(pattern, action) for pattern in patterns):
         raise ValueError("Unsupported browser action or more than one action")
-    # Upstream type's greedy text parser could swallow a second command. Text is
-    # data, but commands outside its brackets must never be silently ignored.
-    if action.startswith("type") and re.search(r"\]\s*(?:browser\s+|&&|;)", action):
-        raise ValueError("Multiple actions are not supported")
     return "action", action
 
 
@@ -309,8 +346,9 @@ class WebArenaEnvironment:
             container.start()
             container.reload()
             site_ip = container.attrs["NetworkSettings"]["Networks"][self.network.name]["IPAddress"]
-            headers = {"Host": site.replace("_", "-"), **spec.get("login", {}).get("headers", {})}
-            self._wait_http("http://" + site_ip + spec.get("health_path", "/"),
+            headers = {"Host": urlsplit(spec["base_url"]).netloc,
+                       **spec.get("login", {}).get("headers", {})}
+            self._wait_http("http://" + site_ip + ":" + str(spec["port"]) + spec.get("health_path", "/"),
                             timeout=cfg["timeouts"]["container_start_seconds"], headers=headers)
 
     def _baseline(self, reference):

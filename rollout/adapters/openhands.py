@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 from types import SimpleNamespace
 
-from core.action_identity import canonical_action
+from core.action_identity import ActionIdentityUnavailable, canonical_action
 from core.io import hash_json
 from rollout.decision.candidate import NormalizedCandidate
 
@@ -15,7 +15,17 @@ CONDENSATION_SUFFIX = "Now summarize the events using the rules above."
 
 
 class OpenHandsProtocolError(ValueError):
-    pass
+    """Recoverable FormatError, carrying the shared coordinator message contract."""
+    retryable = True
+
+    def __init__(self, message):
+        self.messages = [{"role": "user", "content": "FormatError: " + str(message),
+                          "extra": {"error_type": "FormatError", "recoverable": True}}]
+        super().__init__(message)
+
+
+class OpenHandsSelectionError(RuntimeError):
+    """Selection/transport failure unrelated to an agent format response."""
 
 
 class OpenHandsLimit(RuntimeError):
@@ -29,11 +39,29 @@ class OpenHandsPolicy:
         return OpenHandsLimit(payload)
 
     def failure(self, candidates, records, baseline, error_type):
+        # Match MiniPolicy semantics: return one format/protocol error to the
+        # agent for correction. Do not turn malformed tool output into the
+        # terminal selection error used for exhausted loop branches.
+        protocol = [c for c in candidates if isinstance(c.error, OpenHandsProtocolError)]
+        if protocol:
+            candidate = min(protocol, key=lambda c: c.branch_id)
+            candidate.error = OpenHandsProtocolError(
+                "OpenHands tool format error; retry with the declared top-level tool"
+            )
+            return candidate, None, "all_branches_protocol_error"
+
         limits = [c.error for c in candidates if isinstance(c.error, OpenHandsLimit)]
         if limits and len(limits) == len(candidates):
+            if len(records) == len(candidates) and all(row.get("reason") == "reasoning_loop" for row in records):
+                return None, self.limit_error({
+                    "role": "exit", "content": "All parallel branches ended in reasoning loops",
+                    "extra": {"exit_status": "reasoning_loop" if baseline else "LimitsExceeded",
+                              "submission": "", "limit_reason": "all_parallel_branches_reasoning_loop"}}), None
             return None, limits[0], None
-        return None, error_type("No complete OpenHands candidate: " + "; ".join(
-            str(c.error) for c in candidates)), None
+
+        return None, OpenHandsSelectionError(
+            "No complete OpenHands candidate: " + "; ".join(str(c.error) for c in candidates)
+        ), None
 
 
 class Response:
@@ -51,23 +79,44 @@ def request_identity(request):
     return hash_json({k: v for k, v in request.items() if k not in {"stream", "stream_options"}})
 
 
-def preserve_reasoning_history(request, records):
-    """Restore only same-attempt winner reasoning omitted by SDK serialization."""
-    known={}
+def reasoning_fields(message):
+    """Prefer the historical canonical field and audit conflicting aliases."""
+    values = {key: message.get(key) for key in ("reasoning_content", "reasoning")}
+    available = {key: value for key, value in values.items()
+                 if isinstance(value, str) and value}
+    source = next(iter(available), None)
+    evidence = {"source": source, "conflict": len(set(available.values())) > 1,
+                "field_sha256": {key: hash_json(value) for key, value in available.items()}}
+    return available.get(source), evidence
+
+
+def preserve_reasoning_history(request, records, evidence=None):
+    """Restore reasoning only from matched, same-attempt selected responses."""
+    known = {}
     for record in records:
-        if record.get('role')!='agent_decision' or not record.get('selected_response'):continue
-        choices=record['selected_response'].get('choices') or []
-        message=(choices[0].get('message') or {}) if choices else {}
-        ids=tuple(c['id'] for c in message.get('tool_calls') or [])
-        reasoning=message.get('reasoning_content')
-        if ids and isinstance(reasoning,str):known[ids]=reasoning
-    restored=0
-    for message in request['messages']:
-        if message.get('role')!='assistant':continue
-        ids=tuple(c['id'] for c in message.get('tool_calls') or [])
-        if ids in known and not message.get('reasoning_content'):
-            message['reasoning_content']=known[ids]
-            restored+=1
+        if record.get("role") != "agent_decision" or not record.get("selected_response"):
+            continue
+        choices = record["selected_response"].get("choices") or []
+        message = (choices[0].get("message") or {}) if choices else {}
+        ids = tuple(call["id"] for call in message.get("tool_calls") or [])
+        reasoning, fields = reasoning_fields(message)
+        if ids and reasoning is not None:
+            known[ids] = (reasoning, fields)
+    restored = 0
+    for message in request["messages"]:
+        if message.get("role") != "assistant":
+            continue
+        ids = tuple(call["id"] for call in message.get("tool_calls") or [])
+        current, fields = reasoning_fields(message)
+        origin = "incoming_history"
+        if current is None and ids in known:
+            current, fields = known[ids]
+            origin = "same_attempt_winner"
+            restored += 1
+        if current is not None:
+            message["reasoning_content"] = current
+            if evidence is not None:
+                evidence.append({"tool_call_ids": list(ids), "origin": origin, **fields})
     return restored
 
 
@@ -127,16 +176,23 @@ def parse_response(response, request, *, decision_id="single", branch_id=0):
         if call.get("type") != "function" or call.get("function", {}).get("name") not in offered:
             raise OpenHandsProtocolError("Response used an undeclared tool")
     if calls:
-        canonical_action(message)  # Validates JSON arguments, preserving original bytes and IDs.
+        try:
+            canonical_action(message)  # Validates JSON arguments, preserving original bytes and IDs.
+        except (ActionIdentityUnavailable, ValueError, TypeError) as exc:
+            raise OpenHandsProtocolError("Response contained invalid tool arguments") from exc
     elif reason == "tool_calls" or not message.get("content"):
         raise OpenHandsProtocolError("Empty or incomplete assistant response")
+    reasoning, fields = reasoning_fields(message)
+    if reasoning is not None:
+        message["reasoning_content"] = reasoning
     candidate = NormalizedCandidate(decision_id, branch_id, request_identity(request),
-                                    message.get("content"), message.get("reasoning_content"),
+                                    message.get("content"), reasoning,
                                     copy.deepcopy(calls), reason, raw.get("usage") or {},
                                     raw.get("native_request_id"), VERSION, raw_response=raw)
     message["extra"] = {"response": raw, "request": copy.deepcopy(request),
                         "request_role": "agent_decision", "adapter_version": VERSION,
-                        "candidate_request_sha256": candidate.request_sha256}
+                        "candidate_request_sha256": candidate.request_sha256,
+                        "reasoning_fields": fields}
     return message
 
 

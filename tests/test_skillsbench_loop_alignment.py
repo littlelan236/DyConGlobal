@@ -40,7 +40,7 @@ def test_unknown_tool_ids_do_not_change_cross_step_identity_or_execute_hit(cfg, 
                     {'id': 'fresh-transport-id-' + str(len(responses)), 'type': 'function',
                      'function': {'name': 'terminal', 'arguments': '{"command":"pwd"}'}}]}}]}
         responses.append(copy.deepcopy(raw))
-        return SimpleNamespace(ok=True, json=lambda: raw)
+        return SimpleNamespace(ok=True, status_code=200, json=lambda: raw)
     monkeypatch.setattr(openhands_bridge.requests, 'post', generate)
     assert bridge.complete(request) == responses[-1]
     assert bridge.complete(request) == responses[-1]

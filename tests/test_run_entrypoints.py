@@ -22,6 +22,39 @@ def test_run_status_uses_snapshot_even_when_root_yaml_breaks(cfg,capsys):
     assert json.loads(capsys.readouterr().out)["task_count"]==1
 
 
+def test_run_status_reports_sample_summary_before_other_details(cfg,capsys):
+    from core.cli import main
+    run=make_run(cfg)
+    (run/"execution").mkdir(parents=True,exist_ok=True)
+    write_json(run/"execution/latest.json",{"attempt":"001"})
+    write_json(run/"progress.json",{"samples":{
+        "s0":{"disposition":"accepted","exit_status":"Submitted","serving_assignment":{"execution_attempt_id":"000"}},
+        "s1":{"disposition":"accepted","exit_status":"ContextWindowExceededError","serving_assignment":{"execution_attempt_id":"001"}},
+        "s2":{"disposition":"retry_pending","exit_status":"LimitsExceeded","serving_assignment":{"execution_attempt_id":"001"}},
+        "s3":{"disposition":"pending","exit_status":"Running"},
+    }})
+
+    main(["--config",cfg["config_source"],"run","status",run.name])
+    output=capsys.readouterr().out
+    result=json.loads(output)
+    assert list(result)[:3]==["run_id","sample_summary","plan"]
+    assert result["sample_summary"]=={
+        "sample_count":4,
+        "accepted_count":2,
+        "pending_count":1,
+        "retry_pending_count":1,
+        "failure_counts":{"ContextWindowExceededError":1,"LimitsExceeded":1},
+        "latest_attempt":{
+            "execution_attempt_id":"001",
+            "sample_count":2,
+            "accepted_count":1,
+            "pending_count":0,
+            "retry_pending_count":1,
+            "failure_counts":{"ContextWindowExceededError":1,"LimitsExceeded":1},
+        },
+    }
+
+
 def test_rehashed_task_sidecar_cannot_bypass_plan(cfg):
     run=make_run(cfg)
     data=read_json(run/"tasks.json")

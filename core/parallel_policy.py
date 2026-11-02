@@ -12,7 +12,7 @@ from core.io import hash_json
 
 RepresentativePolicy = Literal["estimator_score", "min_step_tokens"]
 RetentionRule = Literal["effective_count_v1", "shannon_exp_keep_v1", "baseline_floor_v1",
-                        "effective_count_full_above_v1"]
+                        "effective_count_full_above_v1", "effective_count_plus_n_v1"]
 
 
 def effective_policy(parallel):
@@ -29,11 +29,17 @@ class RunConsensus(ParallelConsensus):
 class RunEntropy(Strict):
     retention_rule: RetentionRule
     full_retention_threshold: int | None = Field(default=None, ge=1, strict=True)
+    n: int | None = Field(default=None, ge=0, strict=True)
 
     @model_validator(mode="after")
     def threshold_rule(self):
         if self.retention_rule != "effective_count_full_above_v1" and self.full_retention_threshold is not None:
             raise ValueError("full_retention_threshold requires effective_count_full_above_v1")
+        if self.retention_rule == "effective_count_plus_n_v1":
+            if self.n is None:
+                raise ValueError("effective_count_plus_n_v1 requires an explicit n")
+        elif self.n is not None:
+            raise ValueError("n requires effective_count_plus_n_v1")
         return self
 
 
@@ -129,6 +135,9 @@ def apply_run_parallel(cfg, path=None, *, from_run=None, overrides=()):
                         value["retention_rule"] != "effective_count_full_above_v1" and
                         "full_retention_threshold" not in value):
                     target = {k: v for k, v in target.items() if k != "full_retention_threshold"}
+                if (key == "entropy" and "retention_rule" in value and
+                        value["retention_rule"] != "effective_count_plus_n_v1" and "n" not in value):
+                    target = {k: v for k, v in target.items() if k != "n"}
                 parallel[key] = {**target, **value}
             else:
                 parallel[key] = value

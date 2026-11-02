@@ -117,9 +117,95 @@ class OwnedPlanes:
             "execution": os.environ.get("DYCON_EXECUTION_ATTEMPT", "direct"),
             "role": "skillsbench-environment", "epoch": uuid.uuid4().hex}
         for name in dir(inner):
-            if (name not in {"create_environment", "harden_before_verify", "verifier", "deploy_skills"}
+            if (name not in {"create_environment", "connect_acp", "harden_before_verify", "verifier", "deploy_skills"}
                     and not name.startswith("_") and callable(getattr(inner, name))):
                 setattr(self, name, getattr(inner, name))
+
+    async def connect_acp(self, *args, **kwargs):
+        # Use BenchFlow's own client and transport. Observe its extensible
+        # receive seam before ACPClient discards JSON-RPC error.data.
+        result = await self.inner.connect_acp(*args, **kwargs)
+        client = result[0]
+        transport = client._transport
+        receive = transport.receive
+        async def observed_receive():
+            try:
+                value = await receive()
+            except Exception as exc:
+                diag = getattr(exc, "diagnostic", None)
+                diagnostic = diag.to_dict() if hasattr(diag, "to_dict") else None
+                write_json(self.output / 'diagnostics/process-transport.json', {
+                    'schema_version': 1, 'ownership': self.ownership,
+                    'observed_at': now(), 'error_type': type(exc).__name__,
+                    'process_exit_code': (diagnostic or {}).get('process_exit_code'),
+                    'process_pid': (diagnostic or {}).get('process_pid'),
+                    'diagnosis': (diagnostic or {}).get('transport_diagnosis'),
+                    'source': 'benchflow_live_transport_before_cleanup',
+                    'cause': 'unknown'})
+                await asyncio.to_thread(self._snapshot_process_evidence, 'transport_error')
+                raise
+            if isinstance(value, dict) and isinstance(value.get('error'), dict):
+                error = value['error']
+                write_json(self.output / 'diagnostics/acp-error.json', {
+                    'schema_version': 1, 'ownership': self.ownership,
+                    'source': 'actual_benchflow_transport_receive', 'observed_at': now(),
+                    'rpc_request_id': value.get('id'), 'code': error.get('code'),
+                    'message': _safe_acp_message(error.get('message')),
+                    **_acp_details(error.get('data'))})
+            return value
+        transport.receive = observed_receive
+        return result
+
+    async def _collect_sdk_transport(self, env):
+        import shlex
+        from runtime.agents.openhands_transport import SDK_TRANSPORT_LOG, safe_event
+        path = self.output / 'diagnostics/sdk-local-transport.json'
+        row = {'schema_version': 1, 'ownership': self.ownership, 'observed_at': now(),
+               'source': 'actual_sdk_local_log_before_cleanup', 'available': False, 'events': []}
+        try:
+            command = 'test -f ' + shlex.quote(SDK_TRANSPORT_LOG) + ' && head -c 8388608 ' + shlex.quote(SDK_TRANSPORT_LOG)
+            result = await env.exec(command, user=self.cfg['execution_context']['profile']['sandbox_user'],
+                timeout_sec=min(5, self.cfg['execution_context']['profile'].get('cleanup_seconds', 60)))
+            row['return_code'] = result.return_code
+            for line in (result.stdout or '').splitlines()[:8192]:
+                try: row['events'].append(safe_event(json.loads(line)))
+                except (ValueError, TypeError, AttributeError): row['invalid_lines'] = row.get('invalid_lines', 0) + 1
+            row['available'] = result.return_code == 0
+        except Exception as exc:
+            row['collection_error_type'] = type(exc).__name__
+        write_json(path, row)
+
+    def _snapshot_process_evidence(self, phase):
+        """Observe only epoch-owned containers before cleanup; never infer OOM from 137."""
+        target = self.output / ('diagnostics/process-' + phase + '.json')
+        if target.exists():
+            return
+        rows, errors, client = [], [], None
+        try:
+            client = docker.DockerClient(base_url=self.cfg['environment']['docker_host'], timeout=5)
+            containers = client.containers.list(all=True, filters={
+                'label': ['dycon.epoch=' + self.ownership['epoch']]})
+            for container in containers:
+                container.reload()
+                attrs = container.attrs
+                state, host = attrs.get('State', {}), attrs.get('HostConfig', {})
+                oom = state.get('OOMKilled')
+                rows.append({'container_id': container.id,
+                    'state': {k: state.get(k) for k in ('Status','Running','ExitCode','OOMKilled',
+                                                       'StartedAt','FinishedAt','Pid')},
+                    'memory_limit_bytes': host.get('Memory'),
+                    'memory_peak_bytes': None, 'cgroup_events': None,
+                    'unavailable_fields': ['memory_peak_bytes','cgroup_events'],
+                    'cause': 'container_oom_confirmed' if oom is True else 'unknown',
+                    'source': 'docker_inspect_before_container_cleanup'})
+        except Exception as exc:
+            errors.append({'error_type': type(exc).__name__, 'source': 'docker_inspect'})
+        finally:
+            if client is not None:
+                client.close()
+        write_json(target, {'schema_version': 1, 'ownership': self.ownership,
+            'observed_at': now(), 'phase': phase, 'containers': rows, 'errors': errors,
+            'available': bool(rows), 'cause': 'unknown' if not rows else None})
 
     def create_environment(self, *args, **kwargs):
         env = self.inner.create_environment(*args, **kwargs)
@@ -232,6 +318,8 @@ class OwnedPlanes:
             # the shared NAS image lease and removing another run's tag.
             # It still owns container/network teardown; only the existing
             # ImageLeaseManager owns image reclamation.
+            await self._collect_sdk_transport(env)
+            await asyncio.to_thread(self._snapshot_process_evidence, "before_cleanup")
             await original_stop(delete=False)
             write_json(self.output / "sandbox-cleanup.json", {"status": "stopped", "at": now(),
                 "ownership": self.ownership, "image_cleanup_owner": "ImageLeaseManager"})
@@ -405,6 +493,47 @@ class OwnedPlanes:
         await self._export_workspace()
 
 
+def _safe_acp_message(value):
+    import re
+    text = str(value or '')[:2048]
+    text = re.sub(r'https?://[^\s]+', '[url-redacted]', text)
+    text = re.sub(r'(?i)(bearer\s+|api[_-]?key[=: ]+|password[=: ]+|secret[=: ]+)\S+',
+                  '[credential-redacted]', text)
+    text = re.sub(r'\bsk-[A-Za-z0-9_-]+', '[credential-redacted]', text)
+    return text[:256]
+
+
+def _acp_details(data):
+    """Keep typed cause fields and bounded structure, never raw data messages/prompts."""
+    import re
+    text = json.dumps(data, ensure_ascii=False, default=str)[:65536]
+    types = sorted(set(re.findall(r'\b(?:litellm\.(?:Timeout|APIError)|APITimeoutError|'
+                                 r'ConnectTimeout|ReadTimeout|WriteTimeout|PoolTimeout|LLMTimeoutError)\b', text)))
+    allowed = {'code','status','status_code','http_status','error_type','exception_type',
+               'type','phase','timeout','timeout_seconds','num_retries','cause','details','error','data',
+               'request_id','correlation_id'}
+    def keep(value, depth=0):
+        if depth > 4:
+            return '[depth-limited]'
+        if isinstance(value, dict):
+            return {str(k):keep(v,depth+1) for k,v in list(value.items())[:24] if k in allowed}
+        if isinstance(value, list):
+            return [keep(v,depth+1) for v in value[:8]]
+        if type(value) in (int,float,bool) or value is None:
+            return value
+        if isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_.:-]{1,96}',value) and not value.startswith('sk-'):
+            return value
+        return '[text-redacted]'
+    cause = 'sdk_api_timeout' if any(t in types for t in (
+        'litellm.Timeout','APITimeoutError','LLMTimeoutError','ConnectTimeout',
+        'ReadTimeout','WriteTimeout','PoolTimeout')) else 'unknown'
+    phases = {t.removesuffix('Timeout').lower() for t in types
+              if t in {'ConnectTimeout','ReadTimeout','WriteTimeout','PoolTimeout'}}
+    phase = next(iter(phases)) if len(phases) == 1 else 'unknown'
+    return {'data': keep(data), 'data_available': data is not None,
+            'exception_types': types, 'cause': cause, 'phase': phase}
+
+
 def _json_events(events):
     return [{"index": i, "event": e if isinstance(e, dict) else {"unparsed": repr(e)}}
             for i, e in enumerate(events or [])]
@@ -572,7 +701,7 @@ def preflight(root, run_id, *, audit_environments=True, workers=1):
     from catalog.skillsbench import verify_package, inspect_capabilities
     from core.backends import identity, capabilities
     from core.config import require_model
-    from core.model_identity import verify_model
+    from core.model_identity import model_identity_verification_enabled, verify_model
     import importlib.metadata
 
     loaded = load_plan(root, run_id)
@@ -595,8 +724,9 @@ def preflight(root, run_id, *, audit_environments=True, workers=1):
         versions = {}
         blockers.append("agent runtime dependency unavailable: " + str(exc))
     try:
-        require_model(cfg)
-        verify_model(cfg)
+        if model_identity_verification_enabled(cfg):
+            require_model(cfg)
+            verify_model(cfg)
     except Exception as exc:
         blockers.append("configured model identity unavailable: " + str(exc))
     try:
@@ -996,7 +1126,7 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
     cfg = copy.deepcopy(cfg)
     from application.execution.subject import journal, verify_subject
     from catalog.skillsbench import verify_package
-    from core.model_identity import verify_model
+    from core.model_identity import model_identity_verification_enabled, verify_model
     from hidden.backends.vllm.online import CaptureClient, capture_request_metadata
     from rollout.adapters.openhands import canonical_trajectory
     from rollout.adapters.openhands_bridge import OpenHandsBridge
@@ -1026,13 +1156,32 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
     image = factory.images[(task["instance_id"], "main")]
     # Resolve the leased NAS tag explicitly in the prebuilt compose overlay.
     cfg["skillsbench_service_images"] = {"main": image["tag"]}
-    verify_model(cfg)
+    if model_identity_verification_enabled(cfg):
+        verify_model(cfg)
     max_seconds = cfg["timeouts"].get("agent_seconds") or cfg["timeouts"]["container_lifetime_seconds"]
     deadline = Deadline(min(max_seconds, cfg["timeouts"]["container_lifetime_seconds"]))
     cfg["skillsbench_daemon_capabilities"] = {"cpu_quota_supported": factory.cpu_quota_supported}
     binding = {**context, "benchmark": "skillsbench", "agent": "openhands",
                "session_id": "oh-" + uuid.uuid4().hex,
                "profile_sha256": cfg["execution_context"]["profile_sha256"]}
+    import importlib.metadata
+    import sys
+    from runtime.agents import openhands as driver_module, dependencies as dependency_module
+    from rollout.adapters import openhands_bridge as bridge_module
+    source_modules = [Path(__file__), Path(driver_module.__file__),
+                      Path(dependency_module.__file__), Path(bridge_module.__file__)]
+    dependency_ref = cfg['execution_context']['profile'].get('dependency_snapshot')
+    dependency_path = Path(dependency_ref) if dependency_ref else None
+    write_json(output / 'implementation-identity.json', {
+        'schema_version': 1, 'binding': binding, 'observed_at': now(),
+        'python': sys.executable, 'benchflow_version': importlib.metadata.version('benchflow'),
+        'source_files': {str(path): sha256(path) for path in source_modules},
+        'dependency_snapshot': str(dependency_path) if dependency_path else None,
+        'dependency_manifest_sha256': sha256(dependency_path / 'manifest.json') if dependency_path else None,
+        'execution_attempt_id': runtime.get('execution_attempt_id', os.environ.get('DYCON_EXECUTION_ATTEMPT')),
+        'execution_binding': cfg.get('execution_binding'),
+        'sdk_effective_timeout': None, 'sdk_request_phase': 'unknown',
+        'timeout_evidence_policy': 'configured_driver_budget_is_not_actual_sdk_request_evidence'})
     capture, capture_client, capture_session, capture_status = None, None, None, "disabled"
     started = now()
     try:
@@ -1082,6 +1231,37 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
                     cfg["execution_context"]["profile"]["cleanup_seconds"])
 
         result_row = _result_json(result)
+        # This diagnostic is separate from immutable result/terminal receipts.
+        # Public exit status deliberately retains the frozen retry semantics.
+        cause = {"schema_version": 1, "binding": binding,
+                 "category": result_row.get("error_category"),
+                 "public_status_policy": "unchanged_v1", "cause": "unknown"}
+        observed = output / "diagnostics/acp-error.json"
+        if observed.exists():
+            cause.update(read_json(observed))
+        else:
+            import re
+            for event in _json_events(result.trajectory):
+                text = json.dumps(event, ensure_ascii=False)
+                if "litellm.Timeout" in text or "APITimeoutError" in text:
+                    cause.update(cause="sdk_api_timeout", exception_type="APITimeoutError",
+                                 source="actual_acp_trajectory", phase="unknown")
+                    break
+        sdk_files = sorted((output / "diagnostics").glob("sdk-transport-sdk-*.json"))
+        local_sdk = output / "diagnostics/sdk-local-transport.json"
+        if local_sdk.exists(): sdk_files.append(local_sdk)
+        cause["sdk_transport_receipts"] = [{"path": str(p.relative_to(output)), "sha256": sha256(p)}
+                                           for p in sdk_files]
+        for path in sdk_files:
+            sdk_row = read_json(path)
+            for event in sdk_row.get("events", []):
+                if event.get("event") == "sdk_call_failed":
+                    types = event.get("exception_types", [])
+                    if any(t.rsplit(".", 1)[-1] in {"Timeout", "APITimeoutError", "ReadTimeout", "ConnectTimeout", "WriteTimeout", "PoolTimeout", "LLMTimeoutError"} for t in types):
+                        cause.update(cause="sdk_api_timeout", phase=event.get("phase", "unknown"),
+                                     sdk_request_id=event.get("sdk_request_id", sdk_row.get("sdk_request_id")),
+                                     source="actual_sdk_http_transport", exception_types=types)
+        write_json(output / "benchflow-diagnostics.json", cause)
         write_json(output/'requests/receipt.json',{'schema_version':1,'binding':binding,
             'files':{p.name:sha256(p) for p in sorted((output/'requests').glob('req-*.json'))},
             'scope':'authenticated original/effective requests and all generated candidate usage'})

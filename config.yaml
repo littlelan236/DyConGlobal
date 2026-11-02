@@ -18,6 +18,7 @@ model:
   fingerprint: f97643c15ea3cb04517379dd13482b48548458c3a3f6c3a7eb93dcaa6adf86a2
   served_name: Qwen3.5-9B
   trust_remote_code: false
+  verify_identity: false
 serving:
   base_url: http://127.0.0.1:18222/v1
   api_key_env: DYCON_API_KEY

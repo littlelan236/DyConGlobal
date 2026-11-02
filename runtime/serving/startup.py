@@ -5,12 +5,27 @@ from pathlib import Path
 import numpy as np
 import requests
 
-from rollout.model import make_model
 from core.io import read_json, sha256, write_json
 from hidden.artifacts import event_records, read_arrays, read_request
 from hidden.backends.vllm.online import capture_request_metadata
+from rollout.model import make_model
 from runtime.containers.factory import TaskContext
 from runtime.containers.rollout_adapter import RolloutEnvironment
+
+
+def _is_webarena_startup_scroll(actions):
+    """Require one prescribed action using the same grammar as real rollout."""
+    if not isinstance(actions, list) or len(actions) != 1 or not isinstance(actions[0], dict):
+        return False
+    command = actions[0].get("command")
+    if not isinstance(command, str):
+        return False
+    from runtime.containers.webarena_adapter import parse_command
+
+    try:
+        return parse_command(command.strip()) == parse_command("browser scroll [down]")
+    except (TypeError, ValueError):
+        return False
 
 
 def check_tool_chain(cfg, run_id, task, factory, runtime):
@@ -70,17 +85,8 @@ def check_tool_chain(cfg, run_id, task, factory, runtime):
         message = make_model(cfg, factory.deadline, metadata, runtime).query(messages)
         messages.append(message)
         actions = message["extra"]["actions"]
-        if webarena:
-            valid_scroll = False
-            if len(actions) == 1:
-                try:
-                    from runtime.containers.webarena_adapter import parse_command
-                    kind, payload = parse_command(actions[0].get("command", "").strip())
-                    valid_scroll = kind == "action" and payload == "scroll down"
-                except (TypeError, ValueError):
-                    valid_scroll = False
-            if not valid_scroll:
-                raise ValueError("WebArena startup requires exactly one prescribed browser scroll action")
+        if webarena and not _is_webarena_startup_scroll(actions):
+            raise ValueError("WebArena startup requires exactly one prescribed browser scroll action")
         from core.io import hash_json
 
         recorder = runtime.get("capture_controller") if message.get("extra", {}).get("dycon_parallel") else None

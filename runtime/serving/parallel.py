@@ -184,6 +184,37 @@ class ScoringBroker:
             group["active"].discard(branch)
             self.condition.notify_all()
 
+    def mark_native_terminal(self, metadata, request_id, output_ids, close_ids, finish_reason):
+        """Classify exact completed native output without racing hidden drain."""
+        decision, branch = metadata.get("decision_id"), metadata.get("branch_id")
+        if finish_reason is None or not close_ids:
+            return
+        terminal = {"native_request_id": request_id, "finish_reason": finish_reason,
+                    "output_token_count": len(output_ids),
+                    "output_token_ids_sha256": hash_json(list(output_ids)),
+                    "close_token_ids": sorted(close_ids),
+                    "explicit_close_generated": any(token in close_ids for token in output_ids)}
+        with self.condition:
+            group = self.groups.get(decision)
+            if (self.closed or self.run_cancelled or decision in self.cancelled
+                    or group is None or group["expires"] <= time.monotonic()
+                    or branch not in group["branches"]):
+                return
+            previous = group.setdefault("native_terminals", {}).get(branch)
+            if previous is not None and previous != terminal:
+                raise ValueError("Conflicting branch native terminal")
+            group["native_terminals"][branch] = terminal
+            # Existing scores and loop/cancel causes win. Explicit close may
+            # still be in asynchronous capture drain or predictor publication.
+            if not terminal["explicit_close_generated"] and branch not in group["results"]:
+                identity = {key: metadata[key] for key in (
+                    "session_id", "decision_id", "branch_id", "api_attempt_id",
+                    "step_id", "request_sha256") if key in metadata}
+                group["results"][branch] = {**identity, "native_request_id": request_id,
+                    "status": "failed", "reason": "missing_think_close",
+                    "native_terminal": terminal}
+            self.condition.notify_all()
+
     def acquire_branch(self, decision_id, branch_id):
         """Wait for one branch slot without reserving the other branch slots."""
         with self.condition:

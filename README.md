@@ -11,6 +11,7 @@ Coding-agent rollout、官方 SWE-bench harness、在线 hidden capture、离线
 | [最小运行清单](docs/MINIMUM-RUN-CN.md) | 每个功能模块的最少操作、统一 run 入口、产物与恢复 |
 | [SWE-bench + OpenHands](docs/SWEBENCH-OPENHANDS-CN.md) | 基础 SWE-bench OpenHands profile、patch、capture 与并行适配 |
 | [任务入口与接口约定](docs/ENTRYPOINTS.md) | 全部 CLI、输入格式、环境、token/site/label 契约及能力边界 |
+| [Consensus Steering Dataset 与 LDA / t-SNE / UMAP](docs/STEERING-DATASET-LDA-CN.md) | 全候选 hidden 数据集、外盘缓存、单轴 LDA、二维嵌入、冻结重绘与校验 |
 | [多 GPU、每卡 TP=1](docs/MULTI-GPU-TP1-CN.md) | 单 run 按空闲卡分配完整轨迹、每卡 CPU worker 上限、状态与克隆配置 |
 | [WebArena Verified 接入评估](docs/WEBARENA-VERIFIED-COMPATIBILITY-ASSESSMENT-CN.md) | Verified 任务、mini agent、NAS 容器与离线 harness 的实现边界与依据 |
 | [WebArena Verified 运行指南](docs/WEBARENA-VERIFIED-OPERATIONS-CN.md) | 固定版本安装、Full/Hard/Smoke 导入、浏览器环境验收及离线评分 |

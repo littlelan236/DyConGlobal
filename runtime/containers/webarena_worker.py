@@ -102,6 +102,10 @@ class BrowserSession:
             raise ValueError("Unsupported login method")
         if not login.get("verify_selector"):
             raise ValueError("Authenticated sites require an explicit browser login verification selector")
+        state = login.get("verify_state") or ("attached" if method == "header" else "visible")
+        if state not in {"attached", "visible"}:
+            raise ValueError("Unsupported browser login verification state")
+        verified = False
         page = context.new_page()
         try:
             page.goto(spec["base_url"].rstrip("/") + login.get("path", "/"),
@@ -118,12 +122,33 @@ class BrowserSession:
                     else:
                         raise ValueError("Unsupported login UI step")
             # Header-based auth can render the authenticated user link inside
-            # a collapsed menu. DOM attachment proves the account is present;
-            # UI login still requires a visible post-login control.
-            state = "attached" if method == "header" else "visible"
+            # a collapsed menu. UI sites may explicitly use attachment when
+            # the authenticated identity is intentionally hidden until the
+            # menu is opened; otherwise UI login remains visibility-checked.
             page.locator(login["verify_selector"]).first.wait_for(state=state)
+            verified = True
         finally:
-            page.close()
+            try:
+                self._record_login_verification(page, spec, state, verified)
+            finally:
+                page.close()
+
+    def _record_login_verification(self, page, spec, state, verified):
+        """Keep safe DOM facts, never credentials, cookies, queries or HTML."""
+        if not hasattr(self, "output"):
+            return
+        row = {"site": urlsplit(spec["base_url"]).hostname,
+               "method": spec["login"]["method"], "verify_state": state,
+               "verify_selector": spec["login"]["verify_selector"], "verified": verified}
+        try:
+            url = urlsplit(page.url)
+            row.update(page_origin=[url.scheme, url.hostname, url.port], page_path=url.path)
+            locator = page.locator(spec["login"]["verify_selector"])
+            row.update(match_count=locator.count(), first_visible=locator.first.is_visible())
+        except Exception as exc:
+            row["diagnostic_error_type"] = type(exc).__name__
+        with (self.output / "login-verification.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def _observation(self, observation, info):
         tabs = [{"index": i, "url": page.url, "active": page == self.env.page}

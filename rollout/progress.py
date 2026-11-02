@@ -26,6 +26,10 @@ class Progress:
         with self.lock:
             key = context['sample_key']
             previous = self.samples.get(key, {})
+            if (context.get('attempt_id') is not None
+                    and previous.get('attempt_id') == context['attempt_id']
+                    and previous.get('exit_status') == 'Running'):
+                return
             self.samples[key] = {
                 **previous, **context, 'exit_status': 'Running', 'disposition': 'pending',
                 'last_status': previous.get('exit_status'),
@@ -115,3 +119,14 @@ def generation_phase(runtime):
             yield
     else:
         yield
+
+
+def attempt_phase(runtime, value):
+    """Publish backend lifecycle phases without failing a physical attempt."""
+    tracker = (runtime or {}).get('progress_tracker')
+    key = (runtime or {}).get('sample_key')
+    if tracker is not None and key is not None:
+        try:
+            tracker.phase(key, value)
+        except Exception as exc:
+            runtime.setdefault('progress_errors', []).append(repr(exc))

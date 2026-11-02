@@ -1,0 +1,11 @@
+schema_version: 1
+enabled: true
+mode: parallel_enthophy
+fallback_policy: stop
+consensus:
+  representative_policy: estimator_score
+  min_retained_branches: 2
+  retention_ratio: 0.5
+entropy:
+  retention_rule: effective_count_plus_n_v1
+  n: 6

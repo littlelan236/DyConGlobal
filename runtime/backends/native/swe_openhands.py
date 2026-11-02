@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+
+from rollout.progress import attempt_phase
 
 from core.cancellation import Cancelled
 from core.io import now, read_json, sha256, write_json
@@ -47,7 +50,10 @@ class NativeSWEOpenHandsAdapter(BackendAdapter):
                    "backend_family": "native_swe_openhands",
                    "profile_sha256": cfg["execution_context"]["profile_sha256"]}
         started = now()
-        write_json(output / "attempt-started.json", {"attempt_id": binding["attempt_id"], "started_at": started})
+        write_json(output / "attempt-started.json", {
+            "attempt_id": binding["attempt_id"], "started_at": started,
+            "retry_kind": attempt.runtime.get("retry_kind", "initial"),
+            "execution_attempt_id": os.environ.get("DYCON_EXECUTION_ATTEMPT")})
         capture_client = capture = None
         capture_status = "disabled"
         try:
@@ -75,6 +81,7 @@ class NativeSWEOpenHandsAdapter(BackendAdapter):
             with OpenHandsBridge(cfg, binding, cfg["execution_context"]["profile"], output,
                                  deadline, attempt.runtime, capture) as bridge:
                 response = executor(cfg, context, task, attempt, context.factory, capture, bridge)
+                attempt_phase(attempt.runtime, "finalizing")
                 response.setdefault("records", bridge.records)
             from rollout.adapters.openhands import canonical_trajectory
             records = response.get("records", [])
@@ -116,6 +123,7 @@ class NativeSWEOpenHandsAdapter(BackendAdapter):
         except Cancelled:
             raise
         except Exception as exc:
+            attempt_phase(attempt.runtime, "finalizing")
             if capture_client and capture:
                 try:
                     capture_client.stop(capture["session_id"])

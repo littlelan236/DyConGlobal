@@ -1,5 +1,9 @@
 # DyConGlobal 最小运行清单
 
+Consensus 分支离线数据集使用 analysis 环境的 dycon steering-dataset build/check/cache；LDA/t-SNE/UMAP 使用 dycon steering-visualize（--method lda|tsne|umap）。
+构建须显式冻结 source run 和 rollout 选择，只消费已发布 capture，不启动 GPU。操作见
+[Steering Dataset 与 LDA 指南](STEERING-DATASET-LDA-CN.md)。
+
 需要同一 run 在多张卡上各用 TP=1 运行不同轨迹时，配置 `serving.trajectory_sharding: per_gpu_tp1`、每卡端口与 `serving.max_cpu_workers_per_gpu`，见 [多 GPU TP1](MULTI-GPU-TP1-CN.md)。每卡空闲槽位立即领取下一项任务。
 
 ## 多个 run 横向比较
@@ -51,6 +55,8 @@ cd /home/wangtianyi/DyConGlobal
 SkillsBench/OpenHands 首次使用流程与支持范围见 [SkillsBench + OpenHands 最小操作](SKILLSBENCH-OPENHANDS-CN.md)。
 
 共用 generation、agent step/token limit、各种 timeout 配在根 `config.yaml`。创建 run 时冻结有效配置和 tasks。`runtime-check` 另要求 wheelhouse，不能用它代替 task 镜像/启动 gate。初次注册外部模型用 `model-register CHECKPOINT`。
+
+模型身份核验由 `model.verify_identity` 控制，默认值为 `true`。该开关同时控制 rollout 启动前、SkillsBench preflight 以及每个 SkillsBench attempt 的 checkpoint 清单核验；关闭时仍保留模型配置解析和后续 serving/agent 运行流程。
 
 ## 2. 任务、轨迹与历史结果输入
 
@@ -615,3 +621,13 @@ official evaluation are separate capabilities and are not declared ready here.
 `harbor preflight` 只验证环境、ACP 初始化、工具、网络策略、镜像身份和 cleanup，不代表真实 agent baseline 通过。真实 baseline、capture、parallel、官方评分和取消/恢复必须分别登记。一次 `reasoning_loop`、模型超时或 verifier infra error 不能被改写为 benchmark 失败或成功。
 
 现有 SkillsBench、SWE 和 WebArena run 继续使用各自冻结 snapshot；重构不会为旧 run 添加字段或重算 hash。需要比较或恢复时，先读取 run snapshot 再选择 adapter，不能使用当前根 config 漂移后的 benchmark/agent 组合。
+
+
+## 已有 run 的模型身份校验开关修订（2026-11-01）
+
+仅修改根 config.yaml 不改变已有 run 的冻结配置。先 run cancel 并确认 cancellation.termination.cleanup_complete=true，再通过统一入口修改开关并恢复：
+
+    .venvs/runner/bin/dycon run revise-model-verification RUN_ID --revision-id skip-model-identity --verify-identity false --reason 'User explicitly requested disabling checkpoint identity checks'
+    .venvs/runner/bin/dycon run resume RUN_ID --detach
+
+入口只修改 model.verify_identity，复用现有离线锁、清理校验、before/after、配置/plan 哈希链和 receipt，保留 task/repetition 与已接纳进度。恢复校验使用新 revision ID 和 --verify-identity true。关闭后不再重新核验 checkpoint 文件清单，模型路径、既有 fingerprint 及其他运行设置保持原值。

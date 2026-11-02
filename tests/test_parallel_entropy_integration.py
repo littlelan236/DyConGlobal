@@ -200,3 +200,17 @@ def test_entropy_preserves_mini_format_correction_instead_of_relabeling_it(tmp_p
         validate_consensus_evidence(summary)
     finally:
         harness.controller.close()
+
+
+@pytest.mark.parametrize("adapter", ["mini", "openhands"])
+def test_plus_n_custom_offset_flows_through_coordinator_and_audit(tmp_path, adapter):
+    harness = Integration(tmp_path, "effective_count_plus_n_v1", "estimator_score", adapter)
+    harness.cfg["parallel"]["entropy"]["n"] = 6
+    try:
+        summary = harness.run()["extra"]["dycon_parallel"]
+        assert summary["consensus_config"]["n"] == 6
+        assert summary["consensus"]["entropy"]["base_keep_count"] == 2
+        assert summary["consensus"]["retained_count"] == 4
+        validate_selection(summary, 42, harness.cfg["parallel"])
+    finally:
+        harness.controller.close()

@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from core.io import hash_json, now, owned_path, read_json, sha256, write_json
+from core.io import artifact_reference, hash_json, now, owned_path, read_json, sha256, write_json
 
 REVISION = "6473f72db5dcefc97b5725b59e734504edc28a21"
 REPOSITORY = "https://github.com/ServiceNow/webarena-verified.git"
@@ -284,7 +284,7 @@ def evaluate(cfg, task, subject_path, output_dir):
         os.chmod(result_path, 0o600)
         official = read_json(result_path)
         return {**classify_result(official), "official_status": official["status"],
-                "official_result_path": str(result_path.relative_to(root)),
+                "official_result_path": artifact_reference(root, result_path),
                 "official_result_sha256": sha256(result_path), "evaluator_runtime": runtime_ref,
                 "dataset_sha256": dataset_ref["sha256"],
                 "evaluator_checksum": official.get("webarena_verified_evaluator_checksum")}

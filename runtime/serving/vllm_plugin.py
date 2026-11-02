@@ -678,6 +678,11 @@ class DyConCapturePlugin:
                     },
                     metadata,
                 )
+                if (self.scoring is not None and hasattr(self.scoring, "mark_native_terminal")
+                        and metadata.get("decision_id") and final.finished):
+                    self.scoring.mark_native_terminal(
+                        native_state["binding"], native_id, generated, self.close_ids,
+                        final.outputs[0].finish_reason)
                 if self.scoring is not None and hasattr(self.scoring, "release_branch") and metadata.get("decision_id"):
                     self.scoring.release_branch(metadata, native_id, "native_output")
                     branch_released = True

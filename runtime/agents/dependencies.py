@@ -42,6 +42,37 @@ def verify_snapshot(directory):
     return manifest
 
 
+
+def adapt_sdk_transport(wheels):
+    import base64, csv, hashlib, io
+    wheel = next(Path(wheels).glob('openhands_sdk-1.22.1-*.whl'))
+    before_hash = sha256(wheel)
+    with zipfile.ZipFile(wheel) as archive:
+        contents = {name: archive.read(name) for name in archive.namelist()}
+    member = 'openhands/sdk/llm/llm.py'
+    text = contents[member].decode()
+    seam = '                ret = litellm_completion('
+    if text.count(seam) != 1: raise ValueError('Pinned SDK completion transport seam changed')
+    contents[member] = text.replace(seam,
+        '                from openhands.sdk.llm.utils.dycon_transport import completion\n'
+        '                ret = completion(litellm_completion, self,').encode()
+    contents['openhands/sdk/llm/utils/dycon_transport.py'] = Path(__file__).with_name('openhands_transport.py').read_bytes()
+    record_name = next(n for n in contents if n.endswith('.dist-info/RECORD'))
+    record = io.StringIO(); writer = csv.writer(record, lineterminator='\n')
+    for name, data in sorted(contents.items()):
+        if name == record_name: writer.writerow([name, '', ''])
+        else:
+            digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip('=')
+            writer.writerow([name, 'sha256=' + digest, str(len(data))])
+    contents[record_name] = record.getvalue().encode()
+    with zipfile.ZipFile(wheel, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, data in contents.items(): archive.writestr(name, data)
+    return {'path': 'wheels/' + wheel.name + ':' + member,
+        'before_sha256': before_hash, 'after_sha256': sha256(wheel),
+        'policy': 'dycon_sdk_transport_and_native_retry_zero_v1',
+        'reason': 'Propagate explicit zero retries into OpenAI; observe actual HTTP timeout and phase without changing the model budget'}
+
+
 def build_snapshot(cfg, snapshot_id, wheelhouse, cli_archive, uv, python_runtime=None):
     """Build pinned CLI source, resolve wheels, and atomically publish a closure."""
     root = Path(cfg['project_root'])
@@ -183,6 +214,7 @@ def build_snapshot(cfg, snapshot_id, wheelhouse, cli_archive, uv, python_runtime
         'before_sha256': before_tools_hash, 'after_sha256': sha256(tool_wheel),
         'policy': 'preserve_explicit_terminal_backend_on_reset_v1',
         'reason': 'Keep the native subprocess backend on reset; wheel RECORD rebuilt and hash-bound'})
+    adaptations.append(adapt_sdk_transport(wheels))
     env = dict(os.environ, UV_FIND_LINKS=str(wheels), UV_NO_INDEX='1', UV_PYTHON_DOWNLOADS='never',
                UV_PYTHON=str(root / '.venvs/skillsbench/bin/python'))
 

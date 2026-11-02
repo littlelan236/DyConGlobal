@@ -23,6 +23,11 @@ class ParallelSelectionError(RuntimeError):
     pass
 
 
+class MissingScoringAnchorError(ParallelSelectionError):
+    """Completed native candidates lack the required scoring anchor."""
+    retryable = False
+
+
 RANDOM_SELECTION_MODE = "uniform_random_non_loop_v1"
 
 
@@ -312,6 +317,7 @@ class DecisionCoordinator:
                     representative_policy=consensus_config.get("representative_policy"),
                     retention_rule=consensus_config.get("retention_rule"),
                     full_retention_threshold=consensus_config.get("full_retention_threshold", 10),
+                    n=consensus_config.get("n", 0),
                     token_lengths={r["branch_id"]: r.get("completion_tokens") for r in records},
                 )
                 if winner is None:
@@ -330,7 +336,12 @@ class DecisionCoordinator:
                     candidates, records, baseline, ParallelSelectionError)
             else:
                 winner = None
-                selection_error = ParallelSelectionError("No eligible scored parallel candidate")
+                if all(scores.get(candidate.branch_id, {}).get("reason") == "missing_think_close"
+                       for candidate in formatted):
+                    selection_error = MissingScoringAnchorError(
+                        "Native output completed without the required think_close scoring anchor")
+                else:
+                    selection_error = ParallelSelectionError("No eligible scored parallel candidate")
             evidence = {"schema_version": 1, "session_id": capture["session_id"],
                         "decision_deadline_unix": decision_deadline,
                         "decision_id": decision, "step_id": capture["step_id"],
@@ -367,7 +378,8 @@ class DecisionCoordinator:
                             [], {}, consensus_config["retention_ratio"], consensus_config["min_retained_branches"],
                             consensus_config["tie_policy"], representative_policy=consensus_config.get("representative_policy"),
                             retention_rule=consensus_config["retention_rule"],
-                            full_retention_threshold=consensus_config.get("full_retention_threshold", 10))
+                            full_retention_threshold=consensus_config.get("full_retention_threshold", 10),
+                            n=consensus_config.get("n", 0))
                 metadata_by_branch = {
                     item["branch_id"]: item
                     for item in consensus_meta.get("branch_metadata", [])

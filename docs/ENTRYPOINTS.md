@@ -1,5 +1,13 @@
 # 任务入口与接口约定
 
+## 离线 Steering Dataset 与 LDA / t-SNE / UMAP
+
+正式入口为 steering-dataset build/check/cache、steering-visualize，以及
+artifact verify ID --scope steering-dataset|steering-analysis --storage-root ROOT。
+构建须显式指定 source runs 和 rollout IDs、binding JSON 或 --all-submitted；后者冻结当前符合条件的全部 submitted 轨迹，不按 resolved 筛选。
+三类产物支持独立 storage/dataset/cache roots。LDA/t-SNE/UMAP 均要求显式 native site ID；LDA 只有 LD1，t-SNE/UMAP 导出二维完整坐标；--redraw-from 不重拟合。
+完整命令、分组 JSON、来源与内存边界见 [Steering 指南](STEERING-DATASET-LDA-CN.md)。
+
 多卡 TP=1 的轨迹调度配置、每卡 CPU worker 上限及证据位置见 [多 GPU TP1](MULTI-GPU-TP1-CN.md)。仍使用 `run create/start/status/cancel/resume`；新模式按空闲卡补发完整轨迹。
 
 ## 多 GPU TP1 的配置与调度
@@ -178,6 +186,9 @@ cd /home/wangtianyi/DyConGlobal
 | Capture 控制修订 | `run revise-capture-control RUN_ID --revision-id REVISION_ID --control-seconds SECONDS --receipt-workers N --reason TEXT` | 审计修订 capture 控制预算和 receipt 并发，保留前后快照与 hash 绑定 |
 
 | 状态 | `run status RUN_ID`、`harness status RUN_ID`、`capture status RUN_ID` | 只读投影和各阶段证据；rollout complete 不等于 harness resolved 或 capture complete |
+
+rollout 的 `run status` 与每个 `run active-status` 条目都在 `sample_summary` 中提供样本数、accepted 数、pending 数、retry-pending 数和按 `exit_status` 分组的故障数。`latest_attempt` 子项按 `execution/latest.json` 指向的执行 attempt 及样本 `serving_assignment` 汇总。故障数包括 disposition 为 `failed`、`blocked`、`retry_pending` 的样本及非成功、非运行中的故障状态；因此若最终 disposition 为 accepted、但 exit status 仍记录故障，故障计数可能与 accepted 数重叠。pending 与 retry-pending 分开列出。`run status` 将此汇总放在 JSON 开头。
+
 | 合并 run 产物 | `run merge SOURCE_RUN DESTINATION_RUN` | 仅允许已结束的 rollout run；同一 task×repetition 中，source 的非 pending 覆盖 destination 的 pending，source accepted 覆盖 destination failed，双方 accepted 保留 destination；产物、证据和 progress 一并写入 destination，并生成 merge receipt |
 
 | 协调检查 | `run reconcile RUN_ID` | 当前主要校验 plan/config/tasks 一致性，不能替代所有环境/依赖/GPU 验收 |

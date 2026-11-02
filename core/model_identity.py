@@ -5,6 +5,11 @@ from pathlib import Path
 from core.io import hash_json, read_json, sha256, write_json
 
 
+def model_identity_verification_enabled(cfg):
+    """Return whether rollout startup/attempts should verify model identity."""
+    return cfg.get("model", {}).get("verify_identity", True)
+
+
 def describe(path):
     path = Path(path).resolve()
     if not (path / "config.json").is_file():

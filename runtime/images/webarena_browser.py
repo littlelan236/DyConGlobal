@@ -28,6 +28,14 @@ BROWSER_SOURCE = "dce04686a56253aefba7b18a4fa0937cf1dc987b"
 BASE_IMAGE = "docker.io/library/python:3.10-slim-bookworm"
 
 
+def _worker_update_compatible(previous, build_inputs):
+    """Reuse dependencies only when every frozen dependency input still matches."""
+    return (previous.get("selftest", {}).get("passed") is True
+            and bool(previous.get("worker_sha256"))
+            and all(previous.get(key) == value for key, value in build_inputs.items()
+                    if key != "worker_sha256"))
+
+
 def _prepare_base(cfg):
     """Resolve and transfer the base through the shared NAS registry transport."""
     from runtime.images.nas import NasImageStore
@@ -222,21 +230,41 @@ def prepare_browser(cfg):
             "requirements_sha256": sha256(context / "browser-requirements.txt"),
             "dockerfile_sha256": sha256(context / "Dockerfile")}
         image = None
+        previous_store = None
+        previous = {}
+        derivation = {}
         previous_receipt = directory / "receipt.json"
         if previous_receipt.exists():
             from runtime.images.nas import NasImageStore
-            previous = NasImageStore(cfg, read_json(previous_receipt)["reference"]).record["provenance"]
+            previous_store = NasImageStore(cfg, read_json(previous_receipt)["reference"])
+            previous = previous_store.record["provenance"]
             if all(previous.get(key) == value for key, value in build_inputs.items()):
                 try:
                     image = client.images.get(previous["build_image_id"])
                 except docker.errors.ImageNotFound:
                     pass
         if image is None:
+            dockerfile = "Dockerfile"
+            if previous_store is not None and _worker_update_compatible(previous, build_inputs):
+                assets.enter_context(ImageLeaseManager(cfg, client).lease(previous_store))
+                parent = client.images.get(previous_store.image_id)
+                parent_tag = "dycon/webarena-browser-worker-base:" + parent.id.split(":", 1)[1][:12]
+                parent.tag(parent_tag.split(":", 1)[0], tag=parent_tag.split(":", 1)[1])
+                dockerfile = "Dockerfile.worker-update"
+                (context / dockerfile).write_text("ARG BROWSER_IMAGE\nFROM $" + "{BROWSER_IMAGE}\n"
+                    "COPY worker.py /opt/webarena/worker.py\n"
+                    "COPY browser-selftest.py /opt/webarena/browser-selftest.py\n", encoding="utf-8")
+                build_args = {"BROWSER_IMAGE": parent_tag}
+                forwarding = contextlib.nullcontext()
+                derivation = {"worker_update_parent": read_json(previous_receipt)["reference"],
+                              "worker_update_parent_image_id": parent.id,
+                              "worker_update_dockerfile_sha256": sha256(context / dockerfile)}
+                print("Updating worker on provenance-matched immutable browser dependencies", flush=True)
             print("Building isolated browser image", flush=True)
             tag = "dycon/webarena-browser:" + BROWSER_SOURCE[:12]
             with forwarding, (directory / "build.log").open("w", encoding="utf-8") as log:
                 for row in client.api.build(path=str(context), rm=True, forcerm=True,
-                        tag=tag, buildargs=build_args, decode=True,
+                        tag=tag, dockerfile=dockerfile, buildargs=build_args, decode=True,
                         platform=cfg["environment"]["platform"]):
                     log.write(json.dumps(row) + "\n")
                     log.flush()
@@ -247,7 +275,7 @@ def prepare_browser(cfg):
             image = client.images.get(tag)
         else:
             print("Reusing provenance-matched local browser image " + image.id, flush=True)
-        provenance = {**build_inputs, "build_image_id": image.id}
+        provenance = {**build_inputs, **derivation, "build_image_id": image.id}
         smoke = client.containers.create(image.id, entrypoint=["python", "/opt/webarena/browser-selftest.py"],
             network_disabled=True, shm_size="2g", cap_drop=["ALL"], security_opt=["no-new-privileges"],
             labels={"dycon.project": str(root), "dycon.backend": "webarena_verified",

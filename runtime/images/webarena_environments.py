@@ -11,9 +11,9 @@ DEFAULTS = {
     "shopping": {"port": 80, "health_path": "/customer/account/login", "base_url": "http://shopping",
         "login": {"method": "header", "headers": {"X-M2-Customer-Auto-Login": "emma.lopez@gmail.com:Password.123"},
                   "path": "/customer/account/", "verify_selector": "a[href*='customer/account/logout']"}},
-    "shopping_admin": {"port": 80, "health_path": "/", "base_url": "http://shopping-admin",
+    "shopping_admin": {"port": 80, "health_path": "/admin", "base_url": "http://shopping-admin/admin",
         "login": {"method": "header", "headers": {"X-M2-Admin-Auto-Login": "admin:admin1234"},
-                  "path": "/admin", "verify_selector": ".admin-user-account-text"}},
+                  "path": "/", "verify_selector": ".admin-user-account-text"}},
     "reddit": {"port": 80, "health_path": "/login", "base_url": "http://reddit",
         "login": {"method": "header", "headers": {"X-Postmill-Auto-Login": "MarvelsGrantMan136:test1234"},
                   "path": "/", "verify_selector": "a[href*='/user/MarvelsGrantMan136']"}},
@@ -22,7 +22,7 @@ DEFAULTS = {
             "steps": [{"action": "fill", "selector": "[data-testid='username-field']", "value": "byteblaze"},
                       {"action": "fill", "selector": "[data-testid='password-field']", "value": "hello1234"},
                       {"action": "click", "selector": "[data-testid='sign-in-button']"}],
-            "verify_selector": ".header-user-dropdown-toggle"}},
+            "verify_selector": "a[href='/byteblaze']", "verify_state": "attached"}},
 }
 
 

@@ -57,6 +57,19 @@ def qualify_profile(root, run_id, profile_id, profile_ref=None):
         template['dependency_snapshot_sha256'] = sha256(Path(template['dependency_snapshot']) / 'manifest.json')
         excluded = {'request_roles', 'qualification', 'use_host_proxy', 'condenser_max_tokens'}
         source = validate_profile(cfg['execution_context']['profile'])
+        if (template.get('dependency_snapshot_sha256') == source.get('dependency_snapshot_sha256')
+                and template.get('dependency_snapshot') != source.get('dependency_snapshot')):
+            from runtime.agents.dependencies import verify_snapshot
+            old = verify_snapshot(source['dependency_snapshot'])
+            new = verify_snapshot(template['dependency_snapshot'])
+            if old['receipt_sha256'] != new['receipt_sha256']:
+                raise ValueError('Dependency relocation changed the publication receipt')
+            excluded.add('dependency_snapshot')
+            proof['dependency_relocation'] = {
+                'source': source['dependency_snapshot'], 'target': template['dependency_snapshot'],
+                'manifest_sha256': template['dependency_snapshot_sha256'],
+                'publication_receipt_sha256': new['receipt_sha256'],
+                'verification': 'both_complete_publications_verified_same_manifest'}
         if template.get('dependency_snapshot_sha256')!=source.get('dependency_snapshot_sha256'):
             from runtime.agents.dependencies import verify_snapshot
             old=verify_snapshot(source['dependency_snapshot']);new=verify_snapshot(template['dependency_snapshot'])

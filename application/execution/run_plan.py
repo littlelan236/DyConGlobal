@@ -109,7 +109,8 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
                    'generation.max_tokens', 'generation.thinking_token_budget',
                    'generation.require_reasoning_close',
                    'webarena.environment_pool_ref', 'webarena.browser_image_ref',
-                   'parallel.estimator_ref', 'paths.artifact_roots'}
+                   'parallel.estimator_ref', 'parallel.max_inflight_branches',
+                   'paths.artifact_roots', 'model.verify_identity'}
         cfg = copy.deepcopy(source['config'])
         frozen_selection = copy.deepcopy(cfg.pop('selection'))
         cfg.pop('selection_sha256', None)
@@ -348,12 +349,10 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
 
 
 def _git_identity(root):
-
+    import shutil
     import subprocess
 
-
-
-    git = "/home/wangtianyi/.local/bin/git"
+    git = shutil.which("git") or "git"
 
     try:
 
@@ -361,7 +360,13 @@ def _git_identity(root):
 
         dirty = subprocess.check_output([git, "-C", str(root), "status", "--porcelain"], text=True)
 
-        return {"head": head, "dirty": bool(dirty), "dirty_sha256": hash_json(dirty)}
+        return {"head": head, "dirty": bool(dirty), "dirty_sha256": hash_json(dirty),
+                "source_files_sha256": {relative: sha256(Path(root) / relative) for relative in (
+                    "rollout/adapters/openhands.py", "rollout/adapters/openhands_bridge.py",
+                    "rollout/decision/coordinator.py", "runtime/serving/parallel.py",
+                    "runtime/serving/vllm_plugin.py", "runtime/agents/model_socket.py",
+                    "runtime/backends/native/swe_openhands_worker.py")
+                    if (Path(root) / relative).is_file()}}
 
     except (OSError, subprocess.CalledProcessError) as exc:
 

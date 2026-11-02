@@ -247,3 +247,47 @@ def test_action_analysis_keeps_raw_decision_entropy_and_handles_mixed_csv_column
     summary = summarize([legacy, row], [{**record, "parallel_steps": 1}], "both")
     assert "min_step_tokens" in summary["by_representative_policy"]
     assert "shannon_exp_keep_v1" in summary["by_retention_rule"]
+
+
+@pytest.mark.parametrize("counts,minimum,n,expected", [
+    ([32], 2, 6, 8), ([16, 16], 2, 6, 8), ([8] * 4, 2, 6, 10),
+    ([2] * 16, 2, 6, 22), ([1] * 32, 2, 6, 32), ([32], 4, 6, 10),
+    ([3, 2], 2, 6, 5), ([], 2, 6, 0), ([1], 2, 6, 0),
+    ([32], 2, 0, 2), ([24, 8], 2, 1, 3),
+])
+def test_plus_n_adds_after_original_floor_and_rounding(counts, minimum, n, expected):
+    base = entropy_retention(counts, minimum, "effective_count_v1")
+    result = entropy_retention(counts, minimum, "effective_count_plus_n_v1", n=n)
+    assert result["base_keep_count"] == base["keep_count"]
+    assert result["raw_keep"] == base["raw_keep"]
+    assert result["entropy"] == base["entropy"]
+    assert result["status"] == base["status"]
+    assert result["n"] == n
+    assert result["keep_count"] == expected
+
+
+@pytest.mark.parametrize("n", [-1, 1.5, True, None, "6", float("inf"), float("nan")])
+def test_plus_n_rejects_invalid_offsets(n):
+    with pytest.raises(ValueError, match="n must"):
+        entropy_retention([32], rule="effective_count_plus_n_v1", n=n)
+
+
+def test_plus_n_selection_and_compact_audit_replay_the_frozen_offset():
+    candidates = [Candidate(i, "A" if i < 8 else "B") for i in range(10)]
+    opts = consensus_options({"mode": "parallel_enthophy", "entropy": {
+        "retention_rule": "effective_count_plus_n_v1", "n": 6}})
+    winner, meta = select_consensus(candidates, {i: float(i) for i in range(10)},
+        **{k: v for k, v in opts.items() if k != "rule"})
+    assert meta["retained_branch_ids"] == list(range(8))
+    by_id = {row["branch_id"]: row for row in meta["branch_metadata"]}
+    decision = {"selection_mode": "parallel_enthophy", "consensus_config": opts,
+                "consensus": meta, "selected_branch_id": winner.branch_id,
+                "candidates": [{**by_id[c.branch_id], "status": "eligible", "response": c.raw}
+                               for c in candidates]}
+    validate_consensus_evidence(decision, opts)
+    for row in decision["candidates"]:
+        row.pop("response")
+    validate_consensus_evidence(decision, opts)
+    decision["consensus"]["entropy"]["n"] = 5
+    with pytest.raises(ValueError, match="evidence differs"):
+        validate_consensus_evidence(decision, opts)

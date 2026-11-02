@@ -90,8 +90,8 @@ def test_stop_drains_already_bound_output_without_reopening(tmp_path):
         controller.close()
 
 
-@pytest.mark.parametrize('error,expected', [('length', 'limit'), ('undeclared', 'protocol')])
-def test_bridge_returns_nonretryable_structured_error_and_preserves_cost(cfg, tmp_path, monkeypatch, error, expected):
+@pytest.mark.parametrize('error,expected', [('length', 'limit'), ('undeclared', 'FormatError')])
+def test_bridge_returns_typed_error_and_preserves_cost(cfg, tmp_path, monkeypatch, error, expected):
     from rollout.adapters import openhands_bridge
     cfg['serving']['management'] = 'external'
     cfg['capture']['enabled'] = False
@@ -106,7 +106,7 @@ def test_bridge_returns_nonretryable_structured_error_and_preserves_cost(cfg, tm
     def post(url, **kwargs):
         if url.endswith('/chat/completions') and not url.startswith(bridge.base_url):
             calls.append(url)
-            return SimpleNamespace(ok=True, json=lambda: copy.deepcopy(raw))
+            return SimpleNamespace(ok=True, status_code=200, json=lambda: copy.deepcopy(raw))
         return actual_post(url, **kwargs)
     profile = {'bridge_listen': '127.0.0.1', 'bridge_advertise': '127.0.0.1', 'request_roles': 'unqualified'}
     bridge = OpenHandsBridge(cfg, {'attempt_id': 'a'}, profile, tmp_path, Deadline(10))
@@ -118,9 +118,10 @@ def test_bridge_returns_nonretryable_structured_error_and_preserves_cost(cfg, tm
             headers={'Authorization': 'Bearer ' + bridge.secret}, timeout=3)
         assert response.status_code == 400
         assert response.json()['error']['type'] == expected
+        assert response.json()['error']['retryable'] is (error == 'undeclared')
     assert len(calls) == 1
     terminal = read_json(next((tmp_path / 'terminal-receipts').glob('*.json')))
-    assert terminal['reason'] == expected
+    assert terminal['reason'] == ('protocol' if error == 'undeclared' else 'limit')
     assert terminal['model_call_receipts'][0]['usage']['completion_tokens'] == 23
 
 

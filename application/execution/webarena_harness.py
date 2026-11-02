@@ -48,6 +48,10 @@ def prepare(root, run_id, rollout_ids=(), source_run=None, incremental=False):
     allowed_tasks = {task["task_key"] for task in loaded["tasks"]["tasks"]}
     rows = {rid: row for rid, row in selected["rollouts"].items()
             if not incremental or row.get("evaluation_status") not in {"completed", "running"}}
+    if not rollout_ids:
+        # A mixed run may contain failed/unsubmitted canonical attempts. Keep
+        # them in the run report denominator, but never send them to evaluator.
+        rows = {rid: row for rid, row in rows.items() if row.get("submission_status") == "submitted"}
     if not rows:
         raise ValueError("WebArena harness selection has no eligible submitted trajectories")
     if any(row["task_key"] not in allowed_tasks for row in rows.values()):

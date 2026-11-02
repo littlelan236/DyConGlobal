@@ -28,7 +28,11 @@ class RolloutEnvironment:
             pull_timeout=cfg["timeouts"]["container_start_seconds"],
         )
         self.container = factory.create(instance, context, socket_path=socket_path)
-        self.container.start()
+        try:
+            self.container.start()
+        except BaseException:
+            self.factory.close(self.container)
+            raise
 
     def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None):
         # Keep mini-swe-agent's native submission-marker detection.

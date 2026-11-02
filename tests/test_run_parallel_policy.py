@@ -313,3 +313,56 @@ def test_swe_backend_still_rejects_other_benchmark_families(parallel_cfg):
 
     with pytest.raises(ValueError, match="another benchmark family"):
         execution_context(parallel_cfg, {"web-task": {"benchmark": "webarena_verified"}})
+
+
+def test_plus_n_policy_freezes_inherits_switches_and_preserves_source(parallel_cfg):
+    entropy = {"retention_rule": "effective_count_plus_n_v1", "n": 6}
+    source = create_run(parallel_cfg, "plus-source", operation="rollout", task_ids=["policy-task"],
+                        parallel_config=policy_file(parallel_cfg, entropy=entropy))
+    before = sha256(source / "resolved-config.json")
+    inherited = create_run(parallel_cfg, "plus-inherited", operation="rollout", from_run=source.name)
+    assert load_plan(parallel_cfg["project_root"], inherited.name)["config"]["parallel"]["entropy"] == entropy
+    switched = create_run(parallel_cfg, "plus-switched", operation="rollout", from_run=source.name,
+        parallel_config=policy_file(parallel_cfg, "no-offset", rule="effective_count_v1"))
+    assert load_plan(parallel_cfg["project_root"], switched.name)["config"]["parallel"]["entropy"] == {
+        "retention_rule": "effective_count_v1"}
+    threshold = create_run(parallel_cfg, "plus-threshold", operation="rollout", from_run=source.name,
+        parallel_config=policy_file(parallel_cfg, "threshold", entropy={
+            "retention_rule": "effective_count_full_above_v1", "full_retention_threshold": 10}))
+    back = create_run(parallel_cfg, "threshold-plus", operation="rollout", from_run=threshold.name,
+        parallel_config=policy_file(parallel_cfg, "offset", entropy=entropy))
+    assert load_plan(parallel_cfg["project_root"], back.name)["config"]["parallel"]["entropy"] == entropy
+    assert sha256(source / "resolved-config.json") == before
+
+
+@pytest.mark.parametrize("entropy", [
+    {"retention_rule": "effective_count_plus_n_v1"},
+    *[{"retention_rule": "effective_count_plus_n_v1", "n": n} for n in [-1, True, 1.5, None, "6"]],
+    {"retention_rule": "effective_count_v1", "n": 6},
+])
+def test_plus_n_policy_requires_its_own_explicit_nonnegative_integer(parallel_cfg, entropy):
+    with pytest.raises(ValueError):
+        apply_run_parallel(parallel_cfg, policy_file(parallel_cfg, entropy=entropy))
+
+
+def test_cli_clone_can_reduce_dynamic_branch_capacity_with_max_sequences(parallel_cfg, capsys):
+    from core.cli import main
+
+    cfg = copy.deepcopy(parallel_cfg)
+    cfg["parallel"]["dynamic_branch_admission"] = True
+    cfg["config_hash"] = hash_json({k: v for k, v in cfg.items() if k != "config_hash"})
+    source = create_run(cfg, "dynamic-source", operation="rollout", task_ids=["policy-task"],
+                        parallel_config=policy_file(cfg, entropy={
+                            "retention_rule": "effective_count_plus_n_v1", "n": 6}))
+    source_sha = sha256(source / "resolved-config.json")
+    main(["--config", str(Path(cfg["project_root"]) / "config.yaml"),
+          "--set", "parallel.max_inflight_branches=3", "--set", "serving.max_num_seqs=3",
+          "run", "create", "dynamic-clone", "--operation", "rollout", "--from-run", source.name])
+    loaded = load_plan(cfg["project_root"], "dynamic-clone")["config"]
+    assert loaded["parallel"]["max_inflight_branches"] == loaded["serving"]["max_num_seqs"] == 3
+    assert loaded["parallel"]["branch_count"] == 4
+    assert loaded["parallel"]["entropy"]["n"] == 6
+    assert sha256(source / "resolved-config.json") == source_sha
+    with pytest.raises(ValueError, match="parallel capacity must not exceed"):
+        create_run(cfg, "invalid-capacity-clone", operation="rollout", from_run=source.name,
+                   clone_overrides=["parallel.max_inflight_branches=5", "serving.max_num_seqs=3"])

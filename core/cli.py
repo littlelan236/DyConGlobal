@@ -15,6 +15,8 @@ def main(argv=None):
     parser.add_argument("--set", action="append", default=[])
     parser.add_argument("--run-id", dest="analysis_run_id", help="Bind an analysis command to a frozen run")
     sub = parser.add_subparsers(dest="command", required=True)
+    from steering.cli import register as register_steering
+    register_steering(sub)
     harbor = sub.add_parser("harbor", help="Pinned Harbor task/runtime integration")
     hb_sub = harbor.add_subparsers(dest="harbor_command", required=True)
     hb = hb_sub.add_parser("runtime-prepare", help="Publish a pinned isolated worker and hashed dependency lock")
@@ -171,9 +173,17 @@ def main(argv=None):
     q.add_argument("--control-seconds", type=int, required=True)
     q.add_argument("--receipt-workers", type=int, required=True)
     q.add_argument("--reason", required=True)
-    q = run_sub.add_parser("revise-concurrency", help="Audit the bounded 64-concurrency runtime profile")
+    q = run_sub.add_parser("revise-concurrency", help="Audit offline runtime or per-GPU concurrency limits")
     q.add_argument("run_id")
     q.add_argument("--revision-id", required=True)
+    q.add_argument("--max-cpu-workers-per-gpu", type=int)
+    q.add_argument("--max-num-seqs", type=int)
+    q.add_argument("--max-inflight-branches", type=int)
+    q.add_argument("--reason", required=True)
+    q = run_sub.add_parser("revise-model-verification", help="Audit an offline model identity verification flag revision")
+    q.add_argument("run_id")
+    q.add_argument("--revision-id", required=True)
+    q.add_argument("--verify-identity", choices=["true", "false"], required=True)
     q.add_argument("--reason", required=True)
     q = run_sub.add_parser("revise-serving-placement", help="Audit an offline GPU device and serving endpoint move")
     q.add_argument("run_id")
@@ -201,6 +211,8 @@ def main(argv=None):
     q.add_argument("--exit-status", action="append", required=True)
     q.add_argument("--task-id", action="append", default=[])
     q.add_argument("--reason", required=True)
+    q.add_argument("--sample-key", action="append", default=[], help="Restrict retry to exact task/repetition sample keys")
+    q.add_argument("--expect-attempt", action="append", default=[], metavar="SAMPLE_KEY=ATTEMPT_ID", help="Reject changed terminal cursors before writing retry evidence")
     q = run_sub.add_parser("compare", help="Compare physical exits and common final submitted task/repetition pairs")
     q.add_argument("run_ids", nargs="+", metavar="RUN_ID")
     q.add_argument("--baseline", help="Reference run, which must occur in RUN_IDs")
@@ -262,11 +274,15 @@ def main(argv=None):
     artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
     q = artifact_sub.add_parser("show")
     q.add_argument("run_id", nargs="?")
-    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis"], default="run")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis"], default="run")
+    q.add_argument("--storage-root", type=Path)
+    q.add_argument("--with-tensors", action="store_true")
     q.add_argument("--dataset-id")
     q = artifact_sub.add_parser("verify")
     q.add_argument("run_id", nargs="?")
-    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis"], default="run")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis"], default="run")
+    q.add_argument("--storage-root", type=Path)
+    q.add_argument("--with-tensors", action="store_true")
     q.add_argument("--dataset-id")
     for cmd in ["config-check", "catalog-check", "runtime-check", "recover"]:
         sub.add_parser(cmd)
@@ -514,6 +530,19 @@ def main(argv=None):
     p.add_argument("--hidden-size", type=int)
     p.add_argument("--endpoint", default="submission")
     a = parser.parse_args(argv)
+    if (a.command in {"steering-dataset", "steering-visualize"} or
+            (a.command == "artifact" and a.scope.startswith("steering-"))):
+        if a.set or a.analysis_run_id:
+            parser.error("Offline steering reads explicit frozen sources; do not pass --set or --run-id")
+        from steering.cli import execute as execute_steering
+        try:
+            result = execute_steering(a)
+        except (ValueError, OSError, KeyError) as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if result.get("status") == "unavailable":
+            raise SystemExit(2)
+        return
     if a.command == "difficulty-plot-parallel":
         if a.list and (a.plot_id or a.attempt_id or a.step_start != 0 or a.step_end is not None):
             parser.error("--list takes only RUN_ID; omit PLOT_ID, attempt and step range")
@@ -932,7 +961,14 @@ def main(argv=None):
         elif a.run_command == "revise-concurrency":
             from application.execution.capture_budget_revision import revise_concurrency
             result = revise_concurrency(cfg["project_root"], a.run_id,
-                revision_id=a.revision_id, reason=a.reason)
+                revision_id=a.revision_id, reason=a.reason,
+                max_cpu_workers_per_gpu=a.max_cpu_workers_per_gpu,
+                max_num_seqs=a.max_num_seqs,
+                max_inflight_branches=a.max_inflight_branches)
+        elif a.run_command == "revise-model-verification":
+            from application.execution.capture_budget_revision import revise_model_verification
+            result = revise_model_verification(cfg["project_root"], a.run_id,
+                revision_id=a.revision_id, verify_identity=a.verify_identity == "true", reason=a.reason)
         elif a.run_command == "revise-serving-placement":
             from application.execution.capture_budget_revision import revise_serving_placement
             result = revise_serving_placement(cfg["project_root"], a.run_id, revision_id=a.revision_id,
@@ -952,7 +988,8 @@ def main(argv=None):
         elif a.run_command == "retry-failed":
             from application.execution.failed_retry import request_failed_retry
             result = request_failed_retry(cfg["project_root"], a.run_id, request_id=a.request_id,
-                exit_statuses=a.exit_status, task_ids=a.task_id, reason=a.reason)
+                exit_statuses=a.exit_status, task_ids=a.task_id, sample_keys=a.sample_key,
+                expected_attempts=dict(v.split('=',1) for v in a.expect_attempt), reason=a.reason)
         elif a.run_command == "show":
             result = show_run(cfg["project_root"], a.run_id)
         elif a.run_command == "status":

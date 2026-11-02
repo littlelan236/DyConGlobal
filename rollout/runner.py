@@ -193,6 +193,14 @@ def _execute_attempt(cfg, run_id, task, factory, runtime, sample, context, out):
     from runtime.backends.registry import adapter_for
     adapter = adapter_for(cfg, {"attempt": task})
     run_context = adapter.open_run(cfg, run_id, factory=factory)
+    runtime = {**runtime, 'sample_key': sample.sample_key}
+    tracker = runtime.get('progress_tracker')
+    if tracker is not None:
+        try:
+            tracker.started(context, runtime.get('retry_kind', 'initial'))
+        except Exception as exc:
+            runtime.setdefault('progress_errors', []).append(repr(exc))
+    _phase(runtime, sample, 'bootstrap')
     return adapter.execute_attempt(run_context, AttemptBinding(task, sample, context, out, runtime))
 
 
@@ -223,12 +231,6 @@ def _execute_mini_attempt(cfg, run_id, task, factory, runtime, sample, context, 
     publish_once(out / 'attempt-started.json', {'attempt_id': attempt_id, 'started_at': state['started_at'], 'retry_kind': runtime.get('retry_kind', 'initial'),
                   'execution_attempt_id': os.environ.get('DYCON_EXECUTION_ATTEMPT')})
     write_json(out / 'execution-state.json', state)
-    tracker = runtime.get('progress_tracker')
-    if tracker:
-        try:
-            tracker.started(context, runtime.get('retry_kind', 'initial'))
-        except Exception as exc:
-            runtime.setdefault('progress_errors', []).append(repr(exc))
     _phase(runtime, sample, 'bootstrap')
     stage_start = time.monotonic()
 
@@ -589,7 +591,7 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
 @exclusive_run
 @cancellable_run
 def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_only=False):
-    from core.model_identity import verify_model
+    from core.model_identity import model_identity_verification_enabled, verify_model
     from runtime.backends.registry import adapter_for
     from runtime.serving.manager import ServingManager
 
@@ -660,7 +662,8 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
             except Exception as exc:
                 write_json(run / 'capture-recovery-error.json', {'error': repr(exc)})
 
-    verify_model(cfg)
+    if model_identity_verification_enabled(cfg):
+        verify_model(cfg)
     run = root / "runs" / run_id
     write_json(run / "process.json", {"pid": os.getpid(), "supervisor_pid": os.getppid()})
     backend_context = adapter.open_run(cfg, run_id, factory=factory)

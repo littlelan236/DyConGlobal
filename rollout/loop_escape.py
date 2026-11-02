@@ -136,7 +136,8 @@ def selection_failure(records, meta, mode, fallback_policy, consensus_config):
             consensus_config.get("min_retained_branches", 2),
             consensus_config.get("tie_policy", "estimator_score"),
             retention_rule=consensus_config.get("retention_rule"),
-            full_retention_threshold=consensus_config.get("full_retention_threshold", 10))
+            full_retention_threshold=consensus_config.get("full_retention_threshold", 10),
+            n=consensus_config.get("n", 0))
         if winner is None:
             return "selection_unavailable_after_filter"
     elif mode != "parallel_baseline" and not eligible and fallback_policy != "first_valid":

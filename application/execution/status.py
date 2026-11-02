@@ -10,6 +10,57 @@ from uuid import uuid4
 from .run_plan import load_plan, list_runs, run_path
 
 
+_FAILURE_DISPOSITIONS = {"failed", "blocked", "retry_pending"}
+_NON_FAILURE_EXIT_STATUSES = {
+    "Submitted", "AgentCompleted", "Resolved", "Complete", "completed",
+    "Running", "pending", "queued", "unknown",
+}
+
+
+def _sample_summary(samples, latest_attempt_id):
+    rows = list(samples.values()) if isinstance(samples, dict) else []
+
+    def summarize(selected, attempt_id=None, include_attempt_id=False):
+        dispositions = [str(sample.get("disposition", "unknown")) for sample in selected]
+        failures = {}
+        for sample, disposition in zip(selected, dispositions):
+            exit_status = str(sample.get("exit_status") or "unknown")
+            if disposition in _FAILURE_DISPOSITIONS or exit_status not in _NON_FAILURE_EXIT_STATUSES:
+                failures[exit_status] = failures.get(exit_status, 0) + 1
+        summary = {
+            "execution_attempt_id": attempt_id,
+            "sample_count": len(selected),
+            "accepted_count": dispositions.count("accepted"),
+            "pending_count": dispositions.count("pending"),
+            "retry_pending_count": dispositions.count("retry_pending"),
+            "failure_counts": dict(sorted(failures.items())),
+        }
+        if not include_attempt_id:
+            summary.pop("execution_attempt_id")
+        return summary
+
+    latest_rows = []
+    if latest_attempt_id is not None:
+        latest_rows = [
+            sample for sample in rows
+            if isinstance(sample.get("serving_assignment"), dict)
+            and str(sample["serving_assignment"].get("execution_attempt_id"))
+            == str(latest_attempt_id)
+        ]
+    return {
+        **summarize(rows),
+        "latest_attempt": summarize(latest_rows, latest_attempt_id, include_attempt_id=True),
+    }
+
+
+def _latest_execution_attempt(run):
+    path = run / "execution" / "latest.json"
+    if not path.exists():
+        return None
+    latest = read_json(path)
+    return latest.get("attempt") if isinstance(latest, dict) else None
+
+
 def run_status(root, run_id):
     loaded = load_plan(root, run_id)
     run = loaded["run"]
@@ -42,7 +93,15 @@ def run_status(root, run_id):
     workers = run / "serving/worker-pool.json"
     if workers.exists():
         result["serving_workers"] = read_json(workers)
-    return result
+    result["sample_summary"] = _sample_summary(
+        (result.get("progress") or {}).get("samples") or {},
+        _latest_execution_attempt(run),
+    )
+    return {
+        "run_id": result["run_id"],
+        "sample_summary": result["sample_summary"],
+        **{key: value for key, value in result.items() if key not in {"run_id", "sample_summary"}},
+    }
 
 
 def cancel_run(root, run_id, reason):
@@ -104,6 +163,7 @@ def active_run_statuses(root):
         progress_path = run / "progress.json"
         progress = read_json(progress_path) if progress_path.exists() else {}
         samples = progress.get("samples") or {}
+        sample_summary = _sample_summary(samples, _latest_execution_attempt(run))
         exit_counts = Counter(str(x.get("exit_status", "unknown")) for x in samples.values())
         disposition_counts = Counter(str(x.get("disposition", "unknown")) for x in samples.values())
         task_count = len(loaded["tasks"]["tasks"])
@@ -124,6 +184,7 @@ def active_run_statuses(root):
         }
         active.append({"run_id": run_id, "operation": loaded["plan"].get("operation"), "task_count": task_count,
                        "status": status, "progress_updated_at": progress.get("updated_at"), "sample_count": len(samples),
+                       "sample_summary": sample_summary,
                        "completed_count": completed, "pending_count": max(task_count-completed, 0),
                        "exit_status_counts": dict(sorted(exit_counts.items())),
                        "disposition_counts": dict(sorted(disposition_counts.items())), "anomalies": anomaly})

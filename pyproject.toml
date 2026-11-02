@@ -11,7 +11,7 @@ dependencies = ["PyYAML==6.0.3", "pydantic>=2,<3", "requests>=2,<3", "numpy>=2,<
 
 [project.optional-dependencies]
 runner = ["docker>=7,<8", "mini-swe-agent==2.4.5", "swebench==4.1.0"]
-analysis = ["tensorboard==2.20.0", "torch>=2.7", "transformers>=5,<6", "accelerate>=1", "matplotlib>=3.9", "safetensors>=0.5"]
+analysis = ["tensorboard==2.20.0", "torch>=2.7", "transformers>=5,<6", "accelerate>=1", "matplotlib>=3.9", "safetensors>=0.5", "scikit-learn==1.7.2", "umap-learn==0.5.9.post2"]
 action = ["tree-sitter==0.26.0", "tree-sitter-bash==0.25.1"]
 test = ["pytest>=8", "ruff>=0.11"]
 
@@ -26,7 +26,7 @@ dycon_capture = "runtime.serving.cache_boundary:install"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "application*", "catalog*", "rollout*", "benchmark_evaluation*", "diagnostics*", "enrichment*", "hidden*", "difficulty*", "action*", "runtime*"]
+include = ["core*", "application*", "catalog*", "rollout*", "benchmark_evaluation*", "diagnostics*", "enrichment*", "hidden*", "difficulty*", "action*", "steering*", "runtime*"]
 exclude = ["tests*", "vendor*"]
 namespaces = false
 
