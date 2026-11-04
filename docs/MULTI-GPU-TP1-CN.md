@@ -80,3 +80,6 @@ serving:
 ```
 
 四个新增选项须一起显式传入，TP 自动设为 1。上例总 CPU 轨迹并发仍为 4；省略四项时保持原设备/端口迁移语义。复用原修订锁、退出/清理验证、before/after、配置与 plan 哈希链和 receipt；任务选择、work-items、evidence 及已接纳结果不变。显式 KV 字节预算会使显存比例无效，因此拒绝这类转换，须先另行审计资源政策。运行中或清理未完成时拒绝修订。共享 GPU 上的各服务仍需自行安排互异端口及可容纳的显存比例。
+
+
+SkillsBench ??????????????? timing receipt ? [SkillsBench ????](SKILLSBENCH-STARTUP-CN.md)?

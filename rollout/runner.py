@@ -662,8 +662,15 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
             except Exception as exc:
                 write_json(run / 'capture-recovery-error.json', {'error': repr(exc)})
 
-    if model_identity_verification_enabled(cfg):
-        verify_model(cfg)
+    from core.preflight import long_checks_enabled, timed_check
+    model_checks = {}
+    try:
+        if model_identity_verification_enabled(cfg):
+            deep = long_checks_enabled(cfg)
+            with timed_check(model_checks, "model_sha", enabled=deep):
+                verify_model(cfg) if deep else verify_model(cfg, deep=False)
+    finally:
+        write_json(run / "validation/startup-model-identity.json", model_checks)
     run = root / "runs" / run_id
     write_json(run / "process.json", {"pid": os.getpid(), "supervisor_pid": os.getppid()})
     backend_context = adapter.open_run(cfg, run_id, factory=factory)

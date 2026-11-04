@@ -55,11 +55,21 @@ def inspect_capabilities(task):
             "sandbox": sandbox, "re_evaluation": False, "action_analysis": False}
 
 
-def verify_package(task):
+def verify_package(task, *, deep=True):
     payload = task["instance"]
     validate_payload(payload, task["instance_id"], task["revision"])
-    if package_manifest(payload["task_path"]) != payload["files"]:
-        raise ValueError("Pinned SkillsBench task package changed")
+    path = Path(payload["task_path"])
+    if not path.is_absolute() or path.is_symlink() or not path.is_dir():
+        raise ValueError("Invalid SkillsBench task package path")
+    if deep:
+        if package_manifest(path) != payload["files"]:
+            raise ValueError("Pinned SkillsBench task package changed")
+    else:
+        for row in payload["files"]:
+            member = path / row["path"]
+            if (not member.resolve().is_relative_to(path.resolve()) or member.is_symlink()
+                    or not member.is_file() or member.stat().st_mode & 0o777 != row["mode"]):
+                raise ValueError("Pinned SkillsBench package path changed: " + row["path"])
     return inspect_capabilities(task)
 
 

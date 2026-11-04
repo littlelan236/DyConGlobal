@@ -66,8 +66,8 @@ class NasImageStore:
         }
         return descriptor_graph(self.root / "blobs/sha256", root, deep=deep)
 
-    def write_archive(self, stream):
-        descriptors = self.verify(deep=True)
+    def write_archive(self, stream, *, deep=True):
+        descriptors = self.verify(deep=deep)
         manifest = read_json(self.blob(self.image_id))
         descriptor = {
             "mediaType": manifest["mediaType"],
@@ -206,7 +206,7 @@ class ImageLeaseManager:
         except docker.errors.ImageNotFound:
             return False
 
-    def _load(self, store):
+    def _load(self, store, *, deep=True):
         log = self.state / (store.image_id[7:] + ".load.log")
         started = time.perf_counter()
         with log.open("wb") as out:
@@ -225,7 +225,7 @@ class ImageLeaseManager:
             timer.daemon = True
             timer.start()
             try:
-                store.write_archive(proc.stdin)
+                store.write_archive(proc.stdin) if deep else store.write_archive(proc.stdin, deep=False)
                 proc.stdin.close()
                 code = proc.wait()
                 write_json(
@@ -255,7 +255,7 @@ class ImageLeaseManager:
             raise RuntimeError(f"docker load failed; see {log}")
 
     @contextmanager
-    def lease(self, store):
+    def lease(self, store, *, deep=True):
         image_id = store.image_id
         name = image_id.replace(":", "-")
         try:
@@ -280,7 +280,7 @@ class ImageLeaseManager:
                                 state = self._read()
                                 state["images"][image_id] = {"owned": True}
                                 self._save(state)
-                            self._load(store)
+                            self._load(store) if deep else self._load(store, deep=False)
                     # Pre-existing images are intentionally not enrolled as owned.
                 yield image_id
         finally:

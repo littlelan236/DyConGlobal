@@ -48,11 +48,25 @@ def services(monkeypatch, fail=None):
 
 
 def test_sharding_validation_and_legacy_identity(cfg):
-    original = resolve(cfg['config_source'])
+    import yaml
+    from pathlib import Path
+    source = Path(cfg['config_source'])
+    raw = yaml.safe_load(source.read_text())
+    for field in ('trajectory_sharding', 'replica_base_urls', 'max_cpu_workers_per_gpu', 'startup_mode'):
+        raw['serving'].pop(field, None)
+    source.write_text(yaml.safe_dump(raw))
+    original = resolve(source)
     assert 'trajectory_sharding' not in original['serving']
     assert 'replica_base_urls' not in original['serving']
     assert 'max_cpu_workers_per_gpu' not in original['serving']
     Serving.model_validate(sharded(cfg)['serving'])
+    mig = sharded(cfg)
+    mig['serving']['gpus'] = ['MIG-' + 'a' * 36, 'MIG-' + 'b' * 36]
+    mig['serving']['replica_base_urls'] = ['http://127.0.0.1:18200/v1', 'http://127.0.0.1:18201/v1']
+    Serving.model_validate(mig['serving'])
+    with pytest.raises(ValueError, match='exactly one'):
+        from runtime.serving.resources import normalize_devices
+        normalize_devices(mig['serving']['gpus'])
     for changes in [
         {'tensor_parallel_size': 2}, {'management': 'external'},
         {'max_cpu_workers_per_gpu': 0}, {'replica_base_urls': []},

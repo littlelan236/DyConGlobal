@@ -32,7 +32,7 @@ def describe(path):
     return {"fingerprint": hash_json(inventory), "files": inventory}
 
 
-def verify_model(cfg):
+def verify_model(cfg, *, deep=True):
     from core.config import require_model
 
     require_model(cfg)
@@ -48,9 +48,18 @@ def verify_model(cfg):
         or hash_json(identity["files"]) != identity["fingerprint"]
     ):
         raise ValueError("Checkpoint identity mismatch")
+    import re
+    if not identity["files"] or "config.json" not in identity["files"]:
+        raise ValueError("Checkpoint identity inventory is incomplete")
     for name, record in identity["files"].items():
+        if (Path(name).name != name or name in {".", ".."}
+                or not isinstance(record.get("bytes"), int) or record["bytes"] < 0
+                or not re.fullmatch(r"[0-9a-f]{64}", record.get("sha256", ""))):
+            raise ValueError("Invalid checkpoint identity record")
         p = checkpoint / name
-        if not p.is_file() or p.stat().st_size != record["bytes"] or sha256(p) != record["sha256"]:
+        if (not p.resolve().is_relative_to(checkpoint.resolve())
+                or not p.is_file() or p.stat().st_size != record["bytes"]
+                or (deep and sha256(p) != record["sha256"])):
             raise ValueError(f"Checkpoint changed: {name}")
     return identity
 

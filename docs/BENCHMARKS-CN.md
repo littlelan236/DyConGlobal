@@ -31,3 +31,6 @@ Harbor 集成通过 backend registry 绑定 benchmark、agent、runtime、subjec
 ## Evidence and limits
 
 任务 catalog、run rollout、patch 和 evaluation 是不同身份。Harness 报告绑定选定 patch；仅 `resolved=true` 表示该次选定评测成功。环境 gold、单任务 smoke、单元测试和完整 benchmark 运行分别回答不同问题，报告时不可互相替代。
+
+
+SkillsBench ??????????????? timing receipt ? [SkillsBench ????](SKILLSBENCH-STARTUP-CN.md)?

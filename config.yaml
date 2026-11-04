@@ -20,6 +20,7 @@ model:
   trust_remote_code: false
   verify_identity: false
 serving:
+  startup_mode: serial  # serial | parallel
   base_url: http://127.0.0.1:18222/v1
   api_key_env: DYCON_API_KEY
   management: managed
@@ -397,6 +398,8 @@ images:
   admission_seconds: 1800
   cleanup: true
 execution:
+  preflight:
+    long_checks: true  # SkillsBench shared startup only; frozen per run
   cancellation:
     control_request_seconds: 3.0
     cooperative_grace_seconds: 120.0

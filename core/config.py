@@ -61,12 +61,13 @@ class Serving(Strict):
     trajectory_sharding: Literal["none", "per_gpu_tp1"] = "none"
     replica_base_urls: list[str] = Field(default_factory=list)
     max_cpu_workers_per_gpu: int = Field(default=1, gt=0)
+    startup_mode: Literal["serial", "parallel"] = "serial"
     allow_mig_sharing: bool = False
     @model_validator(mode="after")
     def validate_devices(self):
         from runtime.serving.resources import normalize_devices
 
-        devices = normalize_devices(self.gpus)
+        devices = normalize_devices(self.gpus, allow_multiple_mig=self.trajectory_sharding == "per_gpu_tp1")
         if self.trajectory_sharding == "per_gpu_tp1":
             if self.tensor_parallel_size != 1:
                 raise ValueError("per_gpu_tp1 serving requires tensor_parallel_size=1")
@@ -202,7 +203,12 @@ class Cancellation(Strict):
     cleanup_seconds: float = Field(default=15.0, gt=0, le=300)
 
 
+class Preflight(Strict):
+    long_checks: bool = True
+
+
 class Execution(Strict):
+    preflight: Preflight = Field(default_factory=Preflight)
     cancellation: Cancellation = Field(default_factory=Cancellation)
     limits_retry: LimitsRetry = Field(default_factory=LimitsRetry)
     rollout_workers: int = Field(gt=0)
@@ -625,7 +631,7 @@ def resolve(path, overrides=()):
         target[keys[-1]] = yaml.safe_load(value)
     cfg = Config.model_validate(raw).model_dump()
     # New serving modes must not change hashes of existing YAML configurations.
-    for field in ("trajectory_sharding", "replica_base_urls", "max_cpu_workers_per_gpu"):
+    for field in ("trajectory_sharding", "replica_base_urls", "max_cpu_workers_per_gpu", "startup_mode"):
         if field not in raw["serving"]:
             cfg["serving"].pop(field, None)
     for section, fields in (("agent", ("backend", "profile_ref")),
@@ -645,6 +651,8 @@ def resolve(path, overrides=()):
     # Preserve legacy config hashes when the optional identity switch is absent.
     if "verify_identity" not in raw["model"]:
         cfg["model"].pop("verify_identity", None)
+    if "preflight" not in raw["execution"]:
+        cfg["execution"].pop("preflight", None)
     if "cancellation" not in raw["execution"]:
         cfg["execution"].pop("cancellation", None)
     if "limits_retry" not in raw["execution"]:

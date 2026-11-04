@@ -15,7 +15,7 @@ from core.locking import file_lock
 _MIG_UUID = re.compile(r"^MIG-[0-9a-fA-F-]{36}$")
 
 
-def normalize_devices(devices):
+def normalize_devices(devices, *, allow_multiple_mig=False):
     if not devices:
         raise ValueError("serving.gpus must contain at least one device")
     normalized = []
@@ -33,7 +33,7 @@ def normalize_devices(devices):
     kinds = {"mig" if item.startswith("MIG-") else "physical" for item in normalized}
     if len(kinds) != 1:
         raise ValueError("serving.gpus cannot mix physical GPUs and MIG UUIDs")
-    if kinds == {"mig"} and len(normalized) != 1:
+    if kinds == {"mig"} and len(normalized) != 1 and not allow_multiple_mig:
         raise ValueError("Managed MIG serving requires exactly one instance and TP=1")
     return tuple(normalized)
 
@@ -100,7 +100,7 @@ finally:
 
 
 def inspect_devices(serving_python, devices, *, probe=True):
-    normalized = normalize_devices(devices)
+    normalized = normalize_devices(devices, allow_multiple_mig=True)
     physical, mig = _available_devices()
     available = mig if normalized[0].startswith("MIG-") else physical
     missing = [item for item in normalized if item not in available]

@@ -12,7 +12,7 @@ from core.io import hash_json, identifier, now, read_json, sha256, write_json
 from runtime.agents.openhands import CLI_REVISION
 
 
-def verify_snapshot(directory):
+def verify_snapshot(directory, *, deep=True):
     directory = Path(directory).resolve()
     manifest = read_json(directory / 'manifest.json')
     if manifest.get('schema_version') != 1 or manifest.get('cli_revision') != CLI_REVISION:
@@ -33,7 +33,7 @@ def verify_snapshot(directory):
         path = directory / row['path']
         if (path.is_symlink() or not path.resolve().is_relative_to(directory)
                 or not path.is_file() or path.stat().st_size != row['size']
-                or sha256(path) != row['sha256']):
+                or (deep and sha256(path) != row['sha256'])):
             raise ValueError('Changed dependency file: ' + row['path'])
     actual = {p.relative_to(directory).as_posix() for p in directory.rglob('*') if p.is_file()}
     expected = {r['path'] for r in manifest['files']} | {'manifest.json'}

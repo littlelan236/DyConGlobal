@@ -105,7 +105,7 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
                    'serving.gpu_memory_utilization', 'serving.max_model_len',
                    'serving.max_num_seqs', 'serving.max_num_batched_tokens',
                    'serving.trajectory_sharding', 'serving.replica_base_urls',
-                   'serving.max_cpu_workers_per_gpu',
+                   'serving.max_cpu_workers_per_gpu', 'serving.startup_mode',
                    'generation.max_tokens', 'generation.thinking_token_budget',
                    'generation.require_reasoning_close',
                    'webarena.environment_pool_ref', 'webarena.browser_image_ref',

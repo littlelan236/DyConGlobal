@@ -14,19 +14,17 @@ from benchflow.environment.manifest import EnvironmentManifest
 from benchflow.rollout import Rollout, RolloutConfig
 from benchflow.usage_tracking import UsageTrackingConfig
 
-from core.deadline import Deadline
 from core.cancellation import Cancelled
+from core.deadline import Deadline
 from core.io import hash_json, now, read_json, run_path, sha256, write_json
 from rollout.retry import record_agent_outcome
+from runtime.agents.openhands import OPENHANDS_AGENT_ENVIRONMENT, resource_override
 from runtime.images.nas import ImageLeaseManager, NasImageStore
-from runtime.agents.openhands import resource_override
-
-from runtime.agents.openhands import OPENHANDS_AGENT_ENVIRONMENT
 
 SKILLSBENCH_AGENT_ENVIRONMENT = OPENHANDS_AGENT_ENVIRONMENT
 
 
-def image_reference(cfg, unit):
+def image_reference(cfg, unit, *, deep=True):
     options = cfg["skillsbench_images"]
     store = Path(cfg["paths"]["nas_root"]) / options["store"]
     path = store / "images" / (unit["key"] + ".json")
@@ -36,8 +34,12 @@ def image_reference(cfg, unit):
         raise ValueError("NAS image does not match its imported task package")
     ref = {"store": options["store"], "manifest": str(path.relative_to(store)),
            "manifest_sha256": sha256(path), "image_id": row["manifest_digest"]}
+    if unit.get("nas_reference") is not None and unit["nas_reference"] != ref:
+        raise ValueError("NAS image reference differs from the frozen task")
     image = NasImageStore(cfg, ref)
-    graph = image.verify(deep=True)
+    if unit.get("image_identity") is not None and unit["image_identity"] != image.identity():
+        raise ValueError("NAS image identity differs from the frozen task")
+    graph = image.verify(deep=deep)
     if not graph:
         raise ValueError("NAS image graph is empty")
     return ref, image
@@ -63,13 +65,13 @@ class SkillsBenchFactory:
         self.leases = ImageLeaseManager(cfg, self.client)
         self.stack, self.images, self.started = contextlib.ExitStack(), {}, False
 
-    def lock_images(self, tasks):
+    def lock_images(self, tasks, *, deep=True):
         if self.started:
             return
         profile = self.cfg.get("execution_context", {}).get("profile", {})
         if profile.get("use_host_proxy") and not self.cfg.get("skillsbench_network_proxy"):
             import socket
-            from urllib.parse import urlparse
+
             from runtime.images.skillsbench import build_proxy
             if profile.get("network") != "public":
                 raise ValueError("Host proxy requires the public-network profile")
@@ -87,8 +89,8 @@ class SkillsBenchFactory:
             package = task.get("instance", task)
             task_id = task["instance_id"]
             for unit in package["images"]:
-                ref, image = image_reference(self.cfg, unit)
-                self.stack.enter_context(self.leases.lease(image))
+                ref, image = image_reference(self.cfg, unit, deep=deep)
+                self.stack.enter_context(self.leases.lease(image) if deep else self.leases.lease(image, deep=False))
                 tag = unit["tag"]
                 self.client.api.tag(image.image_id, tag)
                 self.images[(task_id, unit["service"])] = {
@@ -158,6 +160,7 @@ class OwnedPlanes:
 
     async def _collect_sdk_transport(self, env):
         import shlex
+
         from runtime.agents.openhands_transport import SDK_TRANSPORT_LOG, safe_event
         path = self.output / 'diagnostics/sdk-local-transport.json'
         row = {'schema_version': 1, 'ownership': self.ownership, 'observed_at': now(),
@@ -585,7 +588,7 @@ def agent_rollout_config(cfg, task_source, image, planes, output, env, *, attemp
 
 
 def environment_contract(cfg, task):
-    from runtime.agents import dependencies, sandbox_probe, openhands
+    from runtime.agents import dependencies, openhands, sandbox_probe
     modules = [Path(__file__), Path(dependencies.__file__), Path(sandbox_probe.__file__), Path(openhands.__file__)]
     return {'schema_version': 1, 'policy': 'skillsbench-owned-environment-v1',
         'run_id': cfg['run_id'], 'configuration_sha256': cfg['config_hash'],
@@ -696,13 +699,14 @@ async def _audit_task_environment(cfg, run_id, key, task):
 
 
 def preflight(root, run_id, *, audit_environments=True, workers=1):
+    import importlib.metadata
+
     from application.execution.run_plan import load_plan
-    from runtime.agents.openhands import check_version, validate_profile
-    from catalog.skillsbench import verify_package, inspect_capabilities
-    from core.backends import identity, capabilities
+    from catalog.skillsbench import verify_package
+    from core.backends import capabilities, identity
     from core.config import require_model
     from core.model_identity import model_identity_verification_enabled, verify_model
-    import importlib.metadata
+    from runtime.agents.openhands import check_version, validate_profile
 
     loaded = load_plan(root, run_id)
     cfg, tasks = loaded["config"], loaded["config"]["selection"]["tasks"]
@@ -712,6 +716,14 @@ def preflight(root, run_id, *, audit_environments=True, workers=1):
         raise ValueError("Run does not freeze the SkillsBench/OpenHands profile")
     capabilities(cfg)
     profile = validate_profile(cfg["execution_context"]["profile"])
+    from core.preflight import SKIP_REASON, long_checks_enabled, timed_check
+    long_checks = long_checks_enabled(cfg)
+    checks = {name: {"status": "not_run", "seconds": 0.0, "calls": 0}
+              for name in ("model_sha", "task_package_sha", "oci_deep_verify",
+                           "dependency_snapshot_sha", "environment_audit")}
+    if not long_checks:
+        for row in checks.values():
+            row.update(status="skipped", reason=SKIP_REASON)
     blockers, limitations = [], []
     if cfg["execution_context"].get("validation_only"):
         blockers.append("Validation-only task snapshot cannot execute an agent rollout")
@@ -726,16 +738,29 @@ def preflight(root, run_id, *, audit_environments=True, workers=1):
     try:
         if model_identity_verification_enabled(cfg):
             require_model(cfg)
-            verify_model(cfg)
+            with timed_check(checks, "model_sha", enabled=long_checks):
+                verify_model(cfg) if long_checks else verify_model(cfg, deep=False)
+        else:
+            checks["model_sha"].update(status="skipped", reason="model.verify_identity=false")
     except Exception as exc:
         blockers.append("configured model identity unavailable: " + str(exc))
     try:
         if cfg["serving"]["management"] == "managed":
             from hidden.backends.vllm.engine import serving_interpreter
             from runtime.serving.resources import inspect_devices
-            serving_devices = inspect_devices(serving_interpreter(cfg), cfg["serving"]["gpus"], probe=True)
+            devices = cfg["serving"]["gpus"]
+            if cfg["serving"].get("trajectory_sharding") == "per_gpu_tp1":
+                serving_devices = {"device_kind": "mig" if str(devices[0]).startswith("MIG-") else "physical",
+                                   "workers": [inspect_devices(serving_interpreter(cfg), [device], probe=True)
+                                               for device in devices]}
+            else:
+                serving_devices = inspect_devices(serving_interpreter(cfg), devices, probe=True)
+            mig_rows = serving_devices.get("device_memory", [])
+            if "workers" in serving_devices:
+                mig_rows = [row for worker in serving_devices["workers"]
+                            for row in worker.get("device_memory", [])]
             if (serving_devices["device_kind"] == "mig"
-                    and any(row["process_count"] for row in serving_devices["device_memory"])
+                    and any(row["process_count"] for row in mig_rows)
                     and not cfg["serving"].get("allow_mig_sharing", False)):
                 blockers.append("Configured MIG instance is already occupied")
         else:
@@ -758,16 +783,24 @@ def preflight(root, run_id, *, audit_environments=True, workers=1):
             for task in tasks.values()):
         blockers.append("Docker daemon cannot enforce task CPU quotas; select an explicit resource adaptation profile")
     for key, task in tasks.items():
-        capability = verify_package(task)
-        task_capabilities[task["instance_id"]] = capability
-        if not capability["supported"]:
-            blockers.extend(task["instance_id"] + ": " + x for x in capability["reasons"])
-        if not profile["output_paths"].get(task["instance_id"]):
-            blockers.append(task["instance_id"] + ": profile has no declared submission output paths")
-        for unit in task["instance"]["images"]:
-            ref, image = image_reference(cfg, unit)
-            images.append({"task_id": task["instance_id"], "unit": unit["key"],
-                           "image": image.identity(), "nas_reference": ref})
+        try:
+            official_root = (Path(cfg["project_root"]) / cfg["skillsbench_images"]["source_root"] / "tasks").resolve()
+            if Path(task["instance"]["task_path"]).resolve().parent != official_root:
+                raise ValueError("Task package escaped the pinned official task root")
+            with timed_check(checks, "task_package_sha", enabled=long_checks):
+                capability = verify_package(task, deep=long_checks)
+            task_capabilities[task["instance_id"]] = capability
+            if not capability["supported"]:
+                blockers.extend(task["instance_id"] + ": " + x for x in capability["reasons"])
+            if not profile["output_paths"].get(task["instance_id"]):
+                blockers.append(task["instance_id"] + ": profile has no declared submission output paths")
+            for unit in task["instance"]["images"]:
+                with timed_check(checks, "oci_deep_verify", enabled=long_checks):
+                    ref, image = image_reference(cfg, unit, deep=long_checks)
+                images.append({"task_id": task["instance_id"], "unit": unit["key"],
+                               "image": image.identity(), "nas_reference": ref})
+        except (OSError, ValueError, KeyError) as exc:
+            blockers.append(task["instance_id"] + ": startup task/image validation failed: " + str(exc))
     if cfg.get("capture", {}).get("enabled") and profile["request_roles"] != "openhands-1.22.1":
         blockers.append("OpenHands request-role qualification is incomplete; exact capture is blocked")
     if cfg.get("parallel", {}).get("enabled") and profile["request_roles"] != "openhands-1.22.1":
@@ -779,7 +812,12 @@ def preflight(root, run_id, *, audit_environments=True, workers=1):
     else:
         try:
             from runtime.agents.dependencies import verify_snapshot
-            dependency = verify_snapshot(profile["dependency_snapshot"])
+            with timed_check(checks, "dependency_snapshot_sha", enabled=long_checks):
+                dependency = verify_snapshot(profile["dependency_snapshot"], deep=long_checks)
+                if (profile.get("dependency_snapshot_sha256")
+                        and sha256(Path(profile["dependency_snapshot"]) / "manifest.json")
+                            != profile["dependency_snapshot_sha256"]):
+                    raise ValueError("Dependency snapshot differs from the frozen profile")
             versions["dependency_receipt_sha256"] = dependency["receipt_sha256"]
             adaptations = {row['policy'] for row in dependency.get('source_adaptations', [])}
             required = {'dycon_bounded_request_subprocess_terminal_v1', 'preserve_explicit_terminal_backend_on_reset_v1'}
@@ -790,9 +828,15 @@ def preflight(root, run_id, *, audit_environments=True, workers=1):
         except (OSError, ValueError, KeyError) as exc:
             blockers.append("Offline dependency closure is invalid: " + str(exc))
     environment_audit = None
-    if audit_environments and not blockers:
-        environment_audit = audit_task_environments(cfg, run_id, workers=workers)
+    if not long_checks:
+        environment_audit = {"status": "skipped", "verified": False, "reason": SKIP_REASON}
+    elif not audit_environments:
+        checks["environment_audit"].update(status="skipped", reason="audit_environments=false")
+    if long_checks and audit_environments and not blockers:
+        with timed_check(checks, "environment_audit"):
+            environment_audit = audit_task_environments(cfg, run_id, workers=workers)
         if not environment_audit['verified']:
+            checks['environment_audit']['status'] = 'failed'
             blockers.append('Task environment audit failed: ' + ', '.join(environment_audit['failed_tasks']))
     return {"run_id": run_id, "configuration_sha256": cfg["config_hash"],
         "execution_context_sha256": cfg["execution_context"]["context_sha256"],
@@ -805,6 +849,7 @@ def preflight(root, run_id, *, audit_environments=True, workers=1):
         "serving_devices": serving_devices,
         "openhands_agent_install_probe": 'verified' if environment_audit and environment_audit['verified'] else 'pending_in_sandbox',
         "environment_audit": environment_audit,
+        "long_checks": long_checks, "checks": checks,
         'startup_policy': {
             'version': 'skillsbench-shared-startup-v3',
             'entry_paths': ['run create/start', 'frozen clone', 'run resume', 'run retry-failed/resume'],
@@ -852,6 +897,7 @@ def capture_gpu_smoke(root, run_id):
     if shared and not cfg["serving"].get("allow_mig_sharing", False):
         raise ValueError("Configured MIG instance is not exclusively available")
     import os
+
     import requests
     token = os.environ.get(cfg["serving"]["api_key_env"], "EMPTY")
     response = requests.get(cfg["serving"]["base_url"].rstrip("/") + "/models",
@@ -912,9 +958,9 @@ def _oracle_attempt(output, key, package_sha256, context_sha256, retry_failed):
 
 async def _run_oracles(root_cfg, run_id, *, offline=False, workers=1, task_ids=None, retry_failed=False):
     from application.execution.run_plan import load_plan
-    from runtime.agents.openhands import check_version
     from core.backends import identity
     from core.locking import file_lock
+    from runtime.agents.openhands import check_version
 
     loaded = load_plan(root_cfg["project_root"], run_id)
     cfg, run = loaded["config"], loaded["run"]
@@ -969,8 +1015,9 @@ async def _run_oracles(root_cfg, run_id, *, offline=False, workers=1, task_ids=N
 
 async def _run_oracle_task(cfg, run_id, key, task, base, *, offline=False, retry_failed=False):
     cfg = copy.deepcopy(cfg)
-    from catalog.skillsbench import verify_package
     from benchflow.rollout_planes import DefaultRolloutPlanes
+
+    from catalog.skillsbench import verify_package
 
     output = base / task["instance_id"]
     output.mkdir(parents=True, exist_ok=True)
@@ -1124,6 +1171,8 @@ def backend_failure_result(sample, context, output, started, error, *, bridge=No
 async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, factory):
     # Image/service bindings and daemon capabilities belong to this attempt.
     cfg = copy.deepcopy(cfg)
+    from benchflow.rollout_planes import DefaultRolloutPlanes
+
     from application.execution.subject import journal, verify_subject
     from catalog.skillsbench import verify_package
     from core.model_identity import model_identity_verification_enabled, verify_model
@@ -1131,7 +1180,6 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
     from rollout.adapters.openhands import canonical_trajectory
     from rollout.adapters.openhands_bridge import OpenHandsBridge
     from rollout.progress import generation_phase
-    from benchflow.rollout_planes import DefaultRolloutPlanes
 
     output = Path(output)
     run = run_path(cfg, run_id)
@@ -1166,8 +1214,10 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
                "profile_sha256": cfg["execution_context"]["profile_sha256"]}
     import importlib.metadata
     import sys
-    from runtime.agents import openhands as driver_module, dependencies as dependency_module
+
     from rollout.adapters import openhands_bridge as bridge_module
+    from runtime.agents import dependencies as dependency_module
+    from runtime.agents import openhands as driver_module
     source_modules = [Path(__file__), Path(driver_module.__file__),
                       Path(dependency_module.__file__), Path(bridge_module.__file__)]
     dependency_ref = cfg['execution_context']['profile'].get('dependency_snapshot')
@@ -1240,7 +1290,6 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
         if observed.exists():
             cause.update(read_json(observed))
         else:
-            import re
             for event in _json_events(result.trajectory):
                 text = json.dumps(event, ensure_ascii=False)
                 if "litellm.Timeout" in text or "APITimeoutError" in text:

@@ -31,6 +31,11 @@ class ServingManager:
         self.runtime = {}
         self.device_reservation = None
         self.device_inventory = None
+        self._prepared = False
+        self.startup_cancel = None
+        self.pool_managed = False
+        self.startup_timing = {}
+        self._startup_started = None
 
     def build_args(self, serving_python, host, port):
         cfg, s = self.cfg, self.cfg["serving"]
@@ -113,11 +118,18 @@ class ServingManager:
     def __enter__(self):
         try:
             return self._enter()
-        except BaseException:
-            self.__exit__(None, None, None)
+        except BaseException as exc:
+            self.startup_timing.update(failed_at=now(), error=repr(exc))
+            if not self.pool_managed:
+                self.__exit__(None, None, None)
             raise
 
-    def _enter(self):
+    def prepare(self):
+        """Validate and reserve resources before any pool worker spawns."""
+        if self._prepared:
+            return self
+        self._startup_started = time.monotonic()
+        self.startup_timing["preparation_started_at"] = now()
         cfg, s = self.cfg, self.cfg["serving"]
         if cfg.get("parallel", {}).get("enabled") and cfg["parallel"]["branch_count"] > 1:
             from runtime.serving.parallel import artifact_contract
@@ -314,11 +326,12 @@ class ServingManager:
                     self.capture_token_inventory.get("close_token_ids", [])
                 )
                 env["DYCON_CAPTURE_OPEN_IDS"] = json.dumps(self.capture_token_inventory["open_token_ids"])
-            self.device_reservation = reserve_serving_devices(
+            reservation = reserve_serving_devices(
                 root, serving_python, s["gpus"],
                 allow_mig_sharing=bool(s.get("allow_mig_sharing", False)),
             )
-            self.device_inventory = self.device_reservation.__enter__()
+            self.device_inventory = reservation.__enter__()
+            self.device_reservation = reservation
             if self.device_inventory["device_kind"] == "mig":
                 # The pinned NVML platform fingerprints the parent GPU memory.
                 env["VLLM_ENABLE_STARTUP_PLAN"] = "0"
@@ -330,6 +343,7 @@ class ServingManager:
                     "config_hash": cfg["config_hash"],
                     "config_source": cfg["config_source"],
                     "config_source_sha256": cfg.get("config_source_sha256"),
+                    "startup_mode": s.get("startup_mode", "serial"),
                     "serving_dtype": s.get("dtype", "float16"),
                     "serving_devices": self.device_inventory,
                     "runtime_sha256": sha256(root / "vendor/easysteer-runtime.json"),
@@ -349,6 +363,30 @@ class ServingManager:
                     },
                 },
             )
+            self._launch = (args, root, env, serving_python)
+        elif cfg["steering"]["enabled"]:
+            raise ValueError("Steering requires managed pinned EasySteer provenance")
+        self._prepared = True
+        self.startup_timing.update(prepared_at=now(),
+                                   preparation_seconds=time.monotonic() - self._startup_started)
+        self._write_startup()
+        return self
+
+    def _write_startup(self):
+        write_json(self.output / "startup-timing.json", {
+            "startup_mode": self.cfg["serving"].get("startup_mode", "serial"),
+            "gpus": self.cfg["serving"]["gpus"], **self.startup_timing})
+
+    def _check_startup_cancel(self):
+        if self.startup_cancel is not None and self.startup_cancel.is_set():
+            raise RuntimeError("Serving pool startup cancelled after a worker failure")
+
+    def _enter(self):
+        self.prepare()
+        self._check_startup_cancel()
+        cfg, s = self.cfg, self.cfg["serving"]
+        if s["management"] == "managed":
+            args, root, env, serving_python = self._launch
             self.log = (self.output / "server.log").open("ab")
             attempt_id = os.environ.get("DYCON_EXECUTION_ATTEMPT")
             execution_run = os.environ.get("DYCON_EXECUTION_RUN")
@@ -364,17 +402,19 @@ class ServingManager:
             self.process = subprocess.Popen(
                 args, cwd=root, env=env, stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True
             )
+            self.startup_timing.update(process_created_at=now(),
+                                       process_created_seconds=time.monotonic() - self._startup_started)
+            self._write_startup()
             from core.processes import identity
             write_json(self.output / "process.json", {**identity(self.process.pid), "managed": True,
                     "run_id": self.run_id, "execution_attempt_id": attempt_id})
-        elif cfg["steering"]["enabled"]:
-            raise ValueError("Steering requires managed pinned EasySteer provenance")
         session = requests.Session()
         session.trust_env = False
         headers = {"Authorization": "Bearer " + os.environ.get(s["api_key_env"], "EMPTY")}
         deadline = time.monotonic() + s["startup_seconds"]
         try:
             while True:
+                self._check_startup_cancel()
                 if self.process is not None and self.process.poll() is not None:
                     raise RuntimeError("EasySteer server exited; inspect server.log")
                 try:
@@ -394,34 +434,67 @@ class ServingManager:
                             else "user_configured_external",
                         },
                     )
+                    self.startup_timing.update(api_ready_at=now(),
+                        api_ready_seconds=time.monotonic() - self._startup_started,
+                        model_load_and_api_seconds=(time.monotonic() - self._startup_started
+                            - self.startup_timing.get("process_created_seconds", 0)),
+                        model_load_timing_source="process spawn to /models ready; includes engine initialization")
+                    self._write_startup()
                     return self
                 except requests.RequestException:
                     if time.monotonic() >= deadline:
                         raise TimeoutError("Model service did not become ready") from None
-                    time.sleep(0.2)
-        except BaseException:
-            self.__exit__(None, None, None)
-            raise
+                    if self.startup_cancel is not None:
+                        self.startup_cancel.wait(0.2)
+                    else:
+                        time.sleep(0.2)
         finally:
             session.close()
 
     def __exit__(self, *exc):
-        if self.process is not None and self.process.poll() is None:
-            os.killpg(self.process.pid, signal.SIGTERM)
-            try:
-                self.process.wait(timeout=self.cfg["serving"]["shutdown_seconds"])
-            except subprocess.TimeoutExpired:
-                os.killpg(self.process.pid, signal.SIGKILL)
-                self.process.wait()
-        if self.capture_server is not None:
-            if self.capture_owner is None:
+        cleanup_started = time.monotonic()
+        errors = []
+        try:
+            if self.process is not None and self.process.poll() is None:
+                try:
+                    os.killpg(self.process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    self.process.wait(timeout=self.cfg["serving"]["shutdown_seconds"])
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(self.process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    self.process.wait()
+        except Exception as error:
+            errors.append(error)
+        try:
+            if self.capture_server is not None and self.capture_owner is None:
                 self.capture_server.close()
-            self.capture_server = None
-            self.capture_controller = None
-        if self.log is not None:
-            self.log.close()
-            self.log = None
-        if self.device_reservation is not None:
-            self.device_reservation.__exit__(*exc)
-            self.device_reservation = None
-            self.device_inventory = None
+        except Exception as error:
+            errors.append(error)
+        self.capture_server = None
+        self.capture_controller = None
+        try:
+            if self.log is not None:
+                self.log.close()
+        except Exception as error:
+            errors.append(error)
+        self.log = None
+        try:
+            if self.device_reservation is not None:
+                self.device_reservation.__exit__(*exc)
+        except Exception as error:
+            errors.append(error)
+        self.device_reservation = None
+        self.device_inventory = None
+        if self.output.exists():
+            self.startup_timing.update(cleanup_finished_at=now(),
+                                       cleanup_seconds=time.monotonic() - cleanup_started)
+            if errors:
+                self.startup_timing["cleanup_errors"] = [repr(error) for error in errors]
+            self._write_startup()
+        if errors:
+            raise errors[0]

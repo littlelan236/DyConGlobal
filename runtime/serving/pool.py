@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -54,6 +55,7 @@ class ServingPool:
         self.workers = []
         self._lock = threading.RLock()
         self._entered = False
+        self._startup_cancel = threading.Event()
 
     @property
     def enabled(self):
@@ -92,14 +94,36 @@ class ServingPool:
                 worker_cfg["serving"]["tensor_parallel_size"] = 1
                 worker_cfg["serving"]["base_url"] = endpoint
                 worker_cfg["serving"]["trajectory_sharding"] = "none"
+                # Pool topology is validated before reducing each worker to one MIG.
+                worker_cfg["serving"]["startup_mode"] = serving.get("startup_mode", "serial")
                 worker_cfg["serving"]["replica_base_urls"] = []
                 output = self.output / "workers" / f"worker-{index:02d}"
                 manager = ServingManager(worker_cfg, output, run_id=self.run_id,
                                          capture_owner=self.workers[0].manager if self.workers else None)
-                manager.__enter__()
                 self.workers.append(ServingWorker(
                     self, index, gpu, worker_cfg, endpoint, manager, output
                 ))
+                if serving.get("startup_mode", "serial") == "serial":
+                    manager.__enter__()
+            if serving.get("startup_mode", "serial") == "parallel":
+                # Prepare the owner first, then attach every replica to the same
+                # initialized capture controller. All device locks precede spawn.
+                for worker in self.workers:
+                    worker.manager.pool_managed = True
+                    worker.manager.startup_cancel = self._startup_cancel
+                    worker.manager.prepare()
+                with ThreadPoolExecutor(max_workers=len(self.workers)) as executor:
+                    futures = [executor.submit(worker.manager.__enter__) for worker in self.workers]
+                    try:
+                        for future in as_completed(futures):
+                            future.result()
+                    except BaseException:
+                        self._startup_cancel.set()
+                        for future in futures:
+                            future.cancel()
+                        # The executor joins startup threads before reverse-order
+                        # cleanup closes replicas, followed by their capture owner.
+                        raise
         self._entered = True
         self._write_receipt()
         return self
@@ -109,6 +133,7 @@ class ServingPool:
             "schema_version": 1,
             "run_id": self.run_id,
             "trajectory_sharding": self.enabled,
+            "startup_mode": self.cfg["serving"].get("startup_mode", "serial"),
             "tensor_parallel_size": 1 if self.enabled else self.cfg["serving"]["tensor_parallel_size"],
             "max_cpu_workers_per_gpu": self.max_cpu_workers_per_gpu,
             "capacity": self.capacity,
@@ -119,6 +144,7 @@ class ServingPool:
                 "gpu": worker.gpu,
                 "base_url": worker.endpoint,
                 "output": str(worker.output),
+                "startup_timing": getattr(worker.manager, "startup_timing", {}),
                 "active_cpu_workers": worker.active,
                 "available_cpu_workers": self.max_cpu_workers_per_gpu - worker.active,
             } for worker in self.workers],
@@ -176,6 +202,7 @@ class ServingPool:
 
     def __exit__(self, *exc):
         errors = []
+        self._startup_cancel.set()
         for worker in reversed(self.workers):
             try:
                 worker.manager.__exit__(*exc)

@@ -9,11 +9,22 @@ class BenchFlowAdapter(BackendAdapter):
         return SkillsBenchFactory(cfg, run_id)
 
     def preflight(self, context, tasks):
-        from core.io import write_json
+        from core.io import read_json, write_json
         from runtime.agents.skillsbench import preflight
-        super().preflight(context, tasks)
+        from core.preflight import long_checks_enabled, timed_check
+        admission_checks = {}
+        deep = long_checks_enabled(context.cfg)
+        with timed_check(admission_checks, "image_admission_oci_sha", enabled=deep):
+            if deep:
+                super().preflight(context, tasks)
+            else:
+                context.factory.lock_images([t["instance"] for t in tasks.values()], deep=False)
         checked = preflight(context.cfg["project_root"], context.run_id,
                             workers=min(8, context.cfg["execution"]["rollout_workers"]))
+        checked["image_admission_checks"] = admission_checks
+        model_receipt = self.run_path(context) / "validation/startup-model-identity.json"
+        if model_receipt.exists():
+            checked["runner_model_identity"] = read_json(model_receipt)
         write_json(self.run_path(context) / "validation/startup-preflight.json", checked)
         return PreflightFacts(not checked["blockers"], tuple(checked["blockers"]), checked)
 

@@ -7,6 +7,7 @@ from core.model_identity import model_identity_verification_enabled
 
 
 def test_model_identity_verification_is_enabled_by_default(cfg):
+    cfg["model"].pop("verify_identity", None)
     assert model_identity_verification_enabled(cfg)
 
 
