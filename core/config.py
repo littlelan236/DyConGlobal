@@ -208,6 +208,7 @@ class Preflight(Strict):
 
 
 class Execution(Strict):
+    sample_completion_token_budget: int | None = Field(default=None, gt=0)
     preflight: Preflight = Field(default_factory=Preflight)
     cancellation: Cancellation = Field(default_factory=Cancellation)
     limits_retry: LimitsRetry = Field(default_factory=LimitsRetry)
@@ -536,6 +537,9 @@ class Config(Strict):
     def cross_fields(self):
         from core.backends import capabilities
         capabilities(self.model_dump())
+        if self.execution.sample_completion_token_budget is not None and (
+                self.benchmark.backend != 'skillsbench' or self.agent.backend != 'openhands'):
+            raise ValueError('sample_completion_token_budget currently requires SkillsBench/OpenHands')
         if self.benchmark.backend == "webarena_verified" and self.webarena is None:
             raise ValueError("WebArena Verified requires webarena runtime configuration")
         if self.benchmark.backend in {"swebench_pro_v2", "terminalbench_2_1"} and self.harbor is None:
@@ -659,6 +663,8 @@ def resolve(path, overrides=()):
         cfg["execution"].pop("limits_retry", None)
     if 'startup_failure_limit' not in raw['execution']:
         cfg['execution'].pop('startup_failure_limit', None)
+    if 'sample_completion_token_budget' not in raw['execution']:
+        cfg['execution'].pop('sample_completion_token_budget', None)
     # Adding host storage configuration must not alter legacy config identities.
     if "docker_data_root" not in raw["environment"]:
         cfg["environment"].pop("docker_data_root", None)

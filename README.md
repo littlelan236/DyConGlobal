@@ -9,6 +9,7 @@ DyConGlobal runs coding-agent benchmarks and manages their rollout, evaluation, 
 | [Minimum run guide](docs/MINIMUM-RUN-CN.md) | Common setup, run, evaluation, recovery, and analysis workflows |
 | [Entrypoints and contracts](docs/ENTRYPOINTS.md) | CLI families, configuration ownership, evidence, and identity rules |
 | [Benchmark operations](docs/BENCHMARKS-CN.md) | SWE-bench, SkillsBench, WebArena Verified, and Harbor integration |
+| [SkillsBench verifier audit](docs/SKILLSBENCH-VERIFIER-AUDIT-CN.md) | Evidence-based zero-reward classification |
 | [Capture operations](docs/CAPTURE-CN.md) | Online capture, publication, recovery, and downstream use |
 | [Container operations](docs/CONTAINER-CN.md) | Docker storage, task images, and environment checks |
 | [Action entropy policy](docs/ACTION-ENTROPY-RUN-POLICY-CN.md) | Run-frozen consensus representative and entropy rules |

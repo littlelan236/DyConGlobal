@@ -6,8 +6,9 @@ import pytest
 
 def test_offline_profile_forces_benchflow_network_overlay(tmp_path):
     pytest.importorskip("benchflow")
-    from runtime.agents.skillsbench import OwnedPlanes
     from pydantic import BaseModel
+
+    from runtime.agents.skillsbench import OwnedPlanes
     class Sandbox(BaseModel):
         allow_internet: bool = True
     env = SimpleNamespace(task_env_config=Sandbox())
@@ -31,7 +32,6 @@ def test_offline_install_rejects_networked_container_before_install(tmp_path, mo
 
 
 def test_public_snapshot_keeps_network_for_task_specific_dependencies(tmp_path):
-    from runtime.agents.skillsbench import OwnedPlanes
     from types import SimpleNamespace
     class Env:
         task_env_config = SimpleNamespace(allow_internet=True)
@@ -53,8 +53,9 @@ def test_offline_install_command_pins_python312():
 
 
 def test_tool_publication_is_mounted_for_public_snapshot(tmp_path, monkeypatch):
-    from runtime.agents.skillsbench import OwnedPlanes
     from types import SimpleNamespace
+
+    from runtime.agents.skillsbench import OwnedPlanes
     tools = tmp_path / 'runtime/skillsbench-tools'; tools.mkdir(parents=True)
     class Env:
         task_env_config = SimpleNamespace(allow_internet=True)
@@ -73,6 +74,7 @@ def test_tool_publication_is_mounted_for_public_snapshot(tmp_path, monkeypatch):
     import json
     compose = json.loads((tmp_path/'out/ownership-compose.json').read_text())
     volumes = compose['services']['main']['volumes']
-    assert any(v['target'] == '/root/.local/bin' for v in volumes)
+    tool_mount = next(v for v in volumes if v['target'] == '/opt/dycon-skillsbench-tools')
+    assert tool_mount['read_only'] is True
     assert compose['services']['main']['image'] == 'dycon/task:frozen'
     assert 'PIP_NO_INDEX' not in compose['services']['main']['environment']

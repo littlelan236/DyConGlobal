@@ -1,7 +1,6 @@
 """Regression at real shell/HTTP/native receipt boundaries (no GPU required)."""
 import asyncio
 import copy
-import json
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -83,9 +82,15 @@ def test_stop_drains_already_bound_output_without_reopening(tmp_path):
             with pytest.raises(KeyError):
                 controller.bind('unexpected', {**md, 'prompt_token_ids': [10]})
             controller.record_output({'request_id': 'native', 'prompt_token_ids': [10], 'output_token_ids': [20]})
-            assert future.result(timeout=2)['status'] == 'stopped'
+            stopped = future.result(timeout=2)
+            assert stopped['status'] == 'stopped'
+            assert stopped['stop_diagnostics']['phase'] == 'completed'
+            assert stopped['stop_diagnostics']['queue_after']['pending_total'] == 0
         assert controller.stop('s')['status'] == 'stopped'
         assert controller.sessions['s'].status == 'stopped'
+        receipt = read_json(tmp_path / 'online/sessions/s/stop-diagnostics.json')
+        assert receipt['native_output_drain_seconds'] >= 0
+        assert receipt['export_queue_drain_seconds'] >= 0
     finally:
         controller.close()
 
@@ -169,19 +174,139 @@ def test_step_coverage_checks_all_steps_even_when_totals_match():
 
 
 def test_capture_failure_keeps_official_reward_and_all_model_costs(tmp_path):
-    from runtime.agents.skillsbench import backend_failure_result
     from core.io import write_json
+    from runtime.agents.skillsbench import backend_failure_result
     write_json(tmp_path / 'evaluation-raw.json', {'completed': True, 'rewards': {'reward': 1}})
+    write_json(tmp_path / 'capture-stop-error.json', {'error': 'native drain failed'})
     bridge = SimpleNamespace(records=[{'model_calls': [
-        {'usage_known': True, 'usage': {'prompt_tokens': 50, 'completion_tokens': 11}},
-        {'usage_known': False, 'status': 'failed'}]}])
+        {'api_attempt_index': 0, 'usage_known': True,
+         'usage': {'prompt_tokens': 50, 'completion_tokens': 11}},
+        {'api_attempt_index': 1, 'usage_known': False, 'status': 'failed'}],
+        'request_id': 'req-a'}])
     sample = SimpleNamespace(as_dict=lambda: {'sample_key': 'sample'})
     result = backend_failure_result(sample, {'attempt_id': 'a'}, tmp_path, 'started',
         RuntimeError('native drain failed'), bridge=bridge, capture_session='cap', agent_status='AgentCompleted')
-    assert result['exit_status'] == 'CaptureError' and result['agent_exit_status'] == 'AgentCompleted'
+    assert result['exit_status'] == 'AgentCompleted' and result['agent_exit_status'] == 'AgentCompleted'
     assert result['resolved'] is True and result['capture_status'] == 'partial'
     assert result['usage']['completion_tokens'] == 11 and not result['usage']['complete']
+    assert result['usage']['missing_model_call_receipts'] == [
+        {'request_id': 'req-a', 'api_attempt_index': 1, 'status': 'failed'}]
+    assert result['capture_errors']
     assert result['disposition'] == 'failed'
+
+
+@pytest.mark.parametrize(('error', 'agent_status', 'expected'), [
+    (TimeoutError('SkillsBench attempt wall-clock deadline exceeded'), None, 'TimeoutError'),
+    (RuntimeError('ACP peer disconnected'), None, 'OpenHandsError'),
+    (RuntimeError('capture finalization failed'), 'AgentCompleted', 'AgentCompleted'),
+])
+def test_backend_failure_keeps_primary_status_with_partial_capture(
+        tmp_path, error, agent_status, expected):
+    from runtime.agents.skillsbench import backend_failure_result
+    sample = SimpleNamespace(as_dict=lambda: {'sample_key': 'sample'})
+    result = backend_failure_result(sample, {'attempt_id': 'a'}, tmp_path, 'started', error,
+        capture_session='cap', agent_status=agent_status)
+    assert result['exit_status'] == expected
+    assert result['capture_status'] == 'partial'
+
+
+def test_attempt_terminal_evidence_links_acp_process_and_capture_facts(tmp_path):
+    from core.io import write_json
+    from runtime.agents.skillsbench import _terminal_evidence
+    write_json(tmp_path / 'benchflow-diagnostics.json', {'cause': 'unknown'})
+    write_json(tmp_path / 'diagnostics/acp-error.json', {'code': -32603})
+    write_json(tmp_path / 'diagnostics/process-before_cleanup.json', {
+        'containers': [{'container_id': 'c', 'state': {'ExitCode': 137, 'OOMKilled': False},
+                        'cause': 'unknown'}]})
+    evidence = _terminal_evidence(tmp_path, agent_status='OpenHandsError',
+        capture_status='partial', evaluation_status='not_run')
+    assert evidence['primary_cause'] == 'OpenHandsError'
+    assert evidence['capture_status'] == 'partial'
+    assert {row['path'] for row in evidence['evidence_files']} == {
+        'benchflow-diagnostics.json', 'diagnostics/acp-error.json',
+        'diagnostics/process-before_cleanup.json'}
+    assert evidence['process'][0]['state']['ExitCode'] == 137
+    assert evidence['process'][0]['cause'] == 'unknown'
+
+
+def test_container_snapshot_captures_memory_cgroup_and_unknown_oom(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from runtime.agents import skillsbench as module
+
+    class Container:
+        id = 'container-a'
+        attrs = {'State': {'Status': 'running', 'Running': True, 'ExitCode': None,
+                           'OOMKilled': False, 'Pid': 123},
+                 'HostConfig': {'Memory': 4096}}
+        def reload(self): pass
+        def stats(self, stream=False): return {'memory_stats': {'max_usage': 2048}}
+        def exec_run(self, command):
+            return SimpleNamespace(exit_code=0, output=b'FILE /sys/fs/cgroup/memory.events\noom 0\noom_kill 0\n')
+
+    container = Container()
+    client = SimpleNamespace(containers=SimpleNamespace(list=lambda **kwargs: [container]), close=lambda: None)
+    monkeypatch.setattr(module.docker, 'DockerClient', lambda **kwargs: client)
+    owner = object.__new__(module.OwnedPlanes)
+    owner.cfg = {'environment': {'docker_host': 'unix:///docker.sock'}}
+    owner.ownership = {'epoch': 'e', 'attempt': 'a'}
+    owner.output = tmp_path
+    owner._snapshot_process_evidence('before_cleanup')
+    evidence = read_json(tmp_path / 'diagnostics/process-before_cleanup.json')
+    row = evidence['containers'][0]
+    assert row['memory_peak_bytes'] == 2048
+    assert row['cgroup']['available'] is True
+    assert 'oom_kill 0' in row['cgroup']['raw']
+    assert row['cause'] == 'unknown'
+
+
+def test_capture_drain_records_native_flush_and_stop_phase_times(tmp_path, monkeypatch):
+    import requests
+
+    from runtime.agents.skillsbench import drain_capture
+
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {'failures': []}
+    monkeypatch.setattr(requests, 'post', lambda *args, **kwargs: Response())
+    stopped = SimpleNamespace(stop=lambda session: {'status': 'stopped'})
+    cfg = {'serving': {'base_url': 'http://capture.local/v1'},
+           'capture': {'flush_timeout_seconds': 5, 'finalize_seconds': 5}}
+    drain_capture(cfg, tmp_path, stopped, 'session-a')
+    receipt = read_json(tmp_path / 'capture-drain.json')
+    assert receipt['phase'] == 'complete'
+    assert receipt['native_flush_seconds'] >= 0
+    assert receipt['session_stop_seconds'] >= 0
+
+
+def test_capture_stop_can_report_a_drain_failure_after_normal_control_timeout(tmp_path, monkeypatch):
+    import requests
+
+    from hidden.backends.vllm.online import CaptureClient
+    from runtime.agents.skillsbench import drain_capture
+
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {'failures': [], 'status': 'stopped'}
+
+    monkeypatch.setattr(requests, 'post', lambda *args, **kwargs: Response())
+    observed = []
+
+    def controller(method, url, **kwargs):
+        observed.append(kwargs['timeout'])
+        if kwargs['timeout'] <= 120:
+            raise requests.ReadTimeout('normal control timeout ended before native drain')
+        return Response()
+
+    monkeypatch.setattr(requests, 'request', controller)
+    client = CaptureClient('http://capture.local', timeout=60)
+    cfg = {'serving': {'base_url': 'http://capture.local/v1'}, 'capture': {
+        'control_seconds': 60, 'flush_timeout_seconds': 120,
+        'finalize_seconds': 120, 'finalize_request_seconds': 240}}
+    drain_capture(cfg, tmp_path, client, 'session-a')
+    assert observed and observed[0] > 240
+    assert client.timeout == 60
+    assert read_json(tmp_path / 'capture-drain.json')['phase'] == 'complete'
 
 
 def test_cancelled_attempt_can_retain_native_usage_without_publishing_a_failure(tmp_path):

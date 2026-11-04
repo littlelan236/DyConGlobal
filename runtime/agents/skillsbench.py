@@ -24,6 +24,76 @@ from runtime.images.nas import ImageLeaseManager, NasImageStore
 SKILLSBENCH_AGENT_ENVIRONMENT = OPENHANDS_AGENT_ENVIRONMENT
 
 
+async def resolve_submission_outputs(env, task_id, declared, workspace, output, ownership):
+    """Resolve the organize task's location-independent five-directory contract.
+
+    Its prompt names directories, and the pinned verifier accepts /root/papers,
+    /root, the workspace, then a common parent below /root. Discover existing
+    outputs only; never move files or use oracle/verifier contents.
+    """
+    import shlex
+
+    names = ['LLM', 'trapped_ion_and_qc', 'black_hole', 'DNA', 'music_history']
+    if task_id != 'organize-messy-files' or declared != ['/root/' + n for n in names]:
+        return declared, None
+    script = '''import json
+from pathlib import Path
+names = %r
+workspace = %r
+roots = [Path('/root/papers'), Path('/root')]
+if workspace:
+    roots.append(Path(workspace))
+observed = []
+seen = set()
+def inspect(root):
+    text = str(root)
+    if text in seen or not root.is_absolute() or root.resolve() != root:
+        return False
+    seen.add(text)
+    present = [n for n in names if (root / n).is_dir() and not (root / n).is_symlink()]
+    if present:
+        observed.append({'root': text, 'present': present})
+    return len(present) == len(names)
+selected = next((root for root in roots if inspect(root)), None)
+if selected is None:
+    for path in Path('/root').rglob(names[0]):
+        if inspect(path.parent):
+            selected = path.parent
+            break
+print(json.dumps({'root': str(selected) if selected is not None else None,
+                  'observed': observed[:32]}))
+''' % (names, workspace)
+    receipt = {'schema_version': 1, 'ownership': ownership, 'task_id': task_id,
+               'policy': 'organize-messy-files-common-parent-v1', 'declared_paths': declared,
+               'at': now()}
+    effective = declared
+    try:
+        probe = await env.exec('python3 -c ' + shlex.quote(script), user='root', timeout_sec=30)
+        receipt['return_code'] = probe.return_code
+        if probe.return_code == 0:
+            result = json.loads(probe.stdout)
+            root = result.get('root')
+            if root is not None:
+                from application.execution.subject import safe_output_path
+                root = safe_output_path(root)
+                if root not in {'/root', workspace} and not root.startswith('/root/'):
+                    raise ValueError('Discovered submission parent is outside the task workspace')
+                effective = [root.rstrip('/') + '/' + n for n in names]
+            receipt.update(status='resolved' if root is not None else 'no_complete_group',
+                           discovered_root=root, observed=result.get('observed', []))
+        else:
+            receipt.update(status='discovery_failed', stderr=_safe_verifier_text(
+                getattr(probe, 'stderr', ''))[-2000:])
+    except Exception as exc:
+        # Optional discovery must not prevent official verification. The normal
+        # exporter still records missing/rejected declared paths on failure.
+        receipt.update(status='discovery_failed', error_type=type(exc).__name__)
+    receipt['effective_paths'] = effective
+    path = output / 'diagnostics/submission-output-resolution.json'
+    write_json(path, receipt)
+    return effective, sha256(path)
+
+
 def image_reference(cfg, unit, *, deep=True):
     options = cfg["skillsbench_images"]
     store = Path(cfg["paths"]["nas_root"]) / options["store"]
@@ -193,12 +263,38 @@ class OwnedPlanes:
                 attrs = container.attrs
                 state, host = attrs.get('State', {}), attrs.get('HostConfig', {})
                 oom = state.get('OOMKilled')
+                memory_peak = None
+                memory_stats_error = None
+                cgroup = {'available': False, 'reason': 'container_not_running'}
+                if state.get('Running'):
+                    try:
+                        stats = container.stats(stream=False)
+                        memory_peak = stats.get('memory_stats', {}).get('max_usage')
+                    except Exception as exc:
+                        memory_stats_error = type(exc).__name__
+                    try:
+                        result = container.exec_run([
+                            'sh', '-lc',
+                            'for f in /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.peak '
+                            '/sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.events '
+                            '/sys/fs/cgroup/memory/memory.usage_in_bytes '
+                            '/sys/fs/cgroup/memory/memory.max_usage_in_bytes '
+                            '/sys/fs/cgroup/memory/memory.oom_control; do '
+                            'if test -r "$f"; then printf "FILE %s\\n" "$f"; cat "$f"; fi; done'])
+                        raw = result.output.decode('utf-8', 'replace') if isinstance(result.output, bytes) else str(result.output or '')
+                        cgroup = {'available': result.exit_code == 0 and bool(raw.strip()),
+                                  'return_code': result.exit_code, 'raw': raw[-8192:]}
+                    except Exception as exc:
+                        cgroup = {'available': False, 'error_type': type(exc).__name__}
                 rows.append({'container_id': container.id,
                     'state': {k: state.get(k) for k in ('Status','Running','ExitCode','OOMKilled',
                                                        'StartedAt','FinishedAt','Pid')},
                     'memory_limit_bytes': host.get('Memory'),
-                    'memory_peak_bytes': None, 'cgroup_events': None,
-                    'unavailable_fields': ['memory_peak_bytes','cgroup_events'],
+                    'memory_peak_bytes': memory_peak,
+                    'memory_stats_error_type': memory_stats_error,
+                    'cgroup': cgroup,
+                    'host_kernel_log': {'available': False,
+                        'reason': 'docker_host_kernel_log_not_exposed_by_container_api'},
                     'cause': 'container_oom_confirmed' if oom is True else 'unknown',
                     'source': 'docker_inspect_before_container_cleanup'})
         except Exception as exc:
@@ -247,8 +343,8 @@ class OwnedPlanes:
             tools = Path(self.cfg["project_root"]) / "runtime/skillsbench-tools"
             if tools.is_dir():
                 service.setdefault("volumes", []).append({"type": "bind", "source": str(tools.resolve()),
-                    "target": "/root/.local/bin", "read_only": True})
-            service.setdefault("environment", {})["PATH"] = "/root/.local/bin:/opt/dycon-wheels:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                    "target": "/opt/dycon-skillsbench-tools", "read_only": True})
+                service.setdefault("environment", {})["PATH"] = "/root/.local/bin:/opt/dycon-skillsbench-tools:/opt/dycon-wheels:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         cfs_supported = self.cfg.get("skillsbench_daemon_capabilities", {}).get("cpu_quota_supported", True)
         if not cfs_supported:
             task_key = hash_json({"benchmark": "skillsbench",
@@ -388,7 +484,7 @@ class OwnedPlanes:
             async def verify(self):
                 try:
                     try:
-                        result = await original.verify()
+                        result = await _run_verifier_with_evidence(original, owner)
                     except RuntimeError as exc:
                         message = str(exc)
                         if "clearing verifier output directory" not in message:
@@ -401,10 +497,11 @@ class OwnedPlanes:
                             "chmod 777 /logs/verifier",
                             user="root", timeout_sec=60)
                         await owner._export_workspace()
-                        result = await original.verify()
+                        result = await _run_verifier_with_evidence(original, owner)
                     write_json(owner.output / "evaluation-raw.json", {
                         "schema_version": 1, "completed": True, "rewards": result.rewards,
                         "verifier": getattr(result, "__dict__", {}),
+                        "verifier_evidence": "diagnostics/verifier-execution.json",
                         "subject_sha256": owner.subject_sha256, "finished_at": now()})
                     return result
                 except BaseException as exc:
@@ -430,6 +527,7 @@ class OwnedPlanes:
                                    "candidate_outputs": candidates.stdout,
                                    "candidate_scan_return_code": candidates.return_code},
                         "classifier": {"benchflow_version": classifier_version},
+                        "verifier_evidence": "diagnostics/verifier-execution.json",
                         "finished_at": now()})
                     raise
         return PersistedVerifier()
@@ -439,8 +537,12 @@ class OwnedPlanes:
         source = self.cfg["selection"]["tasks"][self.sample.task_key]
         binding = {**self.ownership, "workspace": self.workspace, "agent": "openhands",
                    "image": self.image["identity"]}
-        self.subject_path = await export_workspace(self.env,
-            self.cfg["execution_context"]["profile"]["output_paths"].get(self.sample.instance_id, []),
+        declared = self.cfg["execution_context"]["profile"]["output_paths"].get(self.sample.instance_id, [])
+        outputs, resolution_sha256 = await resolve_submission_outputs(
+            self.env, self.sample.instance_id, declared, self.workspace, self.output, self.ownership)
+        if resolution_sha256 is not None:
+            binding['output_resolution_sha256'] = resolution_sha256
+        self.subject_path = await export_workspace(self.env, outputs,
             self.output / "subject", binding, source["instance"]["package_sha256"], self.image["identity"])
         self.subject_sha256 = sha256(self.subject_path)
 
@@ -452,9 +554,8 @@ class OwnedPlanes:
         if proxy or profile.get("network") == "none":
             variables = {name: proxy or "" for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")}
             variables.update(NO_PROXY="localhost,127.0.0.1", no_proxy="localhost,127.0.0.1")
-            # BenchFlow merges verifier.env after compose environment. Keep
-            # the hash-bound bootstrap tools ahead of the image PATH.
-            variables["PATH"] = "/root/.local/bin:/opt/dycon-wheels:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            # Upstream re-pins trusted PATH during hardening. Tool preparation
+            # below uses /usr/local/bin without overriding that invariant.
             if self.cfg["execution_context"]["profile"].get("dependency_snapshot"):
                 # Public tasks may still need task-specific packages. The
                 # snapshot supplies the pinned base closure; only the none-
@@ -473,6 +574,14 @@ class OwnedPlanes:
                 "policy": ("official-verifier-network-none-offline-python-wheels-v1"
                            if profile.get("network") == "none" else "official-verifier-public-proxy-offline-python-wheels-v1")})
         await self.inner.harden_before_verify(env, task, sandbox_user, workspace=workspace)
+        from runtime.agents.verifier_tools import prepare_verifier_tools
+        tools = await prepare_verifier_tools(env)
+        write_json(self.output / "diagnostics/verifier-tools.json", {
+            "schema_version": 2, "ownership": self.ownership,
+            "source_paths": ["/opt/dycon-wheels", "/opt/dycon-skillsbench-tools"],
+            "destination": "/root/.local/bin", "trusted_curl_path": "/usr/local/bin/curl",
+            "policy": "published_uv_bootstrap_after_hardening_v2", "return_code": tools.return_code,
+            "stdout": tools.stdout, "stderr": getattr(tools, "stderr", ""), "at": now()})
         # The official Druid verifier assumes the patched single server is
         # listening after oracle build; start it in the owned sandbox and
         # record readiness before verifier execution.
@@ -616,6 +725,215 @@ def audit_task_environments(cfg, run_id, *, workers=1):
     result = asyncio.run(execute())
     write_json(run_path(cfg, run_id) / 'validation/environments/summary.json', result)
     return result
+
+
+def _terminal_evidence(output, *, agent_status, capture_status, evaluation_status, error=None):
+    output = Path(output)
+    names = [
+        'benchflow-diagnostics.json', 'benchflow/result.json', 'openhands/acp-events.json',
+        'diagnostics/acp-error.json', 'diagnostics/process-transport.json',
+        'diagnostics/process-transport_error.json', 'diagnostics/process-before_cleanup.json',
+        'diagnostics/process-supervisor.json', 'capture-drain.json',
+        'capture-finalization.json', 'capture-stop-error.json', 'evaluation-raw.json',
+        'sample-token-budget.json', 'diagnostics/verifier-zero-audit.json',
+    ]
+    files = []
+    primary_cause, cause_source = None, None
+    process = []
+    for name in names:
+        path = output / name
+        if not path.is_file():
+            continue
+        row = None
+        try:
+            row = read_json(path)
+        except (OSError, ValueError):
+            pass
+        files.append({'path': name, 'sha256': sha256(path)})
+        if name == 'benchflow-diagnostics.json' and isinstance(row, dict):
+            candidate = row.get('cause')
+            if candidate and candidate != 'unknown':
+                primary_cause, cause_source = candidate, name
+        if name.startswith('diagnostics/process-') and isinstance(row, dict):
+            for container in row.get('containers', []):
+                process.append({key: container.get(key) for key in
+                    ('container_id', 'state', 'memory_limit_bytes', 'memory_peak_bytes', 'cgroup', 'cause')})
+            if name == 'diagnostics/process-transport.json':
+                process.append({key: row.get(key) for key in
+                    ('process_pid', 'process_exit_code', 'diagnosis', 'source', 'cause')})
+    supervisor_path = output / 'diagnostics/process-supervisor.json'
+    supervisor = read_json(supervisor_path) if supervisor_path.is_file() else None
+    if not primary_cause:
+        primary_cause = agent_status or (type(error).__name__ if error else 'unknown')
+        cause_source = 'agent_status' if agent_status else 'backend_exception' if error else 'unavailable'
+    return {'schema_version': 1, 'primary_cause': primary_cause, 'cause_source': cause_source,
+        'agent_exit_status': agent_status, 'capture_status': capture_status,
+        'evaluation_status': evaluation_status, 'process': process,
+        'supervisor_termination': supervisor, 'evidence_files': files,
+        'supervisor_log': {'available': False, 'reason': 'no attempt-bound supervisor log was provided'}}
+
+
+def _safe_verifier_text(value):
+    import re
+
+    text = value.decode('utf-8', 'replace') if isinstance(value, bytes) else str(value or '')
+    text = re.sub(r'https?://[^\s/@]+:[^\s/@]+@', 'https://[credential-redacted]@', text)
+    text = re.sub(r'(?i)(bearer\s+|api[_-]?key[=: ]+|password[=: ]+|secret[=: ]+|token[=: ]+)\S+',
+                  r'\1[credential-redacted]', text)
+    return text
+
+
+def _verifier_stdout_tail(verifier, limit=4096):
+    path = getattr(getattr(verifier, '_rollout_paths', None), 'test_stdout_path', None)
+    if path is None:
+        return None
+    try:
+        with Path(path).open('rb') as stream:
+            stream.seek(0, 2)
+            size = stream.tell()
+            stream.seek(max(0, size - limit))
+            return _safe_verifier_text(stream.read())[-limit:]
+    except OSError:
+        return None
+
+
+async def _run_verifier_with_evidence(verifier, owner):
+    import re
+    import time
+    from urllib.parse import urlsplit
+
+    path = owner.output / 'diagnostics/verifier-execution.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    receipt = read_json(path) if path.exists() else {
+        'schema_version': 1, 'ownership': owner.ownership, 'commands': [], 'attempts': []}
+    started_at, started = now(), time.monotonic()
+    attempt = {'started_at': started_at, 'phase': 'verifier_running'}
+    receipt['attempts'].append(attempt)
+    receipt['attempts'] = receipt['attempts'][-8:]
+    receipt['phase'] = 'verifier_running'
+
+    def persist():
+        attempt['elapsed_seconds'] = time.monotonic() - started
+        receipt['updated_at'] = now()
+        write_json(path, receipt)
+
+    def classify(command):
+        value = command if isinstance(command, str) else ' '.join(map(str, command or []))
+        lowered = value.lower()
+        if re.search(r'\b(apt-get|apt)\b', lowered):
+            phase = 'apt'
+        elif re.search(r'\b(curl|wget)\b', lowered):
+            phase = 'download'
+        elif re.search(r'\b(uv|pip|pip3)\b', lowered):
+            phase = 'python_dependency'
+        elif re.search(r'(test\.sh|pytest|unittest|/tests?/|\btest\b)', lowered):
+            phase = 'task_test'
+        else:
+            phase = 'verifier_setup'
+        hosts = set()
+        for match in re.findall(r"https?://[^\s'\"<>]+", value):
+            try:
+                if urlsplit(match).hostname:
+                    hosts.add(urlsplit(match).hostname)
+            except ValueError:
+                continue
+        hosts = sorted(hosts)
+        summary = re.sub(r"https?://[^\s'\"<>]+", '[url]', value)
+        return phase, value, _safe_verifier_text(summary)[:256], hosts
+
+    sandbox = getattr(verifier, '_sandbox', None)
+    original_exec = getattr(sandbox, 'exec', None) if sandbox is not None else None
+    patched = False
+    heartbeat_stop = asyncio.Event()
+
+    async def heartbeat():
+        while not heartbeat_stop.is_set():
+            try:
+                await asyncio.wait_for(heartbeat_stop.wait(), timeout=15)
+            except asyncio.TimeoutError:
+                attempt['heartbeat_at'] = now()
+                attempt['phase'] = receipt.get('active_phase', 'verifier_running')
+                persist()
+
+    async def tracked_exec(*args, **kwargs):
+        command = kwargs.get('command', args[0] if args else '')
+        phase, raw, summary, hosts = classify(command)
+        row = {'phase': phase, 'command_summary': summary, 'command_sha256': hash_json(raw),
+               'target_hosts': hosts, 'timeout_seconds': kwargs.get('timeout_sec'),
+               'started_at': now(), 'status': 'running'}
+        receipt['commands'].append(row)
+        receipt['commands'] = receipt['commands'][-512:]
+        receipt['active_phase'] = phase
+        persist()
+        command_started = time.monotonic()
+        try:
+            result = await original_exec(*args, **kwargs)
+            row.update(status='completed', return_code=getattr(result, 'return_code', None),
+                       stdout_tail=_safe_verifier_text(getattr(result, 'stdout', ''))[-2000:],
+                       stderr_tail=_safe_verifier_text(getattr(result, 'stderr', ''))[-2000:])
+            return result
+        except BaseException as exc:
+            row.update(status='timeout' if isinstance(exc, TimeoutError) else 'failed',
+                       error_type=type(exc).__name__, error=_safe_verifier_text(str(exc))[:512])
+            raise
+        finally:
+            row['duration_seconds'] = time.monotonic() - command_started
+            row['finished_at'] = now()
+            receipt.pop('active_phase', None)
+            persist()
+
+    try:
+        if original_exec is not None:
+            try:
+                sandbox.exec = tracked_exec
+                patched = True
+            except (AttributeError, TypeError):
+                attempt['sandbox_exec_instrumentation'] = 'unavailable'
+        heartbeat_task = asyncio.create_task(heartbeat())
+        try:
+            result = await verifier.verify()
+            stdout_tail = _verifier_stdout_tail(verifier)
+            rewards = getattr(result, 'rewards', None)
+            if (isinstance(rewards, dict) and type(rewards.get('reward')) in (int, float)
+                    and rewards['reward'] == 0 and stdout_tail
+                    and re.search(r'/verifier/test\.sh: line \d+: uvx: command not found', stdout_tail)
+                    and re.search(r'/root/\.local/bin/env: No such file or directory', stdout_tail)):
+                from runtime.agents.verifier_audit import classify_verifier_logs, inspect_ctrf
+                logs, unreadable = [], False
+                paths = getattr(verifier, '_rollout_paths', None)
+                for name in ('test_stdout_path', 'test_stderr_path'):
+                    log_path = getattr(paths, name, None)
+                    if log_path is not None and Path(log_path).exists():
+                        try:
+                            logs.append(Path(log_path).read_text(encoding='utf-8', errors='replace'))
+                        except OSError:
+                            unreadable = True
+                classification, _ = classify_verifier_logs(logs,
+                    ctrf_executed=inspect_ctrf(owner.output)[0], unreadable=unreadable)
+                # Keep the existing bootstrap guard under the shared policy;
+                # recovered installation/test execution must not become an error.
+                if classification == 'VerifierError':
+                    attempt['failure_reason'] = 'verifier_bootstrap_tools_missing'
+                    raise RuntimeError('SkillsBench verifier bootstrap failed before test execution')
+            attempt['phase'] = 'completed'
+            attempt['return_code'] = 0
+            attempt['test_stdout_tail'] = stdout_tail
+            return result
+        except BaseException as exc:
+            attempt['phase'] = 'timed_out' if isinstance(exc, TimeoutError) else 'failed'
+            attempt['error_type'] = type(exc).__name__
+            attempt['error'] = _safe_verifier_text(str(exc))[:512]
+            attempt['test_stdout_tail'] = _verifier_stdout_tail(verifier)
+            raise
+        finally:
+            heartbeat_stop.set()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+            if patched:
+                sandbox.exec = original_exec
+    finally:
+        receipt['phase'] = attempt['phase']
+        receipt['finished_at'] = now()
+        persist()
 
 
 async def _audit_task_environment(cfg, run_id, key, task):
@@ -1120,25 +1438,58 @@ def execute_attempt(cfg, run_id, task, runtime, sample, context, output, factory
 
 def drain_capture(cfg, output, capture_client, session_id):
     """One producer barrier and native/hidden drain for every terminal path."""
+    import time
+
     import requests
+
     endpoint = cfg['serving']['base_url'].removesuffix('/v1').rstrip('/')
-    response = requests.post(endpoint + '/dycon/capture/engine/flush', json={'session_id': session_id},
-        timeout=cfg['capture'].get('flush_timeout_seconds') or cfg['capture']['finalize_seconds'])
-    response.raise_for_status()
-    value = response.json()
-    if value.get('failures'):
-        raise RuntimeError('Native capture drain failed: ' + str(value['failures']))
-    stopped = capture_client.stop(session_id)
-    write_json(Path(output) / 'capture-drain.json', {'schema_version': 1,
-        'session_id': session_id, 'native_flush': value, 'session_stop': stopped,
-        'order': ['bridge_closed', 'inflight_completed_or_cancelled', 'native_and_hidden_drained', 'session_stopped'],
-        'at': now()})
+    started_at, started = now(), time.monotonic()
+    receipt = {'schema_version': 1, 'session_id': session_id, 'started_at': started_at,
+               'phase': 'native_flush'}
+    try:
+        flush_started = time.monotonic()
+        response = requests.post(endpoint + '/dycon/capture/engine/flush', json={'session_id': session_id},
+            timeout=cfg['capture'].get('flush_timeout_seconds') or cfg['capture']['finalize_seconds'])
+        response.raise_for_status()
+        value = response.json()
+        receipt['native_flush_seconds'] = time.monotonic() - flush_started
+        if value.get('failures'):
+            raise RuntimeError('Native capture drain failed: ' + str(value['failures']))
+        receipt['native_flush'] = value
+        receipt['phase'] = 'session_stop'
+        stop_started = time.monotonic()
+        # Stop can wait for native output and export queues sequentially. The
+        # normal control-request timeout must not expire before these bounded
+        # drains can finish and persist their diagnostic. No producers remain.
+        stop_timeout = max(cfg['capture'].get('control_seconds', 10),
+                           cfg['capture'].get('finalize_request_seconds') or 0,
+                           2 * cfg['capture']['finalize_seconds'] + 30)
+        receipt['session_stop_timeout_seconds'] = stop_timeout
+        previous_timeout = getattr(capture_client, 'timeout', None)
+        try:
+            capture_client.timeout = stop_timeout
+            stopped = capture_client.stop(session_id)
+        finally:
+            capture_client.timeout = previous_timeout
+        receipt.update(session_stop=stopped, session_stop_seconds=time.monotonic() - stop_started,
+            order=['bridge_closed', 'inflight_completed_or_cancelled', 'native_and_hidden_drained', 'session_stopped'],
+            elapsed_seconds=time.monotonic() - started, phase='complete', finished_at=now())
+        write_json(Path(output) / 'capture-drain.json', receipt)
+    except Exception as exc:
+        receipt.update(failed=True, error_type=type(exc).__name__, error=_safe_verifier_text(str(exc))[:512],
+            elapsed_seconds=time.monotonic() - started, finished_at=now())
+        write_json(Path(output) / 'capture-drain.json', receipt)
+        raise
 
 
 def backend_failure_result(sample, context, output, started, error, *, bridge=None,
                            capture_session=None, agent_status=None, persist=True):
     """Retain independent agent/verifier/usage facts if finalization fails."""
     output = Path(output)
+    if getattr(bridge, 'limit_reason', None) == 'sample_completion_token_budget':
+        agent_status = 'SampleTokenBudgetExceeded'
+    elif getattr(bridge, 'limit_reason', None) == 'sample_token_usage_unknown':
+        agent_status = 'SampleTokenBudgetUsageUnknown'
     calls = [call for record in getattr(bridge, 'records', []) for call in record.get('model_calls', [])]
     known = [call.get('usage') or {} for call in calls if call.get('usage_known')]
     dependency = read_json(output / 'dependency-failure.json') if (output / 'dependency-failure.json').exists() else None
@@ -1148,17 +1499,49 @@ def backend_failure_result(sample, context, output, started, error, *, bridge=No
     if (official.get('completed') is True and isinstance(rewards, dict) and rewards
             and all(type(v) in (int, float) and 0 <= v <= 1 for v in rewards.values())):
         resolved = all(v == 1 for v in rewards.values())
-    status = 'EnvironmentSetupFailed' if dependency else 'CaptureError' if capture_session else type(error).__name__
+    if dependency:
+        status = 'EnvironmentSetupFailed'
+    elif agent_status in {'Submitted', 'AgentCompleted', 'AgentTimeout', 'OpenHandsError',
+                          'LimitsExceeded', 'reasoning_loop',
+                          'EnvironmentSetupFailed', 'TimeoutError', 'VerifierError'}:
+        status = agent_status
+    elif agent_status in {'SampleTokenBudgetExceeded', 'SampleTokenBudgetUsageUnknown'}:
+        status = agent_status
+    elif isinstance(error, TimeoutError):
+        status = 'TimeoutError'
+    elif 'verifier' in type(error).__name__.lower():
+        status = 'VerifierError'
+    elif 'acp' in (type(error).__name__ + ' ' + str(error)).lower():
+        status = 'OpenHandsError'
+    else:
+        status = type(error).__name__
+    capture_errors = []
+    capture_error_paths = [output / 'capture-finalization-error.json',
+                           output / 'capture-stop-error.json']
+    for capture_error_path in capture_error_paths:
+        if capture_error_path.exists():
+            capture_errors.append(read_json(capture_error_path).get('error', 'capture finalization failed'))
+    missing_receipts = [
+        {'request_id': record.get('request_id'),
+         'api_attempt_index': call.get('api_attempt_index'),
+         'status': call.get('status')}
+        for record in getattr(bridge, 'records', [])
+        for call in record.get('model_calls', []) if not call.get('usage_known')]
     result = {**sample.as_dict(), **context, 'exit_status': status, 'agent_exit_status': agent_status,
         'capture_status': 'partial' if capture_session else 'disabled', 'capture_session_id': capture_session,
-        'disposition': 'failed', 'error': repr(error), 'started_at': started, 'finished_at': now(),
+        'capture_errors': capture_errors, 'disposition': 'failed', 'error': repr(error),
+        'started_at': started, 'finished_at': now(),
         'raw_reward': rewards, 'resolved': resolved,
         'evaluation_status': 'raw_verifier_persisted' if official.get('completed') else 'not_run',
         'usage': {'prompt_tokens': sum(r.get('prompt_tokens', 0) for r in known),
                   'completion_tokens': sum(r.get('completion_tokens', 0) for r in known),
                   'cost': None, 'complete': len(known) == len(calls),
-                  'known_model_calls': len(known), 'model_calls': len(calls)},
-        'failure_type': 'dependency_error' if dependency else 'capture_finalization_error' if capture_session else 'backend_error'}
+                  'known_model_calls': len(known), 'model_calls': len(calls),
+                  'missing_model_call_receipts': missing_receipts},
+        'failure_type': 'dependency_error' if dependency else
+            'capture_finalization_error' if capture_errors else 'backend_error'}
+    result['termination_evidence'] = _terminal_evidence(output, agent_status=agent_status,
+        capture_status=result['capture_status'], evaluation_status=result['evaluation_status'], error=error)
     if dependency:
         result['dependency_failure'] = dependency
     if official:
@@ -1215,11 +1598,16 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
     import importlib.metadata
     import sys
 
+    from rollout import sample_token_budget as budget_module
     from rollout.adapters import openhands_bridge as bridge_module
     from runtime.agents import dependencies as dependency_module
     from runtime.agents import openhands as driver_module
+    from runtime.agents import verifier_audit as verifier_audit_module
+    from runtime.agents import verifier_tools as verifier_tools_module
     source_modules = [Path(__file__), Path(driver_module.__file__),
-                      Path(dependency_module.__file__), Path(bridge_module.__file__)]
+                      Path(dependency_module.__file__), Path(bridge_module.__file__),
+                      Path(budget_module.__file__), Path(verifier_tools_module.__file__),
+                      Path(verifier_audit_module.__file__)]
     dependency_ref = cfg['execution_context']['profile'].get('dependency_snapshot')
     dependency_path = Path(dependency_ref) if dependency_ref else None
     write_json(output / 'implementation-identity.json', {
@@ -1233,6 +1621,7 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
         'sdk_effective_timeout': None, 'sdk_request_phase': 'unknown',
         'timeout_evidence_policy': 'configured_driver_budget_is_not_actual_sdk_request_evidence'})
     capture, capture_client, capture_session, capture_status = None, None, None, "disabled"
+    capture_errors = []
     started = now()
     try:
         if cfg.get("capture", {}).get("enabled"):
@@ -1278,7 +1667,8 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
             with generation_phase(runtime):
                 from runtime.agents.lifecycle import run_cancellable
                 result = await run_cancellable(rollout, runtime.get("cancellation"), deadline,
-                    cfg["execution_context"]["profile"]["cleanup_seconds"])
+                    cfg["execution_context"]["profile"]["cleanup_seconds"],
+                    evidence_path=output / 'diagnostics/process-supervisor.json', binding=binding)
 
         result_row = _result_json(result)
         # This diagnostic is separate from immutable result/terminal receipts.
@@ -1322,7 +1712,12 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
         termination = ("AgentCompleted" if not result.error else
             "AgentTimeout" if "timeout" in str(result.error_category).lower() else "OpenHandsError")
         if result.error and bridge.limit_reason:
-            termination = 'reasoning_loop' if bridge.limit_reason == 'reasoning_loop' else 'LimitsExceeded'
+            if bridge.limit_reason == 'sample_completion_token_budget':
+                termination = 'SampleTokenBudgetExceeded'
+            elif bridge.limit_reason == 'sample_token_usage_unknown':
+                termination = 'SampleTokenBudgetUsageUnknown'
+            else:
+                termination = 'reasoning_loop' if bridge.limit_reason == 'reasoning_loop' else 'LimitsExceeded'
         dependency_failure = read_json(output / 'dependency-failure.json') if (output / 'dependency-failure.json').exists() else None
         if dependency_failure:
             termination = 'EnvironmentSetupFailed'
@@ -1361,6 +1756,12 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
         result_status, resolved, policy = _map_evaluation(result_row, report, capture_status)
         if result.error and termination in {'LimitsExceeded', 'reasoning_loop', 'EnvironmentSetupFailed'}:
             result_status = termination
+        if termination in {'SampleTokenBudgetExceeded', 'SampleTokenBudgetUsageUnknown'}:
+            result_status = termination
+        result_status, resolved, policy, verifier_audit = verifier_audit_module.audit_zero_evaluation(
+            output, task, result_status, resolved, policy, report)
+        if verifier_audit is not None:
+            write_json(output / 'diagnostics/verifier-zero-audit.json', verifier_audit)
         evaluation_id = "sb-" + hash_json({"attempt": context["attempt_id"],
             "report": sha256(report_path) if report_path.exists() else None})[:24]
         evaluation_report = output / "evaluation-report.json"
@@ -1372,6 +1773,7 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
                 "attempt_id": context["attempt_id"], "subject_sha256": subject_sha,
                 "raw_rewards": report.get("rewards"), "evaluation_status": outcome["status"],
                 "resolved": resolved, "success_policy": policy, "report_sha256": sha256(report_path),
+                "verifier_zero_audit": verifier_audit,
                 "evaluated_at": now()})
         from rollout.artifacts import import_rollout
         rid = import_rollout(cfg["project_root"], {"source": str(raw_path), "task": task,
@@ -1383,13 +1785,19 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
             "evaluation_id": evaluation_id if report_path.exists() else None,
             "evaluation_report": str(evaluation_report) if report_path.exists() else None})
         if capture_session and capture_client:
-            finalized = capture_client.finalize(capture_session, rollout_id=rid,
-                trajectory_path=str(raw_path), trajectory_sha256=trajectory_sha,
-                model_fingerprint=cfg["model"]["fingerprint"])
+            try:
+                finalized = capture_client.finalize(capture_session, rollout_id=rid,
+                    trajectory_path=str(raw_path), trajectory_sha256=trajectory_sha,
+                    model_fingerprint=cfg["model"]["fingerprint"])
+            except Exception as exc:
+                write_json(output / "capture-finalization-error.json",
+                           {"error": _safe_verifier_text(repr(exc))[:512], "error_type": type(exc).__name__, "at": now()})
+                raise
             capture_status = finalized["capture_status"]
             write_json(output / "capture-finalization.json", finalized)
-            if capture_status not in {"complete", "not_exported"} and not dependency_failure:
-                result_status = "CaptureError"
+            if capture_status not in {"complete", "not_exported"}:
+                capture_errors = finalized.get('errors') or finalized.get('failures') or [
+                    'capture finalization returned ' + str(capture_status)]
         journal(output, "artifacts_committed", binding, rollout_id=rid,
                 trajectory_sha256=trajectory_sha, subject_sha256=subject_sha,
                 report_sha256=sha256(report_path) if report_path.exists() else None,
@@ -1416,11 +1824,15 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
             "evaluation_status": outcome["status"] if report_path.exists() else "not_run",
             "evaluation_id": evaluation_id if report_path.exists() else None,
             "evaluation_policy": policy, "evaluation_report_sha256": sha256(evaluation_report) if report_path.exists() else None,
+            "verifier_zero_audit": verifier_audit,
             "subject_sha256": subject_sha, "capture_status": capture_status,
+            "capture_errors": capture_errors,
             "capture_session_id": capture_session, "cost": result_row["cost_usd"],
             "input_tokens": result_row["n_input_tokens"], "output_tokens": result_row["n_output_tokens"],
             "timings": {"duration_seconds": 0}, "started_at": started, "finished_at": now(),
-            "failure_type": "unsupported_reward_policy" if result_status == "UnsupportedRewardPolicy" else None,
+            "failure_type": "unsupported_reward_policy" if result_status == "UnsupportedRewardPolicy" else
+                "verifier_incomplete" if result_status == "VerifierError" else
+                "capture_finalization_error" if capture_errors else None,
             "can_reevaluate": False, "re_evaluation_reason": subject_manifest["re_evaluation_reason"]}
         calls = [call for record in bridge.records for call in record.get('model_calls', [])]
         known = [call.get('usage') or {} for call in calls if call.get('usage_known')]
@@ -1428,8 +1840,19 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
                            'completion_tokens': sum(u.get('completion_tokens', 0) for u in known),
                            'cost': result_row.get('cost_usd'),
                            'complete': len(known) == len(calls), 'known_model_calls': len(known),
-                           'model_calls': len(calls), 'source': 'all_physical_model_call_receipts'}
+                           'model_calls': len(calls),
+                           'missing_model_call_receipts': [
+                               {'request_id': record.get('request_id'),
+                                'api_attempt_index': call.get('api_attempt_index'),
+                                'status': call.get('status')}
+                               for record in bridge.records for call in record.get('model_calls', [])
+                               if not call.get('usage_known')],
+                           'source': 'all_physical_model_call_receipts'}
         result['input_tokens'], result['output_tokens'] = result['usage']['prompt_tokens'], result['usage']['completion_tokens']
+        result['termination_evidence'] = _terminal_evidence(output, agent_status=termination,
+            capture_status=capture_status,
+            evaluation_status=outcome['status'] if report_path.exists() else 'not_run')
+        result['sample_token_budget'] = bridge.token_budget.snapshot()
         if dependency_failure:
             result.update(dependency_failure=dependency_failure, failure_type='dependency_error',
                           exit_status='EnvironmentSetupFailed', disposition='failed')
@@ -1437,7 +1860,10 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
             result['limit_reason'] = bridge.limit_reason
             result['loop_detection'] = bridge.loop_hit
         from rollout.retry import disposition
-        result['disposition'] = 'failed' if dependency_failure else disposition(cfg, result['exit_status'])
+        result['disposition'] = ('failed' if dependency_failure else
+            'blocked' if capture_status not in {'complete', 'not_exported', 'disabled'}
+            and cfg['capture']['failure_policy'] == 'block_rollout' else
+            disposition(cfg, result['exit_status']))
         write_json(output / "attempt.json", result)
         return result
     except Cancelled as exc:

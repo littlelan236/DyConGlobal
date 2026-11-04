@@ -4,6 +4,7 @@ import shlex
 
 from core.io import hash_json, now, sha256, write_json
 from runtime.agents.dependencies import install_runtime, verify_snapshot
+from runtime.agents.verifier_tools import prepare_verifier_tools
 
 
 async def install_probe(env, client, planes, cfg, output):
@@ -31,17 +32,7 @@ async def install_probe(env, client, planes, cfg, output):
     # Some official verifier scripts run a uv installer before invoking uvx.
     # Preinstall the snapshot's hash-bound binary and normal shell environment;
     # keep the original verifier script and record this environment variant.
-    tools = await env.exec(
-        "mkdir -p /root/.local/bin && "
-        "{ test -x /root/.local/bin/uv || cp /opt/dycon-wheels/uv /root/.local/bin/uv; } && "
-        "{ test -x /root/.local/bin/uvx || "
-        "printf '%s\\n' '#!/bin/sh' 'exec /opt/dycon-wheels/uv tool run \"$@\"' > /root/.local/bin/uvx; } && "
-        "{ test -r /root/.local/bin/env || "
-        "printf '%s\\n' 'export PATH=/root/.local/bin:$PATH' > /root/.local/bin/env; } && "
-        "sha256sum /root/.local/bin/uv && /root/.local/bin/uv --version",
-        user="root", timeout_sec=30)
-    if tools.return_code:
-        raise RuntimeError("Offline verifier uv preinstallation failed")
+    tools = await prepare_verifier_tools(env)
     inventory = await env.exec("cat /etc/os-release && python3 --version && dpkg -l",
                                user="root", timeout_sec=60)
     if inventory.return_code:

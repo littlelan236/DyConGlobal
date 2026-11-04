@@ -73,6 +73,10 @@ def test_full_queue_spills_and_drains_without_loss(tmp_path):
         c.queue.drain_session("s", 10)
         assert c.queue.status()["failed"] == []
         assert c.queue.status()["spill_files"] == 0
+        status = c.queue.status()
+        assert status["submitted"] == 3 and status["persisted"] == 3
+        assert status["spilled_total"] >= 1 and status["pending_total"] == 0
+        assert status["queue_high_water"] >= 1 and status["spill_high_water"] >= 1
         assert (c.queue.root / "raw" / "first.npz").exists()
         assert (c.queue.root / "raw" / "second.npz").exists()
         assert (c.queue.root / "raw" / "third.npz").exists()
@@ -349,6 +353,20 @@ def test_missing_receipt_policy(tmp_path, policy):
         c.close()
 
 
+def test_empty_canonical_capture_reports_auditable_partial_reason(tmp_path):
+    c = controller(tmp_path)
+    try:
+        c.start(capture_request_metadata('s', 't', 'run', 'pending', 0, ['think_close']))
+        path = tmp_path / 'empty-trajectory.json'
+        write_json(path, {'messages': []})
+        result = c.finalize('s', rollout_id='rid', trajectory_path=str(path),
+                            trajectory_sha256=sha256(path), model_fingerprint='m')
+        assert result['capture_status'] == 'partial'
+        assert result['capture_diagnostics']['reason_codes'] == ['no_canonical_model_responses']
+    finally:
+        c.close()
+
+
 def test_query_does_not_wait_for_capture_and_keeps_format_error(cfg, monkeypatch):
     monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
     pytest.importorskip("minisweagent")
@@ -356,8 +374,8 @@ def test_query_does_not_wait_for_capture_and_keeps_format_error(cfg, monkeypatch
     from minisweagent.exceptions import FormatError
     from minisweagent.models.litellm_model import LitellmModel
 
-    from rollout.model import make_model
     from core.deadline import Deadline
+    from rollout.model import make_model
 
     cfg["capture"]["enabled"] = True
     md = capture_request_metadata("s", "t", "run", "pending", 0, ["think_close"], close_token_ids=[11])
@@ -474,7 +492,7 @@ def test_plugin_receipt_failure_does_not_become_api_500(tmp_path, monkeypatch, p
     import asyncio
     from types import SimpleNamespace
 
-    from runtime.serving.vllm_plugin import REQUEST_CONTEXT, DyConCapturePlugin
+    from runtime.serving.vllm_plugin import NATIVE_CONTEXT, REQUEST_CONTEXT, DyConCapturePlugin
 
     plugin = DyConCapturePlugin()
     plugin.staging = tmp_path / "staging"
@@ -490,9 +508,11 @@ def test_plugin_receipt_failure_does_not_become_api_500(tmp_path, monkeypatch, p
         prompt_token_ids=[10, 198],
         outputs=[SimpleNamespace(token_ids=[20, 11, 30], finish_reason="stop")],
         num_cached_tokens=0,
+        finished=True,
     )
 
     async def generate(*args, **kwargs):
+        await plugin.engine._add_request(SimpleNamespace(request_id="native", prompt_token_ids=[10, 198]))
         yield output
 
     called = []
@@ -507,8 +527,8 @@ def test_plugin_receipt_failure_does_not_become_api_500(tmp_path, monkeypatch, p
 
     async def run():
         token = REQUEST_CONTEXT.set({"session_id": "s", "anchors": ["think_close"]})
+        native_token = NATIVE_CONTEXT.set({})
         try:
-            await plugin.engine._add_request(SimpleNamespace(request_id="native", prompt_token_ids=[10, 198]))
             return [
                 row
                 async for row in plugin.engine.generate(
@@ -516,6 +536,7 @@ def test_plugin_receipt_failure_does_not_become_api_500(tmp_path, monkeypatch, p
                 )
             ]
         finally:
+            NATIVE_CONTEXT.reset(native_token)
             REQUEST_CONTEXT.reset(token)
 
     assert asyncio.run(run()) == [output]
@@ -531,8 +552,8 @@ def test_block_policy_saves_response_without_api_resampling(cfg, tmp_path, monke
     import litellm
     from minisweagent.models.litellm_model import LitellmModel
 
-    from rollout.model import make_model
     from core.deadline import Deadline
+    from rollout.model import make_model
     from runtime.serving.errors import CaptureError
 
     cfg["capture"].update(enabled=True, failure_policy="block_rollout")

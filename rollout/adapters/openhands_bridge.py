@@ -5,9 +5,9 @@ import copy
 import json
 import os
 import secrets
-import threading
 import select
 import socket
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,15 +15,23 @@ from uuid import uuid4
 
 import requests
 
+from core.action_identity import ActionIdentityUnavailable, canonical_action
 from core.cancellation import Cancelled
 from core.io import hash_json, now, sha256, write_json
 from hidden.backends.vllm.online import CaptureClient
-from rollout.adapters.openhands import (OpenHandsPolicy, Response, parse_response, request_role,
-                                        preserve_reasoning_history, OpenHandsLimit, OpenHandsProtocolError)
+from rollout.adapters.openhands import (
+    OpenHandsLimit,
+    OpenHandsPolicy,
+    OpenHandsProtocolError,
+    Response,
+    parse_response,
+    preserve_reasoning_history,
+    request_role,
+)
 from rollout.decision.coordinator import DecisionCoordinator, active
 from rollout.loop_escape import LoopEscapeHistory
+from rollout.sample_token_budget import BudgetStopped, SampleTokenBudget
 from rollout.step_loop import StepLoopDetector
-from core.action_identity import canonical_action, ActionIdentityUnavailable
 
 
 class UpstreamModelError(RuntimeError):
@@ -56,6 +64,7 @@ class OpenHandsBridge:
         self.control_token = self.runtime.get('cancel_token', os.environ.get('DYCON_CANCEL_TOKEN', ''))
         self.secret = secrets.token_urlsafe(32)
         self.records = []
+        self.token_budget = SampleTokenBudget(cfg, binding)
         self.query_ids = {}
         self.decisions = 0
         self.lock = threading.Lock()
@@ -92,6 +101,16 @@ class OpenHandsBridge:
 
     def _state(self):
         return getattr(self._request_state, "value", None)
+
+    def _budget_stop(self, reason):
+        self.limit_reason = reason
+        receipt = {'binding': self.binding, 'reason': reason, 'at': now(),
+                   'budget': self.token_budget.snapshot()}
+        write_json(self.output / 'sample-token-budget.json', receipt)
+        status = ('SampleTokenBudgetExceeded' if reason == 'sample_completion_token_budget'
+                  else 'SampleTokenBudgetUsageUnknown')
+        return OpenHandsLimit({'content': reason, 'extra': {'exit_status': status,
+                              'limit_reason': reason, 'budget': receipt['budget']}})
 
     def _event(self, name, state=None, **details):
         state = state if state is not None else self._state()
@@ -157,11 +176,20 @@ class OpenHandsBridge:
                 if state["handler_terminal"] or state["response_write_finished"]:
                     return
             try:
+                if state["done"].is_set():
+                    return
+                if connection.fileno() < 0:
+                    if state["done"].is_set():
+                        return
+                    self._peer_lost(state, "peer_socket_closed")
+                    return
                 if select.select([connection], [], [], 0)[0]:
                     if not connection.recv(1, socket.MSG_PEEK):
                         self._peer_lost(state, "peer_eof")
                         return
             except (OSError, ValueError) as exc:
+                if state["done"].is_set():
+                    return
                 self._peer_lost(state, "peer_socket_error", type(exc).__name__)
                 return
 
@@ -324,8 +352,21 @@ class OpenHandsBridge:
                 if capture:
                     body["dycon_capture"] = capture
                 api_id = (capture or {}).get('api_attempt_id') or uuid4().hex
+                try:
+                    while True:
+                        self._check()
+                        allowance = self.token_budget.reserve(api_id, role, body['max_tokens'], record['request_id'])
+                        if allowance is not None:
+                            break
+                        time.sleep(.05)
+                except BudgetStopped as exc:
+                    raise self._budget_stop(exc.reason) from exc
+                body['max_tokens'] = allowance
+                if body.get('thinking_token_budget') is not None:
+                    body['thinking_token_budget'] = min(body['thinking_token_budget'], max(0, allowance - 1))
                 if body.get('dycon_request_owner'):
                     body['dycon_request_owner']['api_attempt_id'] = api_id
+                    body['dycon_request_owner']['required_max_tokens'] = allowance
                 call = {"request_sha256": hash_json(body), "seed": seed,
                         "capture": copy.deepcopy(capture), "started_at": now(), 'status': 'running', 'api_attempt_id': api_id}
                 record["model_calls"].append(call)
@@ -339,6 +380,7 @@ class OpenHandsBridge:
                             self.cfg["serving"]["api_key_env"], "EMPTY")},
                         timeout=self.deadline.remaining(self.cfg["timeouts"]["model_seconds"]))
                 except BaseException as exc:
+                    self.token_budget.record_unknown(api_id, role)
                     call.update(status='cancelled' if isinstance(exc, Cancelled) else 'failed',
                                 error_type=type(exc).__name__, finished_at=now(), usage_known=False)
                     self._persist(record)
@@ -349,13 +391,35 @@ class OpenHandsBridge:
                 self._event("upstream_terminal", state=http_state,
                             status="http_response", http_status=response.status_code)
                 if not response.ok:
+                    self.token_budget.record_unknown(api_id, role)
                     call.update(status="failed", http_status=response.status_code, finished_at=now())
                     try:payload=response.json()
                     except ValueError:payload={'error':{'message':'Upstream model request failed','type':'upstream_error'}}
                     raise UpstreamModelError(response.status_code,payload)
-                raw_response = response.json()
+                try:
+                    raw_response = response.json()
+                except (ValueError, TypeError):
+                    self.token_budget.record_unknown(api_id, role)
+                    raise self._budget_stop('sample_token_usage_unknown')
+                usage = raw_response.get("usage", {})
+                budget_error = None
+                budget_exceeded = False
+                if self.token_budget.limit is not None:
+                    try:
+                        budget_row = self.token_budget.record(api_id, role, usage)
+                        budget_exceeded = budget_row['exhausted']
+                    except BudgetStopped as exc:
+                        budget_error = self._budget_stop(exc.reason)
+                    if budget_exceeded:
+                        self.limit_reason = "sample_completion_token_budget"
                 call.update(status="completed", response_id=raw_response.get("id"), response=raw_response,
-                            usage=raw_response.get("usage", {}), usage_known=bool(raw_response.get('usage')), finished_at=now())
+                            usage=usage, usage_known=bool(usage) and budget_error is None,
+                            finished_at=now())
+                if self.token_budget.limit is not None:
+                    budget_summary = self.token_budget.snapshot()
+                    call['sample_budget'] = {key: budget_summary.get(key) for key in
+                                            ('limit', 'completion_tokens', 'by_role', 'exhausted', 'usage_unknown')}
+                    call['sample_budget']['ledger_path'] = str(self.token_budget.path)
                 if self.runtime.get('request_control_enabled'):
                     owner = body['dycon_request_owner']
                     endpoint = self.cfg['serving']['base_url'].removesuffix('/v1').rstrip('/')
@@ -372,6 +436,10 @@ class OpenHandsBridge:
                     raw_response['dycon_native_finish_reason'] = native['finish_reason']
                     raw_response['dycon_reasoning_loop'] = native.get('reasoning_loop')
                 self._persist(record)
+                if budget_error is not None:
+                    raise budget_error
+                if budget_exceeded:
+                    raise self._budget_stop('sample_completion_token_budget')
                 result = Response(raw_response)
                 self._check()
                 return result
@@ -394,6 +462,8 @@ class OpenHandsBridge:
                         client = CaptureClient(self.runtime["capture_control_url"],
                                                timeout=self.cfg["capture"]["control_seconds"])
                         client.wait_output(metadata["session_id"], metadata["step_id"], raw["id"])
+            if self.limit_reason in {'sample_completion_token_budget', 'sample_token_usage_unknown'}:
+                raise self._budget_stop(self.limit_reason)
             if role == "agent_decision":
                 selected = parse_response(raw, original)
                 try:
@@ -425,7 +495,8 @@ class OpenHandsBridge:
                           "protocol" if isinstance(exc, OpenHandsProtocolError) else type(exc).__name__)
                 if isinstance(exc, OpenHandsLimit):
                     payload = exc.messages[0].get('extra', {}) if exc.messages else {}
-                    self.limit_reason = self.limit_reason or ('reasoning_loop' if payload.get('exit_status') == 'reasoning_loop' else 'generation_limit')
+                    self.limit_reason = self.limit_reason or payload.get('limit_reason') or (
+                        'reasoning_loop' if payload.get('exit_status') == 'reasoning_loop' else 'generation_limit')
                 if isinstance(exc, OpenHandsProtocolError):
                     self.step_loop.clear()
                 setattr(exc, 'dycon_request_id', record['request_id'])

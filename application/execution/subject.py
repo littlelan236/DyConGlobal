@@ -29,6 +29,11 @@ def verify_subject(root, row):
             if (manifest.get("schema_version") != 1 or manifest.get("kind") not in {"workspace", "web_trace", "live_state"}
                     or manifest.get("kind") != row.get("evaluation_subject", {}).get("kind")):
                 raise ValueError("Invalid evaluation subject manifest")
+            if manifest["kind"] == "workspace" and "output_inventory" in manifest:
+                if (type(manifest.get("complete")) is not bool
+                        or manifest["complete"] != (not manifest.get("missing_outputs")
+                                                     and not manifest.get("rejected_outputs"))):
+                    raise ValueError("Workspace output inventory conflicts with completeness")
             paths = set()
             for output in manifest["outputs"]:
                 if output["path"] in paths:
@@ -106,57 +111,85 @@ async def export_workspace(env, output_paths, target, binding, task_sha256, imag
     target = Path(target)
     target.mkdir(parents=True, exist_ok=True)
     (target / "probes").mkdir(parents=True, exist_ok=True)
-    rows, missing = [], []
+    rows, missing, rejected, inventory = [], [], [], []
     for index, raw in enumerate(output_paths):
-        source = safe_output_path(raw)
+        try:
+            source = safe_output_path(raw)
+        except ValueError as exc:
+            rejected.append(str(raw))
+            inventory.append({"required_path": str(raw), "status": "rejected",
+                              "reason": "unsafe_path", "error_type": type(exc).__name__})
+            continue
         quoted = shlex.quote(source)
         probe = await env.exec(
-            "test ! -L " + quoted + " && { if test -f " + quoted + "; then printf 'file\n'; "
-            "elif test -d " + quoted + "; then printf 'directory\n'; else exit 1; fi; } && stat -c '%a' " + quoted,
+            "if test -L " + quoted + "; then printf 'symlink\n'; exit 2; fi; "
+            "if test -f " + quoted + "; then printf 'file\n'; "
+            "elif test -d " + quoted + "; then printf 'directory\n'; "
+            "else printf 'missing\n'; exit 1; fi; stat -c '%a' " + quoted,
             timeout_sec=20, user="root")
         write_json(target / "probes" / f"{index:03d}.json", {
-            "schema_version": 1, "probe_version": "workspace-kind-mode-v2",
+            "schema_version": 1, "probe_version": "workspace-kind-mode-v3",
             "source_path": source, "return_code": probe.return_code,
             "stdout": probe.stdout, "stderr": getattr(probe, "stderr", "")})
         if probe.return_code != 0:
-            missing.append(source)
+            kind = (probe.stdout or "").splitlines()[0] if probe.stdout else ""
+            if kind == "missing":
+                missing.append(source)
+                inventory.append({"required_path": source, "status": "missing",
+                                  "reason": "required_output_not_found"})
+            else:
+                rejected.append(source)
+                inventory.append({"required_path": source, "status": "rejected",
+                                  "reason": "output_probe_failed", "probe_return_code": probe.return_code})
             continue
         lines = probe.stdout.splitlines()
         if len(lines) < 2 or lines[0] not in {"file", "directory"}:
-            raise ValueError("Could not classify submission output: " + source)
+            rejected.append(source)
+            inventory.append({"required_path": source, "status": "rejected",
+                              "reason": "output_probe_unclassified"})
+            continue
         kind, mode = lines[0], lines[1].strip()
         destination = target / "outputs" / f"{index:03d}"
         destination.mkdir(parents=True, exist_ok=True)
-        if kind == "file":
-            file = destination / PurePosixPath(source).name
-            await env.download_file(source, file)
-            if file.is_symlink() or not file.is_file():
-                raise ValueError("Submission export is not a regular file")
-            record = {"kind": "file", "source_path": source,
-                      "path": file.relative_to(target).as_posix(), "sha256": sha256(file),
-                      "size": file.stat().st_size, "mode": mode}
-        else:
-            archive_name = PurePosixPath(source).name + ".tar.gz"
-            file = destination / archive_name
-            remote_archive = "/tmp/dycon-subject-" + uuid.uuid4().hex + ".tar.gz"
-            parent, name = shlex.quote(str(PurePosixPath(source).parent)), shlex.quote(PurePosixPath(source).name)
-            try:
-                packed = await env.exec("tar -czf " + shlex.quote(remote_archive) + " -C " + parent + " " + name,
-                                        timeout_sec=300, user="root")
-                if packed.return_code != 0:
-                    raise RuntimeError("Could not archive submission directory: " + source)
-                await env.download_file(remote_archive, file)
-            finally:
-                await env.exec("rm -f " + shlex.quote(remote_archive), timeout_sec=20, user="root")
-            if file.is_symlink() or not file.is_file():
-                raise ValueError("Directory submission export is not a regular archive")
-            record = {"kind": "directory_archive", "source_path": source,
-                      "path": file.relative_to(target).as_posix(), "sha256": sha256(file),
-                      "size": file.stat().st_size, "mode": mode}
+        try:
+            if kind == "file":
+                file = destination / PurePosixPath(source).name
+                await env.download_file(source, file)
+                if file.is_symlink() or not file.is_file():
+                    raise ValueError("Submission export is not a regular file")
+                record = {"kind": "file", "source_path": source,
+                          "path": file.relative_to(target).as_posix(), "sha256": sha256(file),
+                          "size": file.stat().st_size, "mode": mode}
+            else:
+                archive_name = PurePosixPath(source).name + ".tar.gz"
+                file = destination / archive_name
+                remote_archive = "/tmp/dycon-subject-" + uuid.uuid4().hex + ".tar.gz"
+                parent, name = shlex.quote(str(PurePosixPath(source).parent)), shlex.quote(PurePosixPath(source).name)
+                try:
+                    packed = await env.exec("tar -czf " + shlex.quote(remote_archive) + " -C " + parent + " " + name,
+                                            timeout_sec=300, user="root")
+                    if packed.return_code != 0:
+                        raise RuntimeError("Could not archive submission directory")
+                    await env.download_file(remote_archive, file)
+                finally:
+                    await env.exec("rm -f " + shlex.quote(remote_archive), timeout_sec=20, user="root")
+                if file.is_symlink() or not file.is_file():
+                    raise ValueError("Directory submission export is not a regular archive")
+                record = {"kind": "directory_archive", "source_path": source,
+                          "path": file.relative_to(target).as_posix(), "sha256": sha256(file),
+                          "size": file.stat().st_size, "mode": mode}
+        except Exception as exc:
+            rejected.append(source)
+            inventory.append({"required_path": source, "status": "rejected",
+                              "reason": "export_failed", "error_type": type(exc).__name__})
+            continue
         rows.append(record)
+        inventory.append({"required_path": source, "status": "exported",
+                          "output_index": len(rows) - 1, "artifact_path": record["path"]})
     manifest = {"schema_version": 1, "kind": "workspace", "binding": binding,
                 "task_package_sha256": task_sha256, "image_identity": image_identity,
-                "outputs": rows, "missing_outputs": missing, "complete": not missing,
+                "outputs": rows, "missing_outputs": missing, "rejected_outputs": rejected,
+                "output_inventory": inventory, "complete": not missing and not rejected,
                 "re_evaluation": False, "re_evaluation_reason": "Live sandbox required; file export is not full state"}
     path = target / "subject.json"
     if path.exists() and read_json(path) != manifest:

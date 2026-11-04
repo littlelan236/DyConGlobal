@@ -239,6 +239,11 @@ class AsyncExportQueue:
         self._closed = False
         self._failed: list[dict[str, Any]] = []
         self._written = 0
+        self._active_writers = 0
+        self._submitted = 0
+        self._spilled = 0
+        self._queue_high_water = 0
+        self._spill_high_water = 0
         self._worker = threading.Thread(target=self._run, name="dycon-capture-export", daemon=True)
         self._spill_queue: queue.Queue[_SpillItem | None] = queue.Queue()
         self._spill_worker = threading.Thread(target=self._run_spill, name="dycon-capture-spill", daemon=True)
@@ -288,6 +293,10 @@ class AsyncExportQueue:
                 if item.reservation and self.spool:
                     self.spool.budget.release(item.reservation)
                 self._spill_queue.put(spill)
+                with self._lock:
+                    self._submitted += 1
+                    self._spilled += 1
+                    self._spill_high_water = max(self._spill_high_water, self._spill_queue.qsize())
                 return True
             except Exception as exc:
                 if item.reservation and self.spool:
@@ -300,6 +309,9 @@ class AsyncExportQueue:
                 return False
         with self.journal.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"sample_id": item.sample_id, "status": "queued", "at": now()}) + "\n")
+        with self._lock:
+            self._submitted += 1
+            self._queue_high_water = max(self._queue_high_water, self.queue.qsize())
         return True
 
     def _write_spill(self, item: _ExportItem) -> _SpillItem:
@@ -345,6 +357,8 @@ class AsyncExportQueue:
             if item is None:
                 self.queue.task_done()
                 return
+            with self._lock:
+                self._active_writers += 1
             try:
                 self._persist(item)
                 with self._lock:
@@ -364,6 +378,8 @@ class AsyncExportQueue:
                 with self._pending_condition:
                     self._pending_sessions[item.metadata["session_id"]] -= 1
                     self._pending_condition.notify_all()
+                with self._lock:
+                    self._active_writers -= 1
                 self.queue.task_done()
 
     def _run_spill(self):
@@ -372,6 +388,8 @@ class AsyncExportQueue:
             if item is None:
                 self._spill_queue.task_done()
                 return
+            with self._lock:
+                self._active_writers += 1
             try:
                 metadata = read_json(item.metadata_path)
                 with np.load(item.tensor_path, allow_pickle=False) as archive:
@@ -392,6 +410,8 @@ class AsyncExportQueue:
                 with self._pending_condition:
                     self._pending_sessions[item.session_id] = max(0, self._pending_sessions.get(item.session_id, 1) - 1)
                     self._pending_condition.notify_all()
+                with self._lock:
+                    self._active_writers -= 1
                 self._spill_queue.task_done()
 
     def drain_session(self, session_id, timeout):
@@ -475,8 +495,16 @@ class AsyncExportQueue:
                 "queued": self.queue.qsize(),
                 "persisted": self._written,
                 "failed": list(self._failed),
+                "failed_count": len(self._failed),
                 "spill_pending": self._spill_queue.qsize(),
                 "spill_files": len(list(self.spill.glob("*.json"))),
+                "pending_by_session": dict(self._pending_sessions),
+                "pending_total": sum(self._pending_sessions.values()),
+                "active_writers": self._active_writers,
+                "submitted": self._submitted,
+                "spilled_total": self._spilled,
+                "queue_high_water": self._queue_high_water,
+                "spill_high_water": self._spill_high_water,
                 "closed": self._closed,
             }
 
@@ -559,6 +587,33 @@ class OnlineCaptureController:
         self._disk_failure_lock = threading.Lock()
         self._disk_failure_seen = set()
         self._disk_failures_by_session = {}
+        self._control_lock = threading.Lock()
+        self._control_metrics = {"active": 0, "max_active": 0, "requests": 0,
+                                 "failures": 0, "duration_seconds_total": 0.0,
+                                 "duration_seconds_max": 0.0}
+
+    def control_request_started(self):
+        started = time.monotonic()
+        with self._control_lock:
+            self._control_metrics["active"] += 1
+            self._control_metrics["requests"] += 1
+            self._control_metrics["max_active"] = max(
+                self._control_metrics["max_active"], self._control_metrics["active"])
+        return started
+
+    def control_request_finished(self, started, status_code):
+        elapsed = time.monotonic() - started
+        with self._control_lock:
+            self._control_metrics["active"] = max(0, self._control_metrics["active"] - 1)
+            self._control_metrics["duration_seconds_total"] += elapsed
+            self._control_metrics["duration_seconds_max"] = max(
+                self._control_metrics["duration_seconds_max"], elapsed)
+            if status_code >= 500:
+                self._control_metrics["failures"] += 1
+
+    def control_status(self):
+        with self._control_lock:
+            return dict(self._control_metrics)
 
     def write_configuration(self):
         """Preserve legacy NAS config bytes and version changed configurations."""
@@ -1368,6 +1423,22 @@ class OnlineCaptureController:
             and not coverage["missing"]
             and not any(f.get("session_id") == session_id for f in self.queue.status()["failed"])
         )
+        reasons = []
+        if not assistant:
+            reasons.append('no_canonical_model_responses')
+        if session.options.get('failures'):
+            reasons.append('capture_session_failures')
+        failed_samples = [s.get('sample_id') for s in session.samples if s.get('status') == 'failed']
+        if failed_samples:
+            reasons.append('capture_sample_export_failed')
+        queue_failures = [f for f in self.queue.status()['failed'] if f.get('session_id') == session_id]
+        if queue_failures:
+            reasons.append('capture_export_queue_failed')
+        if coverage['missing']:
+            reasons.append('missing_reasoning_hidden_targets')
+        if branch_coverage and branch_coverage['missing']:
+            reasons.append('missing_parallel_branch_hidden_targets')
+        old_status = session.status
         if not self.export_enabled:
             session.status = "not_exported"
         elif self.spool:
@@ -1382,6 +1453,17 @@ class OnlineCaptureController:
             )
         else:
             session.status = "complete" if complete else "partial"
+        if session.status == 'pending_upload':
+            reasons.append('capture_publication_pending')
+        diagnostics = {'schema_version': 1, 'session_id': session_id, 'rollout_id': rollout_id,
+            'old_status': old_status, 'new_status': session.status, 'reason_codes': reasons,
+            'coverage': coverage, 'branch_coverage': branch_coverage,
+            'failed_sample_ids': failed_samples, 'export_failures': queue_failures,
+            'session_failures': session.options.get('failures', []),
+            'accepted_native_request_ids': native_ids, 'observed_at': now()}
+        self._write(f'sessions/{session_id}/finalization-diagnostics.json', diagnostics)
+        value['capture_diagnostics'] = diagnostics
+        session.finalization = value
         self._record_manifests(session_id, session.default_request.to_dict(), session_status=session.status)
         with self._lock:
             for did in [key for key, record in self.parallel_decisions.items()
@@ -1471,6 +1553,10 @@ class OnlineCaptureController:
             return entry
 
     def stop(self, session_id: str):
+        started = time.monotonic()
+        stop_evidence = {"session_id": session_id, "started_at": now(),
+                         "queue_before": self.queue.status()}
+        native_started = time.monotonic()
         with self._output_condition:
             session = self.sessions.get(session_id)
             if session is None:
@@ -1484,9 +1570,24 @@ class OnlineCaptureController:
                     lambda: not (required_requests - self.request_outputs.keys()),
                     timeout=self.config.get('finalize_seconds', 120)):
                 missing = sorted(required_requests - self.request_outputs.keys())
+                stop_evidence.update(phase="native_output_drain", missing_request_ids=missing,
+                    native_output_drain_seconds=time.monotonic() - native_started,
+                    controller_requests=self.control_status(), failed=True, finished_at=now())
+                self._write_failure_artifact(f"sessions/{session_id}/stop-diagnostics.json", stop_evidence)
                 self.failure(session_id, 'native_output_drain_timeout', missing_request_ids=missing)
                 raise TimeoutError('Native output drain incomplete: ' + ','.join(missing))
-        self.queue.drain_session(session_id, self.config.get('finalize_seconds', 120))
+        native_elapsed = time.monotonic() - native_started
+        export_started = time.monotonic()
+        try:
+            self.queue.drain_session(session_id, self.config.get('finalize_seconds', 120))
+        except Exception as exc:
+            stop_evidence.update(phase="export_queue_drain", native_output_drain_seconds=native_elapsed,
+                export_queue_drain_seconds=time.monotonic() - export_started,
+                queue_at_failure=self.queue.status(), controller_requests=self.control_status(),
+                error_type=type(exc).__name__, failed=True, finished_at=now())
+            self._write_failure_artifact(f"sessions/{session_id}/stop-diagnostics.json", stop_evidence)
+            raise
+        export_elapsed = time.monotonic() - export_started
         with self._lock:
             session = self.sessions.get(session_id)
             if session is None:
@@ -1499,13 +1600,21 @@ class OnlineCaptureController:
             value = {'session_id':session_id,'status':session.status,
                 'metadata':self._request_summary(session.default_request),
                 'samples':len(session.samples),'metrics':dict(session.metrics)}
+        stop_evidence.update(phase="completed", native_output_drain_seconds=native_elapsed,
+            export_queue_drain_seconds=export_elapsed, total_seconds=time.monotonic() - started,
+            queue_after=self.queue.status(), controller_requests=self.control_status(),
+            failed=False, finished_at=now())
+        value["stop_diagnostics"] = stop_evidence
+        self._write(f"sessions/{session_id}/stop-diagnostics.json", stop_evidence)
         # Global manifest locks, journal hashing and fsync must not block bind/output.
         if metadata is not None:
             self._record_manifests(session_id, metadata, session_status='stopped')
         value.update(export=self.queue.status(), files={
             'queue.jsonl':sha256(self.queue.journal) if self.queue.journal.exists() else None})
         self._write(f'sessions/{session_id}/receipt.json', value)
-        return self.status(session_id)
+        status = self.status(session_id)
+        status["stop_diagnostics"] = stop_evidence
+        return status
 
     def status(self, session_id: str | None = None):
         with self._lock:
@@ -1513,6 +1622,7 @@ class OnlineCaptureController:
                 return {
                     "sessions": [self._session_status(s) for s in self.sessions.values()],
                     "export": self.queue.status(),
+                    "control": self.control_status(),
                 }
             session = self.sessions.get(session_id)
             if session is None:
@@ -1528,6 +1638,7 @@ class OnlineCaptureController:
             "samples": list(session.samples),
             "metrics": dict(session.metrics),
             "export": self.queue.status(),
+            "control": self.control_status(),
         }
 
     def results(self, session_id: str):
@@ -1576,6 +1687,7 @@ class CaptureControlServer:
                 return
 
             def _json(self, status, value):
+                self._dycon_status_code = status
                 body = json.dumps(value, ensure_ascii=False).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -1604,6 +1716,14 @@ class CaptureControlServer:
                     return self._json(404, {"error": str(exc)})
 
             def do_POST(self):
+                started = controller_ref.control_request_started()
+                self._dycon_status_code = 500
+                try:
+                    return self._dispatch_post()
+                finally:
+                    controller_ref.control_request_finished(started, self._dycon_status_code)
+
+            def _dispatch_post(self):
                 try:
                     value = self._read()
                     if self.path == "/dycon/capture/session/start":
