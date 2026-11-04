@@ -1,6 +1,6 @@
 # Action 分析与共享索引
 
-2026-10-21：action 新产物与 difficulty 一样，独立于任何 source run，统一写入项目级
+Action 新产物与 difficulty 一样，独立于任何 source run，统一写入项目级
 action/outputs/ANALYSIS_ID/；共享 hidden 索引写入 action/datasets/INDEX_ID/。
 无需建立 analysis run，来源 run 只提供轨迹与证据。即使配置来自全局 --run-id，产物位置也不改变。
 
@@ -128,9 +128,9 @@ action 复用已有 hidden 与 task 分区，不重复提取 latent，不向当�
     .venvs/analysis/bin/dycon action-review-length NEW_ID --audit-id AUDIT_ID --action-id ACTION_ID
     .venvs/analysis/bin/dycon action-review-length NEW_ID --check
 
-最终结果ID：review-length-submitted302-final-20261026。使用专属--check，不传给七分类action-check。
+使用专属 `--check`，不传给七分类 `action-check`。
 
-## 分支 action 统计、熵与进度曲线（2026-10-26，schema v2）
+## 分支 action 统计、熵与进度曲线
 
 使用 `dycon action-branch-stats`，最小绘图单位为 `source_run_id + rollout_id`，
 不按 task 合并重复轨迹。`--task-id` 已移除，直接用 `--rollout-id` 或 binding 清单选择。
@@ -157,7 +157,7 @@ action 复用已有 hidden 与 task 分区，不重复提取 latent，不向当�
 run 平均图 `per-run/all-runs/both` 保留，采用0–100%进度和轨迹等权平均；默认仍为 `both`。
 完整公式、参数、选择边界和历史兼容见 [分支 action 统计](BRANCH-ACTION-STATS-CN.md)。
 
-### 单 run 全部轨迹平均：直接命令（2026-10-27）
+### 单 run 全部轨迹平均
 
 ```bash
 .venvs/analysis/bin/dycon action-branch-stats NEW_RUN_MEAN_ID \
@@ -168,6 +168,5 @@ run 平均图 `per-run/all-runs/both` 保留，采用0–100%进度和轨迹等�
 省略rollout和终态筛选表示当前run的全部默认eligible/final轨迹；不要把per-trajectory的
 “每条一图”与per-run的“轨迹平均一图”混淆。单run和跨run平均都先逐轨迹归一化到0–100%，
 再按轨迹等权平均；无parallel step的轨迹不补零，实际分母见curves/per-run.csv中的n_trajectories。
-最新示例`consensus32-all-trajectory-average-20261027`选择86条轨迹（76条有parallel step），
-详见[模式对照与平均示例](BRANCH-ACTION-STATS-CN.md)。
+具体样本覆盖以输出 receipt 和 `curves/per-run.csv` 为准。
 

@@ -1,25 +1,28 @@
 # DyConGlobal
 
-当前 active run 统一使用 schema-2。历史 runs 已通过一次性迁移转为 `repeat_count=1` 的 active run；原始 schema-1 目录保存在 `archive/runs-schema1/`，不再由生产入口读取。迁移凭证位于 `migration/runs-to-repetition-20261024.json`，切换标记位于 `migration/CUTOVER.json`。
+DyConGlobal runs coding-agent benchmarks and manages their rollout, evaluation, capture, and offline analysis. The project root on the Linux server is `/home/wangtianyi/DyConGlobal`.
 
-Coding-agent rollout、官方 SWE-bench harness、在线 hidden capture、离线 vLLM 重放及 action/difficulty 分析工程。远程工程位于 `/home/wangtianyi/DyConGlobal`，NAS 根目录由根 `config.yaml` 的 `paths.nas_root` 配置。
+## Documentation
 
-## 使用文档
-
-| 文档 | 用途 |
+| Document | Purpose |
 |---|---|
-| [最小运行清单](docs/MINIMUM-RUN-CN.md) | 每个功能模块的最少操作、统一 run 入口、产物与恢复 |
-| [SWE-bench + OpenHands](docs/SWEBENCH-OPENHANDS-CN.md) | 基础 SWE-bench OpenHands profile、patch、capture 与并行适配 |
-| [任务入口与接口约定](docs/ENTRYPOINTS.md) | 全部 CLI、输入格式、环境、token/site/label 契约及能力边界 |
-| [Consensus Steering Dataset 与 LDA / t-SNE / UMAP](docs/STEERING-DATASET-LDA-CN.md) | 全候选 hidden 数据集、外盘缓存、单轴 LDA、二维嵌入、冻结重绘与校验 |
-| [多 GPU、每卡 TP=1](docs/MULTI-GPU-TP1-CN.md) | 单 run 按空闲卡分配完整轨迹、每卡 CPU worker 上限、状态与克隆配置 |
-| [WebArena Verified 接入评估](docs/WEBARENA-VERIFIED-COMPATIBILITY-ASSESSMENT-CN.md) | Verified 任务、mini agent、NAS 容器与离线 harness 的实现边界与依据 |
-| [WebArena Verified 运行指南](docs/WEBARENA-VERIFIED-OPERATIONS-CN.md) | 固定版本安装、Full/Hard/Smoke 导入、浏览器环境验收及离线评分 |
-| [容器环境修复](docs/container-environment-repair-cn.md) | Docker/NAS 镜像、依赖、线程、网络、harness 环境问题的定位与验收 |
+| [Minimum run guide](docs/MINIMUM-RUN-CN.md) | Common setup, run, evaluation, recovery, and analysis workflows |
+| [Entrypoints and contracts](docs/ENTRYPOINTS.md) | CLI families, configuration ownership, evidence, and identity rules |
+| [Benchmark operations](docs/BENCHMARKS-CN.md) | SWE-bench, SkillsBench, WebArena Verified, and Harbor integration |
+| [Capture operations](docs/CAPTURE-CN.md) | Online capture, publication, recovery, and downstream use |
+| [Container operations](docs/CONTAINER-CN.md) | Docker storage, task images, and environment checks |
+| [Action entropy policy](docs/ACTION-ENTROPY-RUN-POLICY-CN.md) | Run-frozen consensus representative and entropy rules |
+| [Multi-GPU TP=1](docs/MULTI-GPU-TP1-CN.md) | Per-GPU serving and trajectory scheduling |
+| [Steering datasets](docs/STEERING-DATASET-LDA-CN.md) | Immutable branch-hidden datasets and visualizations |
+| [Difficulty feature contract](docs/DIFFICULTY-FEATURE-CONTRACT-CN.md) | Hidden identity, eligibility, task splits, and Ridge input |
+| [Trajectory comparison](docs/TRAJECTORY-COMPARISON-CN.md) | Resolved repetitions and terminal workload curves |
+| [Action analysis](action/README.md) | Canonical action analysis and shared hidden indexes |
+| [Difficulty estimation](difficulty/README.md) | Data, training, prediction, and evaluation |
+| [Glossary](GLOSSARY.md) | Project terminology |
 
-指定失败任务的审计重跑使用 `dycon run retry-failed`；流程与证据布局见 [capture 控制修订与失败重跑](docs/CAPTURE-CONTROL-RETRY-CN.md)。已有 run 的参数调整仅走正式离线修订入口，保留变更前快照和 receipt。
+## Quick start
 
-从项目根目录用相应 venv 中的 `dycon`，等价于该解释器的 `python -m core.cli`。已有统一入口时不得另建 launcher、直接启动内部 worker，或重写任务选择、模型请求和产物登记逻辑。
+Use the project CLI from the corresponding environment. These checks do not start a workload:
 
 ```bash
 cd /home/wangtianyi/DyConGlobal
@@ -30,58 +33,18 @@ cd /home/wangtianyi/DyConGlobal
 .venvs/runner/bin/dycon run wait RUN_ID
 ```
 
-同一 task 的多次独立 rollout 在一个 run 内声明：
+`run create` freezes a plan; `run start` launches the workload and requires the configured model, GPU, container image, and runtime. See the minimum run guide before starting a new benchmark or resuming an existing run.
 
-```bash
-.venvs/runner/bin/dycon run create RUN_ID --operation rollout --repeat-count 5 \
-  --task-id INSTANCE_ID
-```
+## Project model
 
-`repeat-count` 是每个 task 的独立采样总数；同一 run 的 task×repetition 进入平坦队列，使用独立可复现 seed。基础设施重试不增加 repetition 数。
+- `core/` and `application/` provide strict configuration, CLI, run planning, execution, and evidence services.
+- `catalog/` defines benchmark tasks and partitions. Run-specific trajectories, patches, and evaluations live in run evidence.
+- `rollout/`, `benchmark_evaluation/`, `enrichment/`, and `hidden/` implement execution and post-processing.
+- `action/`, `difficulty/`, and `steering/` hold immutable analysis datasets and outputs.
+- `runs/RUN_ID/` contains frozen run configuration, task selection, attempts, canonical outputs, and receipts.
 
-单 run 可使用 `serving.trajectory_sharding: per_gpu_tp1`：每张指定 GPU 各启动一个 TP=1 服务，空闲槽位立即领取下一条完整轨迹，不等待同批任务结束。`serving.max_cpu_workers_per_gpu` 控制每卡最多承载几条 CPU 轨迹任务；例如 4 卡 × 每卡 4 个 worker = 最多 16 条在途轨迹。完整配置、端口映射及统一入口见[多 GPU TP1 指南](docs/MULTI-GPU-TP1-CN.md)。
+Active runs use schema 2. A run freezes its effective configuration and selected tasks at creation. Resume and run-bound analysis use that snapshot. Catalog task partitions are not training splits, and a submitted patch is not evidence that a task was resolved.
 
-后三条命令会执行真实 rollout，需要可用的 GPU、模型、镜像和配置；status/show 不启动 workload。`wait` 等待进程退出事件，不轮询运行状态。
+## Runtime environments
 
-## 配置与证据
-
-根 `config.yaml` 保存共用参数，generation、agent step/token limit 和 timeout 在根配置维护。每个 run 创建时冻结有效配置、tasks、selection 和 hash；执行、resume 及绑定 run 的分析使用原快照，不重新选择任务。`--set` 只能在相应入口明确允许的创建/规划阶段使用。
-
-`catalog/manifest.json` 仅保存 benchmark/task 清单（schema 2）；rollout、patch 和 evaluation 的事实保存在 `runs/RUN_ID/evidence.json`。task、attempt、canonical rollout、patch SHA 和评测证据共同对齐。Submitted 不等于 resolved；未评测、unresolved 和 infra_error 不补造成功剩余量标签。token 重建证据不冒充 native exact IDs。
-
-rollout/harness/hidden/enrichment 的运行产物在 `runs/RUN_ID/`；difficulty 的 datasets、splits、checkpoints、predictions 和 evaluations 独立保存在 `difficulty/`。action 的最小分析单元在 `action/outputs/ANALYSIS_ID/`，共享 hidden 视图在 `action/datasets/INDEX_ID/`；两者不依赖 analysis run，action 单元可组合多个来源 run，并冻结各自轨迹选择和证据。NAS 大张量通过 locator/receipt 引用；capture spool 在 ACK 前保留。`artifact verify`、Catalog verify、环境 gold 和模型性能评测各有范围，不能互相替代。
-
-## 代码职责
-
-| 目录 | 职责 |
-|---|---|
-| `core/`、`application/` | strict 配置/锁/I/O、CLI、RunPlan、supervisor、状态与阶段服务 |
-| `catalog/` | benchmark/task 定义、版本与任务分区；运行证据由 `application/execution/evidence.py` 管理 |
-| `rollout/`、`benchmark_evaluation/` | agent/model/parallel、canonical 产物、官方 harness |
-| `enrichment/`、`hidden/` | prefix/token 标签、在线 capture 证据、独立 eager replay、NAS reader/recovery |
-| `difficulty/`、`action/` | 数据索引、估计器与推理评估、分支绘图/一致性、canonical action 分类 |
-| `runtime/`、`locks/`、`vendor/` | 容器/NAS/serving、依赖锁、固定推理实现 |
-| `diagnostics/`、`migration/` | 诊断与显式一次性转换工具；不绕过正式入口 |
-
-runner、analysis、easysteer、latent-vllm 是四个独立环境，按任务使用。模块细节见 [difficulty/README.md](difficulty/README.md)、[action/README.md](action/README.md) 和 [协作约定](AGENTS.md)。
-
-## 历史与复现
-
-`baseline/` 已清空，历史产物在 `isolated/history-baseline-20261021/`；仅作历史归档；本次只将 `migration-closeonly331-20261021` 的登记信息转入其 run 级证据，旧快照不可伪装成新版可恢复运行状态。原件和转换审计位于工程外 `/home/wangtianyi/dycon-isolation-20261021/baseline-cleanup/`。
-
-本次精简前的全部 docs 原文、技术说明与实验/验收报告保存于 `/home/wangtianyi/dycon-isolation-20261021/docs-consolidation/`；日常只维护上面三份指南。历史指标仅说明当时的模型、精度、输入和运行范围，当前能力以源码和不可变 run 证据为准。
-
-Harness ????? `invalid_patch`?`infra_error` ? `ConnectionError`???????????????????? attempt ???Managed rollout ?????? GPU TP=4 ?? MIG UUID ?????? TP=1??? [?????????](docs/ENTRYPOINTS.md)?
-
-## Rollout seed retry
-
-New runs freeze `execution.limits_retry` from the root config. Whole-trajectory
-`LimitsExceeded` and `reasoning_loop` outcomes retain their evidence and requeue the
-same sample with a deterministic new seed. Infrastructure retries keep their seed
-and cumulative budget. Existing run snapshots and completed samples are unchanged.
-See [the rollout retry guide](docs/MINIMUM-RUN-CN.md)
-for capture recovery, counters, final selection, cancellation, and sampling caveats.
-
-## 后端与 adapter 重构
-
-DyCon 的任务执行通过版本化 backend registry 绑定 benchmark、agent、runtime、subject 和 evaluator。当前支持 BenchFlow/OpenHands、Native SWE/mini-swe-agent、Native WebArena/mini-swe-agent，以及 Harbor/OpenHands 的 SWE-bench Pro V2 和 Terminal-Bench 2.1。实现约束、Harbor CLI、OpenHands ACP transport、GPU canary 和未完成范围见 [后端与 adapter 重构说明](docs/BACKEND-ADAPTER-REFACTOR-CN.md)。
+Use `.venvs/runner` for run execution, Docker, and harness; `.venvs/analysis` for token processing and offline analysis; `.venvs/easysteer` for managed serving and online capture; and `.venvs/latent-vllm` for offline hidden replay. Do not mix environments to bypass the project entrypoints.

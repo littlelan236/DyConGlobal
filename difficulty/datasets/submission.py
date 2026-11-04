@@ -17,6 +17,7 @@ from core.io import cache_roots, hash_json, owned_path, read_json, sha256, write
 from core.locking import file_lock
 from difficulty.datasets.identity import task_group, task_key, validate_same_task
 from difficulty.receipts import verify_receipt
+from difficulty.datasets.eligibility import verify_positive_report
 
 
 def load_selection(cfg, settings):
@@ -69,6 +70,13 @@ def load_selection(cfg, settings):
                 if not any(o and o.get('resolved') is True and o.get('status') == 'completed'
                            and o.get(digest_key) == digest for o in outcomes):
                     raise ValueError('Resolved selection does not bind a successful exact evaluation subject')
+        if receipt.get('eligibility') == 'positive_reward' or row.get('training_eligibility') == 'positive_reward':
+            if row.get('evaluation_subject', {}).get('kind') != 'workspace':
+                raise ValueError('Positive reward training currently requires workspace evaluation subjects')
+            reports = [read_json(path) for path in row.get('source_files', {}) if Path(path).suffix == '.json']
+            if len(reports) != 1:
+                raise ValueError('Positive reward selection requires one bound official evaluation report')
+            verify_positive_report(row, reports[0])
         if cfg.get('model', {}).get('fingerprint') and row['model_fingerprint'] != cfg['model']['fingerprint']:
             raise ValueError('Training input hidden model differs from configured model fingerprint')
         expected_terminal = "AgentCompleted" if is_workspace else "Submitted"
@@ -155,7 +163,12 @@ def load_selection(cfg, settings):
         raise ValueError("A selected rollout has no usable samples")
     for row in rollouts:
         row.pop("_message_indices")
-    return rollouts, samples, {"selection_id": settings.dataset_id,
+    contract = feature_contract(samples)
+    if len({row.get('model_fingerprint') for row in rollouts}) != 1:
+        raise ValueError('Dataset mixes hidden model fingerprints')
+    for sample in samples:
+        sample['_native_sites'], sample['_hidden_width'] = contract['native_sites'], contract['width']
+    return rollouts, samples, {'feature_contract': contract, "selection_id": settings.dataset_id,
                                "receipt_sha256": settings.dataset_receipt_sha256,
                                "selection_authority": "frozen dataset receipt",
                                "source_files_verified": len(paths),
@@ -169,18 +182,45 @@ def arrays_from_bytes(data, digest):
         return {key: archive[key] for key in archive.files}
 
 
+def feature_contract(samples):
+    contracts = []
+    for sample in samples:
+        shapes = sample.get('storage_shapes') or {}
+        names = sorted((k for k in shapes if k.startswith('layer_')), key=lambda k: int(k[6:]))
+        if names:
+            widths = {tuple(shapes[k]) for k in names}
+            if len(widths) != 1 or len(next(iter(widths))) != 1:
+                raise ValueError('Hidden sites must have one common vector width')
+            sites, width = [int(k[6:]) for k in names], next(iter(widths))[0]
+        else:
+            sites = sample.get('native_hidden_sites', list(range(31)) + [32])
+            width = sample.get('hidden_width', 4096)
+        if type(width) is not int or width <= 0 or not sites or len(set(sites)) != len(sites):
+            raise ValueError('Invalid hidden feature contract')
+        contracts.append((tuple(sites), width))
+    if not contracts or len(set(contracts)) != 1:
+        raise ValueError('Dataset mixes incompatible hidden feature contracts')
+    sites, width = contracts[0]
+    return {'native_sites': list(sites), 'public_sites': list(range(len(sites))), 'width': width}
+
+
 def public_features(arrays, sample):
     if "hidden" in arrays:
         x = arrays["hidden"]
         if "array_row" in sample:
             x = x[sample["array_row"]]
     else:
-        names = [f"layer_{i}" for i in range(31)] + ["layer_32"]
-        if set(arrays) != set(names):
-            raise ValueError("Native hidden must contain sites 0..30 and 32")
+        sites = sample.get('_native_sites') or sample.get('native_hidden_sites')
+        names = ([f'layer_{i}' for i in sites] if sites is not None else
+                 sorted(arrays, key=lambda k: int(k.removeprefix('layer_'))))
+        if set(arrays) != set(names) or any(not k.startswith('layer_') for k in names):
+            raise ValueError('Native hidden site set differs from dataset contract')
         x = np.stack([arrays[name] for name in names])
-    if x.shape != (32, 4096) or not np.isfinite(x).all():
-        raise ValueError("Expected finite [32,4096] public hidden")
+    sites = sample.get('_native_sites') or sample.get('native_hidden_sites')
+    width = sample.get('_hidden_width', sample.get('hidden_width'))
+    expected = (len(sites), width) if sites is not None and width is not None else x.shape
+    if x.ndim != 2 or x.shape != expected or not np.isfinite(x).all():
+        raise ValueError('Expected finite hidden matching dataset feature contract')
     if "array_row" in sample:
         if "step" not in arrays or arrays["step"][sample["array_row"]] != sample["agent_step"]:
             raise ValueError("Legacy NPZ row/step mismatch")
@@ -224,8 +264,13 @@ def iter_features(samples):
 
 def prepare_cache(cfg, settings, samples):
     """Build checksummed disposable layer memmaps, never reuse partial cache files."""
-    identity = hash_json({"source": settings.dataset_receipt_sha256,
-                          "sample_order": [s["sample_id"] for s in samples], "schema": 1})
+    contract = feature_contract(samples)
+    sites, width = contract['native_sites'], contract['width']
+    layer_count = len(sites)
+    for sample in samples:
+        sample['_native_sites'], sample['_hidden_width'] = sites, width
+    identity = hash_json({'feature_contract': contract, "source": settings.dataset_receipt_sha256,
+                          "sample_order": [s["sample_id"] for s in samples], "schema": 2})
     roots = cache_roots(cfg)
     parent = roots[0]
     parent.mkdir(parents=True, exist_ok=True)
@@ -239,7 +284,7 @@ def prepare_cache(cfg, settings, samples):
             destination = candidates[0]
             manifest = read_json(destination / "cache.json")
             if manifest["identity"] != identity or set(manifest["files"]) != {
-                f"layer-{layer:02d}.f32.npy" for layer in range(32)
+                f"layer-{layer:02d}.f32.npy" for layer in range(layer_count)
             }:
                 raise ValueError("Invalid cache manifest")
             for name, digest in manifest["files"].items():
@@ -253,15 +298,15 @@ def prepare_cache(cfg, settings, samples):
                     if sha256(owned_path(candidate, name)) != digest:
                         raise ValueError("Feature cache checksum mismatch; remove corrupt cache explicitly")
             return destination
-        required = len(samples) * 32 * 4096 * 4 + 256 * 1024**2
+        required = len(samples) * layer_count * width * 4 + 256 * 1024**2
         if shutil.disk_usage(parent).free < required + 2 * 1024**3:
             raise ValueError("Insufficient disk for bounded feature cache and reserve")
         temporary = Path(tempfile.mkdtemp(prefix=".ridge-cache-", dir=parent))
         maps = []
         try:
             maps = [np.lib.format.open_memmap(temporary / f"layer-{layer:02d}.f32.npy", mode="w+",
-                                             dtype=np.float32, shape=(len(samples), 4096))
-                    for layer in range(32)]
+                                             dtype=np.float32, shape=(len(samples), width))
+                    for layer in range(layer_count)]
             count = 0
             for i, x in iter_features(samples):
                 for layer, matrix in enumerate(maps):
@@ -275,8 +320,8 @@ def prepare_cache(cfg, settings, samples):
                 matrix.flush()
                 matrix._mmap.close()
             maps.clear()
-            write_json(temporary / "cache.json", {"identity": identity, "shape": [len(samples), 4096],
-                       "public_sites": list(range(32)), "dtype": "float32", "rebuildable": True,
+            write_json(temporary / "cache.json", {"identity": identity, "shape": [len(samples), width],
+                       "public_sites": list(range(layer_count)), "native_sites": sites, "feature_contract": contract, "dtype": "float32", "rebuildable": True,
                        "dataset_receipt_sha256": settings.dataset_receipt_sha256,
                        "sample_order_sha256": hash_json([s["sample_id"] for s in samples]),
                        "files": {p.name: sha256(p) for p in sorted(temporary.glob("*.npy"))}})

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import math
 from collections import Counter
 from pathlib import Path
 
@@ -93,7 +94,7 @@ def _snapshot(root, run_id, loaded, repetition_id):
         attempts[physical] = row.get("termination_reason")
         by_sample.setdefault(key, {})[rid] = row
 
-    submitted, selected_ids = {}, {}
+    submitted, accepted, accepted_results, selected_ids = {}, {}, {}, {}
     migrated = (loaded["run"] / "migration/source.json").exists()
     for key, item in items.items():
         task_dir = loaded["run"] / "rollout/tasks" / item["instance_id"]
@@ -137,6 +138,10 @@ def _snapshot(root, run_id, loaded, repetition_id):
             raise ValueError(f"Final result has no matching canonical rollout: {run_id}/{rid}")
         pair_key = (key[0], item["repetition_index"] if repetition_id is None else None)
         selected_ids[pair_key] = rid
+        if (result.get("disposition", "accepted") == "accepted"
+                and not row.get("provenance", {}).get("quarantined")):
+            accepted[pair_key] = row
+            accepted_results[pair_key] = result
         if (row["submission_status"] == "submitted" and _status(result) == "Submitted"
                 and result.get("disposition", "accepted") == "accepted"
                 and not row.get("provenance", {}).get("quarantined")):
@@ -157,7 +162,8 @@ def _snapshot(root, run_id, loaded, repetition_id):
                       for k, n in category_counts.items()},
         "raw_status_counts": dict(sorted(raw_statuses.items())),
     }
-    return {"loaded": loaded, "evidence": evidence, "submitted": submitted,
+    return {"loaded": loaded, "evidence": evidence, "submitted": submitted, "accepted": accepted,
+            "accepted_results": accepted_results,
             "selected_ids": selected_ids, "exits": exits}
 
 
@@ -270,6 +276,8 @@ def compare_runs(root, run_ids, *, baseline=None, repetitions=None):
                 rate = reason["rate"]
                 rate["percentage_point_change"] = rate["delta"] * 100 if rate["delta"] is not None else None
             result["changes_from_baseline"] = changes
+    token_savings = _token_savings_concentration(
+        {row["run_id"]: row["samples"] for row in results}, run_ids, baseline)
     return {"schema_version": 2, "generated_at": now(), "baseline_run_id": baseline,
             "comparison_mode": mode,
             "common_submitted_task_count": len(task_keys), "common_submitted_tasks": tasks,
@@ -291,8 +299,323 @@ def compare_runs(root, run_ids, *, baseline=None, repetitions=None):
                            "Resolved percentage-point change=100*(resolved-baseline_resolved)/common_pair_count.",
                 "missing": "Missing token evidence yields null totals with known subtotals; empty cohort has null rates.",
                 "snapshot": "Read-only observation; live runs can change while the command reads evidence."},
-            "runs": results}
+            "runs": results,
+            "token_savings_concentration": token_savings}
 
+
+def _reward_value(row, result):
+    for source in (result, row):
+        value = source.get("raw_reward", source.get("reward"))
+        if isinstance(value, dict):
+            value = value.get("reward")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def _accepted_sample_metrics(root, row, result, ordinal):
+    trajectory = _trajectory_metrics(root, row)
+    return {
+        "selection_ordinal": ordinal,
+        "repetition_id": row["repetition_id"],
+        "repetition_index": row["repetition_index"],
+        "sample_key": row["sample_key"],
+        "rollout_id": result["rollout_id"],
+        "attempt_id": row["attempt_id"],
+        "trajectory_sha256": row["trajectory_sha256"],
+        "reward": _reward_value(row, result),
+        **{field: trajectory[field] for field in ("steps", *TOKEN_FIELDS)},
+    }
+
+
+def _aggregate_accepted_metrics(samples):
+    metrics = {"sample_count": len(samples), "steps": sum(item["steps"] for item in samples)}
+    for field in TOKEN_FIELDS:
+        values = [item[field] for item in samples]
+        metrics[field] = sum(values) if values and all(value is not None for value in values) else None
+    rewards = [item["reward"] for item in samples]
+    metrics["reward_sum"] = sum(rewards) if rewards and all(value is not None for value in rewards) else None
+    metrics["reward_mean"] = (metrics["reward_sum"] / len(rewards)
+                               if metrics["reward_sum"] is not None else None)
+    return metrics
+
+
+def _token_savings_concentration(sample_series, run_ids, baseline):
+    """Measure whether a run's token savings versus baseline are concentrated."""
+    if baseline is None:
+        return {}
+    if baseline not in run_ids:
+        raise ValueError("Baseline must be one of the compared runs")
+
+    def key(sample):
+        return (sample.get("task_key"), sample.get("paired_repetition_index",
+                                                       sample.get("selection_ordinal")))
+
+    baseline_samples = {key(sample): sample for sample in sample_series.get(baseline, [])}
+    output = {}
+    for run_id in run_ids:
+        if run_id == baseline:
+            output[run_id] = None
+            continue
+        savings = []
+        for sample in sample_series.get(run_id, []):
+            base = baseline_samples.get(key(sample))
+            if base is None:
+                continue
+            current_tokens = sample.get("total_tokens")
+            baseline_tokens = base.get("total_tokens")
+            if isinstance(current_tokens, int) and isinstance(baseline_tokens, int):
+                savings.append(max(0, baseline_tokens - current_tokens))
+        positive = [value for value in savings if value > 0]
+        total = sum(positive)
+        ordered = sorted(positive, reverse=True)
+        top_count = max(1, math.ceil(len(ordered) * 0.10)) if ordered else 0
+        output[run_id] = {
+            "baseline_run_id": baseline,
+            "trajectory_count": len(savings),
+            "positive_saving_trajectory_count": len(positive),
+            "total_positive_token_savings": total,
+            "top_10_percent_savings_share": (sum(ordered[:top_count]) / total if total else None),
+            "largest_trajectory_savings_share": (ordered[0] / total if total else None),
+            "hhi": (sum((value / total) ** 2 for value in positive) if total else None),
+        }
+    return output
+
+
+def accepted_task_counts(root, run_ids, *, baseline=None, repetitions=None):
+    """Count final accepted repetitions for tasks shared by all selected runs."""
+    root = Path(root).resolve()
+    run_ids = list(run_ids)
+    if len(run_ids) < 2 or len(run_ids) != len(set(run_ids)):
+        raise ValueError("Specify at least two distinct run IDs")
+    if baseline is not None and baseline not in run_ids:
+        raise ValueError("Baseline must be one of the compared runs")
+    loaded = {rid: load_plan(root, rid) for rid in run_ids}
+    mode, selected = _repetition_selection(loaded, repetitions)
+    snapshots = {rid: _snapshot(root, rid, loaded[rid], selected[rid]) for rid in run_ids}
+
+    inventories = {}
+    for run_id in run_ids:
+        inventory = {}
+        for item in loaded[run_id]["work_items"]["items"]:
+            inventory.setdefault(item["task_key"], {
+                key: item.get(key) for key in ("benchmark", "revision", "instance_id")
+            })
+        inventories[run_id] = inventory
+    common_keys = sorted(set.intersection(*(set(value) for value in inventories.values())))
+    # Align the accepted cohort by count per task. Repetition IDs need not match
+    # across runs; each run contributes its first minimum-count accepted samples.
+    accepted_by_task = {}
+    for task_key in common_keys:
+        per_run = {
+            run_id: sorted((key for key in snapshots[run_id]["accepted"] if key[0] == task_key),
+                           key=lambda pair: pair[1] if pair[1] is not None else -1)
+            for run_id in run_ids
+        }
+        minimum = min(len(keys) for keys in per_run.values())
+        accepted_by_task[task_key] = {run_id: keys[:minimum] for run_id, keys in per_run.items()}
+
+    rows = []
+    for task_key in common_keys:
+        metadata = next((snapshots[run_id]["evidence"]["tasks"].get(task_key)
+                         for run_id in run_ids
+                         if task_key in snapshots[run_id]["evidence"].get("tasks", {})), None)
+        metadata = metadata or next(inventories[run_id][task_key] for run_id in run_ids)
+        accepted_by_run = {
+            run_id: sum(1 for key in snapshots[run_id]["accepted"] if key[0] == task_key)
+            for run_id in run_ids
+        }
+        rows.append({
+            "task_key": task_key,
+            "benchmark": metadata.get("benchmark"),
+            "revision": metadata.get("revision"),
+            "instance_id": metadata.get("instance_id"),
+            "accepted_by_run": accepted_by_run,
+            "common_accepted_samples_by_run": {
+                run_id: [
+                    _accepted_sample_metrics(root, snapshots[run_id]["accepted"][pair],
+                                              snapshots[run_id]["accepted_results"][pair], ordinal)
+                    for ordinal, pair in enumerate(accepted_by_task[task_key][run_id])
+                ]
+                for run_id in run_ids
+            },
+            "minimum_accepted_count": min(accepted_by_run.values()),
+            "common_accepted_count": min(accepted_by_run.values()),
+            "common_accepted_metrics_by_run": {
+                run_id: _aggregate_accepted_metrics([
+                    _accepted_sample_metrics(root, snapshots[run_id]["accepted"][pair],
+                                              snapshots[run_id]["accepted_results"][pair], ordinal)
+                    for ordinal, pair in enumerate(accepted_by_task[task_key][run_id])
+                ])
+                for run_id in run_ids
+            },
+        })
+    rows.sort(key=lambda row: (-row["minimum_accepted_count"],
+                               row["instance_id"] or "", row["task_key"]))
+
+    run_summaries = []
+    for run_id in run_ids:
+        accepted_counts = Counter(key[0] for key in snapshots[run_id]["accepted"])
+        run_summaries.append({
+            "run_id": run_id,
+            "repeat_count": loaded[run_id]["plan"]["repeat_count"],
+            "selected_repetition_ids": ([selected[run_id]] if selected[run_id] is not None
+                                         else [f"rep-{i:03d}" for i in range(loaded[run_id]["plan"]["repeat_count"])]),
+            "accepted_task_count": sum(value > 0 for value in accepted_counts.values()),
+            "accepted_sample_count": sum(accepted_counts.values()),
+        })
+    if baseline is not None:
+        reference = next(summary for summary in run_summaries if summary["run_id"] == baseline)
+        for summary in run_summaries:
+            summary["changes_from_baseline"] = {
+                field: _change(summary[field], reference[field])
+                for field in ("accepted_task_count", "accepted_sample_count")
+            }
+    sample_series = {
+        run_id: [
+            {"task_key": pair[0], **_accepted_sample_metrics(
+                root, snapshots[run_id]["accepted"][pair],
+                snapshots[run_id]["accepted_results"][pair], ordinal)}
+            for ordinal, pair in enumerate(
+                (pair for task_key in common_keys for pair in accepted_by_task[task_key][run_id])
+            )
+        ]
+        for run_id in run_ids
+    }
+    token_savings = _token_savings_concentration(sample_series, run_ids, baseline)
+    common_metrics = {
+        run_id: _aggregate_accepted_metrics(sample_series[run_id])
+        for run_id in run_ids
+    }
+    if baseline is not None:
+        reference = common_metrics[baseline]
+        for run_id in run_ids:
+            common_metrics[run_id]["changes_from_baseline"] = {
+                field: _change(common_metrics[run_id][field], reference[field])
+                for field in ("sample_count", "steps", *TOKEN_FIELDS, "reward_sum", "reward_mean")
+            }
+        for row in rows:
+            reference_count = row["accepted_by_run"][baseline]
+            reference_metrics = row["common_accepted_metrics_by_run"][baseline]
+            for run_id in run_ids:
+                metrics = row["common_accepted_metrics_by_run"][run_id]
+                metrics["changes_from_baseline"] = {
+                    field: _change(metrics[field], reference_metrics[field])
+                    for field in ("sample_count", "steps", *TOKEN_FIELDS, "reward_sum", "reward_mean")
+                }
+            row["changes_from_baseline"] = {
+                run_id: {
+                    "accepted_count": _change(row["accepted_by_run"][run_id], reference_count),
+                    "metrics": row["common_accepted_metrics_by_run"][run_id].get("changes_from_baseline", {}),
+                }
+                for run_id in run_ids
+            }
+    return {
+        "schema_version": 1,
+        "generated_at": now(),
+        "comparison_mode": mode,
+        "baseline_run_id": baseline,
+        "run_ids": run_ids,
+        "runs": run_summaries,
+        "common_task_count": len(rows),
+        "common_accepted_task_count": sum(row["minimum_accepted_count"] > 0 for row in rows),
+        "common_accepted_count": sum(row["minimum_accepted_count"] for row in rows),
+        "common_accepted_sample_task_count": sum(row["common_accepted_count"] > 0 for row in rows),
+        "common_accepted_sample_count": sum(row["common_accepted_count"] for row in rows),
+        "common_accepted_metrics_by_run": common_metrics,
+        "common_accepted_samples_by_run": {
+            run_id: [
+                {"task_key": pair[0], **_accepted_sample_metrics(
+                    root, snapshots[run_id]["accepted"][pair],
+                    snapshots[run_id]["accepted_results"][pair], ordinal)}
+                for ordinal, pair in enumerate(
+                    (pair for task_key in common_keys for pair in accepted_by_task[task_key][run_id])
+                )
+            ]
+            for run_id in run_ids
+        },
+        "tasks": rows,
+        "token_savings_concentration": token_savings,
+        "policy": {
+            "accepted": "Final result pointers with disposition=accepted and no quarantine, counted once per selected repetition.",
+            "task_identity": "benchmark + revision + instance_id (task_key)",
+            "common_tasks": "Only task identities present in every selected run are listed; zero minima are retained.",
+            "minimum": "Per-task minimum accepted repetition count across all compared runs.",
+            "paired_metrics": "Steps, persisted prompt/completion/total tokens and raw reward use the per-task minimum accepted count from each run; repetition IDs need not match.",
+            "baseline": "Relative change=(value-baseline)/baseline; null for zero baseline or missing data.",
+            "steps_tokens": "Canonical assistant steps and selected-response usage; unselected parallel candidate branches are excluded.",
+            "snapshot": "Read-only observation of frozen plans and run evidence.",
+        },
+    }
+
+
+def format_accepted_markdown(report):
+    """Render the accepted-by-task report as a stable, scan-friendly table."""
+    runs = report["run_ids"]
+    lines = [
+        f"Common accepted tasks (minimum > 0): {report['common_accepted_task_count']}",
+        f"Common accepted count (sum of per-task minima): {report['common_accepted_count']}",
+        f"Common accepted tasks with metrics: {report['common_accepted_sample_task_count']}",
+        f"Common accepted trajectories: {report['common_accepted_sample_count']}",
+        f"Shared task identities: {report['common_task_count']}",
+        f"Repetition mode: {report['comparison_mode']}",
+    ]
+    if report.get("baseline_run_id"):
+        lines.append(f"Baseline: {report['baseline_run_id']}; relative changes are shown in JSON.")
+    for summary in report["runs"]:
+        lines.append(f"- {summary['run_id']}: repeat_count={summary['repeat_count']}; "
+                     f"accepted_tasks={summary['accepted_task_count']}; "
+                     f"accepted_samples={summary['accepted_sample_count']}; "
+                     f"selected={','.join(summary['selected_repetition_ids'])}")
+    def compact_metrics(metrics):
+        def value(item):
+            return "N/A" if item is None else f"{item:g}"
+        return (f"n={metrics['sample_count']}; steps={metrics['steps']}; "
+                f"tokens={value(metrics['total_tokens'])}; reward={value(metrics['reward_sum'])}/"
+                f"{value(metrics['reward_mean'])}")
+
+    lines += ["", "Trajectory metrics use the per-task minimum accepted count; repetition IDs may differ across runs.",
+              "| Run | Samples | Steps | Prompt tokens | Completion tokens | Total tokens | Reward sum | Reward mean |",
+              "|---|---:|---:|---:|---:|---:|---:|---:|"]
+    for run_id in runs:
+        metrics = report["common_accepted_metrics_by_run"][run_id]
+        lines.append("| " + run_id + " | " + " | ".join(
+            str(metrics[key]) if metrics[key] is not None else "N/A"
+            for key in ("sample_count", "steps", "prompt_tokens", "completion_tokens", "total_tokens",
+                        "reward_sum", "reward_mean")) + " |")
+    if report.get("baseline_run_id"):
+        def change_percent(value):
+            relative = value.get("relative_change") if value else None
+            return "N/A" if relative is None else f"{relative:+.2%}"
+        lines += ["", "| Run | Accepted task change | Accepted sample change | Steps change | Prompt token change | Completion token change | Total token change | Reward sum change | Reward mean change |",
+                  "|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+        for summary in report["runs"]:
+            accepted_changes = summary.get("changes_from_baseline", {})
+            metric_changes = report["common_accepted_metrics_by_run"][summary["run_id"]].get("changes_from_baseline", {})
+            cells = [change_percent(accepted_changes.get(field)) for field in ("accepted_task_count", "accepted_sample_count")]
+            cells += [change_percent(metric_changes.get(field)) for field in ("steps", "prompt_tokens", "completion_tokens", "total_tokens", "reward_sum", "reward_mean")]
+            lines.append("| " + summary["run_id"] + " | " + " | ".join(cells) + " |")
+    if report.get("token_savings_concentration"):
+        lines += ["", "| Run | Positive saving trajectories | Total positive token savings | Top 10% savings share | Largest trajectory share | HHI |",
+                  "|---|---:|---:|---:|---:|---:|"]
+        for run_id, metrics in report["token_savings_concentration"].items():
+            if metrics is None:
+                continue
+            lines.append("| " + run_id + " | " + " | ".join(
+                str(metrics[key]) if metrics[key] is not None else "N/A"
+                for key in ("positive_saving_trajectory_count", "total_positive_token_savings",
+                            "top_10_percent_savings_share", "largest_trajectory_savings_share", "hhi")) + " |")
+    lines += ["", "| Task | " + " | ".join(f"Accepted / common metrics: {run_id}" for run_id in runs)
+              + " | Minimum accepted | Common accepted |", "|---|" + "---:|" * (len(runs) + 2)]
+    for row in report["tasks"]:
+        task = row["instance_id"] or row["task_key"]
+        counts = " | ".join(
+            f"{row['accepted_by_run'][run_id]} / {compact_metrics(row['common_accepted_metrics_by_run'][run_id])}"
+            for run_id in runs)
+        lines.append(f"| {task} | {counts} | {row['minimum_accepted_count']} | {row['common_accepted_count']} |")
+    lines += ["", "Rows are shared task identities, sorted by minimum accepted count descending. "
+              "Zero minima are retained for auditability. Each selected trajectory record is also available in JSON."]
+    return "\n".join(lines)
 
 def format_markdown(report):
     def number(value):
@@ -349,6 +672,16 @@ def format_markdown(report):
         cells = [(percent(m[k]) if k == "resolved_rate" else number(m[k])) + change(row, "common_submitted", k)
                  for k in ("resolved_count", "resolved_rate", "steps", *TOKEN_FIELDS)]
         lines.append("| " + row["run_id"] + " | " + " | ".join(cells) + f" | {m['unknown_evaluation_count']} |")
+    if report.get("token_savings_concentration"):
+        lines += ["", "| Run | Positive saving trajectories | Total positive token savings | Top 10% savings share | Largest trajectory share | HHI |",
+                  "|---|---:|---:|---:|---:|---:|"]
+        for run_id, metrics in report["token_savings_concentration"].items():
+            if metrics is None:
+                continue
+            lines.append("| " + run_id + " | " + " | ".join(
+                str(metrics[key]) if metrics[key] is not None else "N/A"
+                for key in ("positive_saving_trajectory_count", "total_positive_token_savings",
+                            "top_10_percent_savings_share", "largest_trajectory_savings_share", "hhi")) + " |")
     lines += ["", "Exit rates use all physical attempts within selected repetitions. "
               "Resolved/step/token metrics use only common final submitted task/repetition pairs.",
               "Tokens count selected canonical responses only. N/A means missing evidence, an empty denominator, or a zero baseline."]

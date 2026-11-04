@@ -95,11 +95,14 @@ def validate_effective_parallel(cfg):
     # Validate only the active backend; never rewrite its original snapshot bytes.
     if raw.get("benchmark", {}).get("backend", "swebench") != "skillsbench":
         raw.pop("skillsbench_images", None)
-    RunConfig.model_validate(raw)
+    RunConfig.model_validate(raw, context={"frozen_snapshot": True})
 
 
 def apply_run_parallel(cfg, path=None, *, from_run=None, overrides=()):
     """Return a copied config and immutable input bytes, or leave legacy runs untouched."""
+    from core.config import with_derived_parallel_capacity
+
+    cfg = with_derived_parallel_capacity(cfg)
     if path is None and "parallel_policy" not in cfg:
         return cfg, None
     result = copy.deepcopy(cfg)

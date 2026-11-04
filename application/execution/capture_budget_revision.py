@@ -7,7 +7,7 @@ import json
 import yaml
 
 from application.execution.run_plan import load_plan
-from core.config import Capture, CaptureExport, Model, Parallel, Serving
+from core.config import Capture, CaptureExport, Environment, Model, Parallel, Serving
 from core.io import hash_json, identifier, now, read_json, sha256, write_json
 from core.locking import file_lock
 from core.processes import matches
@@ -19,7 +19,7 @@ FIELDS = ('spool_max_bytes', 'spool_high_watermark', 'spool_low_watermark')
 def revise_capture_budget(root, run_id, *, revision_id, max_bytes=None, high=None, low=None, reason,
                           control_seconds=None, receipt_workers=None, runtime_values=None,
                           serving_gpu_memory_utilization=None, serving_placement=None,
-                          model_verify_identity=None):
+                          model_verify_identity=None, environment_wheelhouse=None):
     root = Path(root).resolve()
     run_id, revision_id = identifier(run_id), identifier(revision_id)
     if not reason or not reason.strip():
@@ -30,7 +30,21 @@ def revise_capture_budget(root, run_id, *, revision_id, max_bytes=None, high=Non
     placement = serving_placement is not None
     serving = serving_gpu_memory_utilization is not None or placement
     model_verification = model_verify_identity is not None
-    if model_verification:
+    wheelhouse_revision = environment_wheelhouse is not None
+    if wheelhouse_revision:
+        if not isinstance(environment_wheelhouse, str) or not environment_wheelhouse.strip():
+            raise ValueError('Wheelhouse path must be a non-empty absolute path')
+        wheelhouse_path = Path(environment_wheelhouse).expanduser()
+        if not wheelhouse_path.is_absolute():
+            raise ValueError('Wheelhouse path must be absolute')
+        from runtime.wheelhouse import verify
+        verify(wheelhouse_path)
+        environment_wheelhouse = str(wheelhouse_path.resolve())
+        if (runtime or control or serving or model_verification or
+                any(v is not None for v in (max_bytes, high, low))):
+            raise ValueError('Wheelhouse revision cannot mix revision modes')
+        values = {'environment.wheelhouse': environment_wheelhouse}
+    elif model_verification:
         if type(model_verify_identity) is not bool:
             raise ValueError('Model verification flag must be a boolean')
         if runtime or control or serving or any(v is not None for v in (max_bytes, high, low)):
@@ -65,7 +79,7 @@ def revise_capture_budget(root, run_id, *, revision_id, max_bytes=None, high=Non
         values = {"control_seconds": control_seconds, "receipt_workers": receipt_workers}
     else:
         values = dict(zip(FIELDS, (max_bytes, high, low)))
-    field_prefix = "" if runtime or serving or model_verification else "capture." if control else "capture.export."
+    field_prefix = "" if runtime or serving or model_verification or wheelhouse_revision else "capture." if control else "capture.export."
     out = run / 'config-revisions' / revision_id
     with ExitStack() as locks:
         for path in [root / 'state/run-locks' / (run_id + '.lock'),
@@ -87,7 +101,7 @@ def revise_capture_budget(root, run_id, *, revision_id, max_bytes=None, high=Non
             term = previous / 'termination.json'
             if not term.exists() or not read_json(term).get('cleanup_complete'):
                 raise RuntimeError('Previous execution cleanup is incomplete')
-        if not (runtime or control or serving or model_verification):
+        if not (runtime or control or serving or model_verification or wheelhouse_revision):
             assert_no_writers(root, [run_id])
         if (out / 'receipt.json').exists():
             receipt = read_json(out / 'receipt.json')
@@ -100,7 +114,7 @@ def revise_capture_budget(root, run_id, *, revision_id, max_bytes=None, high=Non
             raise RuntimeError('Incomplete revision audit exists; inspect before recovery')
         old = copy.deepcopy(loaded['config'])
         candidate = copy.deepcopy(old)
-        if runtime or serving or model_verification:
+        if runtime or serving or model_verification or wheelhouse_revision:
             for dotted, value in values.items():
                 node = candidate
                 keys = dotted.split('.')
@@ -109,6 +123,8 @@ def revise_capture_budget(root, run_id, *, revision_id, max_bytes=None, high=Non
                 node[keys[-1]] = value
             if model_verification:
                 Model.model_validate(candidate['model'])
+            elif wheelhouse_revision:
+                Environment.model_validate(candidate['environment'])
             elif serving:
                 Serving.model_validate(candidate['serving'])
                 if placement and candidate['serving'].get('trajectory_sharding', 'none') != 'per_gpu_tp1' and len(candidate['serving']['gpus']) != candidate['serving']['tensor_parallel_size']:
@@ -117,6 +133,9 @@ def revise_capture_budget(root, run_id, *, revision_id, max_bytes=None, high=Non
                     raise ValueError('Explicit KV cache bytes override gpu_memory_utilization; revise the resource policy first')
             else:
                 Serving.model_validate(candidate['serving'])
+                if (set(values) == set(TRAJECTORY_CONCURRENCY_FIELDS)
+                        and candidate['parallel']['max_inflight_branches'] != candidate['serving']['max_num_seqs']):
+                    raise ValueError('Branch admission capacity is derived from serving.max_num_seqs')
                 if (set(values) == set(TRAJECTORY_CONCURRENCY_FIELDS)
                         and candidate['serving'].get('trajectory_sharding') != 'per_gpu_tp1'):
                     raise ValueError('Per-GPU trajectory concurrency requires per_gpu_tp1')
@@ -143,7 +162,7 @@ def revise_capture_budget(root, run_id, *, revision_id, max_bytes=None, high=Non
                     previous_plan_sha256=loaded['plan']['plan_sha256'])
         plan['plan_sha256'] = hash_json({k: v for k, v in plan.items() if k != 'plan_sha256'})
         human = yaml.safe_load((run / 'config.yaml').read_text())
-        if runtime or serving or model_verification:
+        if runtime or serving or model_verification or wheelhouse_revision:
             for dotted, value in values.items():
                 node = human
                 keys = dotted.split('.')
@@ -154,6 +173,8 @@ def revise_capture_budget(root, run_id, *, revision_id, max_bytes=None, high=Non
             human['capture'].update(values)
         else:
             human['capture']['export'].update(values)
+        if runtime and set(values) == set(TRAJECTORY_CONCURRENCY_FIELDS):
+            human.get('parallel', {}).pop('max_inflight_branches', None)
         files = ['resolved-config.json', 'plan.json', 'config.yaml']
         originals = {name: (run / name).read_bytes() for name in files}
         protected = {name: sha256(run / name) for name in
@@ -192,7 +213,7 @@ def revise_capture_budget(root, run_id, *, revision_id, max_bytes=None, high=Non
                    'protected_files_unchanged': protected, 'completed_at': now()}
         write_json(out / 'receipt.json', receipt)
         write_json(run / 'events' / ('config-revision-' + revision_id + '.json'),
-                   {'event': 'run.model_verification_revised' if model_verification else 'run.serving_placement_revised' if placement else 'run.serving_memory_revised' if serving else 'run.concurrency_profile_revised' if runtime else 'run.capture_control_revised' if control else 'run.capture_budget_revised', **receipt})
+                   {'event': 'run.environment_wheelhouse_revised' if wheelhouse_revision else 'run.model_verification_revised' if model_verification else 'run.serving_placement_revised' if placement else 'run.serving_memory_revised' if serving else 'run.concurrency_profile_revised' if runtime else 'run.capture_control_revised' if control else 'run.capture_budget_revised', **receipt})
         write_json(out / 'progress.json', {'phase': 'complete', 'completed_at': now()})
         return receipt
 
@@ -210,15 +231,14 @@ TRAJECTORY_CONCURRENCY_FIELDS = (
 
 
 def revise_concurrency(root, run_id, *, revision_id, reason,
-                       max_cpu_workers_per_gpu=None, max_num_seqs=None,
-                       max_inflight_branches=None):
-    supplied = (max_cpu_workers_per_gpu, max_num_seqs, max_inflight_branches)
+                       max_cpu_workers_per_gpu=None, max_num_seqs=None):
+    supplied = (max_cpu_workers_per_gpu, max_num_seqs)
     if all(value is None for value in supplied):
         values = CONCURRENCY64_VALUES
     else:
         if any(type(value) is not int or value < 1 for value in supplied):
-            raise ValueError('Specify all three positive integer trajectory/sequence/branch limits')
-        values = dict(zip(TRAJECTORY_CONCURRENCY_FIELDS, supplied))
+            raise ValueError('Specify both positive integer worker and sequence limits')
+        values = dict(zip(TRAJECTORY_CONCURRENCY_FIELDS, (*supplied, max_num_seqs)))
     return revise_capture_budget(root, run_id, revision_id=revision_id, reason=reason,
                                  runtime_values=values)
 
@@ -254,3 +274,9 @@ def revise_model_verification(root, run_id, *, revision_id, verify_identity, rea
         raise ValueError('Model verification flag must be a boolean')
     return revise_capture_budget(root, run_id, revision_id=revision_id, reason=reason,
                                  model_verify_identity=verify_identity)
+
+
+def revise_wheelhouse(root, run_id, *, revision_id, wheelhouse, reason):
+    """Bind a verified shared wheelhouse to a stopped run with an audit receipt."""
+    return revise_capture_budget(root, run_id, revision_id=revision_id, reason=reason,
+                                 environment_wheelhouse=wheelhouse)

@@ -1,6 +1,6 @@
 # DyConGlobal 工作约定
 
-先读 `README.md`、`docs/ENTRYPOINTS.md` 和 `docs/MINIMUM-RUN-CN.md`；容器问题另读 `docs/container-environment-repair-cn.md`，再核对实际代码。历史 run 证据不代表当前实现或当前数据规模。
+先读 `README.md`、`docs/ENTRYPOINTS.md` 和 `docs/MINIMUM-RUN-CN.md`；容器问题另读 `docs/CONTAINER-CN.md`，再核对实际代码。历史 run 证据不代表当前实现或当前数据规模。
 
 ## 统一入口与行为对齐
 
@@ -9,9 +9,8 @@
 - 普通、capture、steering、steering+capture rollout 都通过 `dycon rollout`；只在唯一 `config.yaml` 中切换开关。正式 rollout 拒绝 `--set`，resume 使用原始快照。
 - Run 独立共识/熵策略是明确授权的例外：`dycon run create ... --parallel-config POLICY.yaml` 冻结本 run 的代表策略和熵映射，不向根 `config.yaml` 添加新策略参数；执行/resume 只读本 run 快照。见 `docs/ACTION-ENTROPY-RUN-POLICY-CN.md`。
 - 多卡独立 TP=1 轨迹调度使用 `serving.trajectory_sharding: per_gpu_tp1`，复用正式 `run create/start/status/cancel/resume`；GPU/端口列表与 `max_cpu_workers_per_gpu` 在创建时冻结。完整轨迹和其候选分支固定使用同一卡，空闲 CPU 轨迹槽位立即补发；不得另建分片 launcher。见 `docs/MULTI-GPU-TP1-CN.md`。
-- 批量历史 extraction 使用 `enrichment.scripts.launch_extraction`；queue worker 由 launcher 调度。该 launcher 固定 `anchors-20261017` 批次及 GPU 0–3，不是通用批次创建工具。
 - 诊断先查找已有 `hidden/evaluation/`、`runtime/scripts/` 工具，核对参数、硬编码范围和副作用。历史 speed-test/验收脚本不能替代生产入口。
-- `difficulty/scripts/train.sh` 是 `difficulty-train` 的正式 Bash `source` 包装，只委托统一 CLI。`difficulty/training/config.yaml` 是明确授权的 difficulty 专用配置，不改变 rollout 的根配置约定。`dycon difficulty-train` 完成配置校验、dataset/split 身份绑定、服务管理和 attempt 产物登记。`
+- `difficulty/scripts/train.sh` 是 `difficulty-train` 的正式 Bash `source` 包装，只委托统一 CLI。`difficulty/training/config.yaml` 是明确授权的 difficulty 专用配置，不改变 rollout 的根配置约定。`dycon difficulty-train` 完成配置校验、dataset/split 身份绑定、服务管理和 attempt 产物登记。
 - 只有 Python API 的能力应明确说明边界。需要新增正式任务时，应在既有 CLI/模块中实现可维护入口并补充文档；不要用临时训练/提取脚本填补入口空缺。
 - action trajectory 分类使用 dycon action-classify，直接读取 manifest 绑定的 canonical trajectory；不得要求 enrichment 作为隐含前置，也不得另写 trajectory 读取脚本。
 

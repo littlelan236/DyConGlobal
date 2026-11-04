@@ -377,7 +377,7 @@ environment:
   docker_host: unix:///run/user/1018/docker.sock
   docker_executable: /usr/bin/docker
   docker_data_root: /data1/wangtianyi/docker
-  wheelhouse: /home/wangtianyi/DyConGlobal/runtime/cache/unified-wheels-priority1-4-20261026
+  wheelhouse: /home/wangtianyi/DyConGlobal/runtime/wheelhouse/unified-wheels-repaired-20261029-v4
   cwd: /testbed
   user: root
   platform: linux/amd64
@@ -638,7 +638,6 @@ parallel:
   policy: every_step
   every_k_steps: null
   estimator_ref: runtime/parallel-artifacts/ridge-resolved-migration331-event70-15-15-reasoning-log1p-20261024/manifest.json
-  max_inflight_branches: 6
   dynamic_branch_admission: false
   admission_timeout_seconds: 28800
   score_timeout_ms: 5000

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from core.io import artifact_roots, hash_json, identifier, read_json, sha256, write_json
 from difficulty.probe_config import RidgeProbe
@@ -511,6 +511,21 @@ class Config(Strict):
     capture: Capture = Field(default_factory=Capture)
     parallel: Parallel = Field(default_factory=Parallel)
 
+    @model_validator(mode="before")
+    @classmethod
+    def derive_branch_capacity(cls, raw, info: ValidationInfo):
+        # Frozen snapshots retain their historical capacity and hash. Editable
+        # inputs expose only serving.max_num_seqs; never silently ignore a knob.
+        if (info.context or {}).get("frozen_snapshot"):
+            return raw
+        if isinstance(raw, dict):
+            parallel = raw.get("parallel", {})
+            if isinstance(parallel, dict) and "max_inflight_branches" in parallel:
+                raise ValueError("parallel.max_inflight_branches is derived from "
+                                 "serving.max_num_seqs and cannot be configured")
+            raw = with_derived_parallel_capacity(raw)
+        return raw
+
     @model_validator(mode="after")
     def cross_fields(self):
         from core.backends import capabilities
@@ -575,6 +590,15 @@ def unique_mapping(loader, node, deep=False):
 UniqueLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, unique_mapping)
 
 
+def with_derived_parallel_capacity(cfg):
+    """Copy a new/revised config; capacity is per serving replica, not per run."""
+    result = copy.deepcopy(cfg)
+    if isinstance(result.get("parallel"), dict):
+        result["parallel"]["max_inflight_branches"] = result["serving"].get(
+            "max_num_seqs", Serving.model_fields["max_num_seqs"].default)
+    return result
+
+
 def resolve(path, overrides=()):
     path = Path(path).resolve()
     raw = yaml.load(path.read_text(encoding="utf-8"), Loader=UniqueLoader)
@@ -586,6 +610,9 @@ def resolve(path, overrides=()):
     hidden["vllm"] = options
     for item in overrides:
         dotted, value = item.split("=", 1)
+        if dotted == "parallel.max_inflight_branches":
+            raise ValueError("parallel.max_inflight_branches is derived from "
+                             "serving.max_num_seqs and cannot be configured")
         target = raw
         keys = dotted.split(".")
         for key in keys[:-1]:

@@ -122,35 +122,3 @@ $CLI --config "$CONFIG" steering-visualize NEW_REDRAW_ID --redraw-from OLD_ANALY
 发布到新 analysis ID，不改变原 dataset receipt。投影或 transform 篡改会被拒绝。transform 为无 pickle NPZ，不是 steering payload。
 LDA/t-SNE/UMAP 均支持；method 默认继承源 bundle。显式不同 method 或重新传入嵌入拟合参数将被拒绝。
 
-## 本次真实验收
-
-用户指定 run：verified80-consensus32-resolved106plus331-gpu03-tp4-w4-s64-20261027 的全部 submitted rollout。
-冻结 68 条轨迹、2,933 个 decision、93,856 个候选；site 3 有 74,704 个有效样本（29,991 positive / 44,713 negative）。
-58 条轨迹有 included 样本，另外 10 条保留 excluded 覆盖。19,152 个 excluded 分别为：19,136 缺少匹配的已发布/finalized session、14 缺有效 tool action、2 close 未生成。
-publication 未匹配不等价于 NAS 底层文件不存在；不得据此清理或修复原 capture。
-保留 27,656 个 nonselected positive、14,561 个 filtered positive、19,865 个 retained negative；226 个 decision 的全部有效 action 同意 winner。
-真实验收仅使用该单 run 和 native site 3；多 run、动态 site、固定/熵策略与不同 representative 的覆盖由回归验证。
-
-Dataset：verified80-consensus32-dataset-20261101；analysis：verified80-consensus32-lda-site3-20261101；重绘：verified80-consensus32-lda-site3-redraw-20261101。
-三类产物根均为 /data3/wangtianyi/DyConGlobal。正式 artifact verify 核对 7,482 个冻结来源文件；cache --check-data 和真实冻结重绘均通过。
-没有重新 rollout、启动 GPU、训练 estimator、修改根配置或原 capture。合并主工程前需审查 core/cli.py、hidden/artifacts.py、pyproject.toml 与其他 agent 的并发修改。
-
-## 2026-11-01 t-SNE / UMAP 拓展验收
-
-复用上述 dataset/cache，site 3 全部 74,704 行均参与拟合和导出。默认 PCA 50 维
-保留约 89.01% 方差；seed=42、绘图显示上限 20,000、retained 分面、PNG/SVG/PDF/HTML。
-t-SNE 使用 perplexity=30、max_iter=1000；UMAP 使用 n_neighbors=15、min_dist=0.1、n_epochs=200。
-
-| 分析 ID | 正式 artifact verify | 实测拟合及导出耗时 |
-|---|---|---|
-| verified80-consensus32-tsne-site3-20261101 | verified | 2:55.06 |
-| verified80-consensus32-umap-site3-20261101 | verified | 1:32.28 |
-| verified80-consensus32-tsne-site3-redraw-20261101 | verified | 冻结坐标重绘 |
-| verified80-consensus32-umap-site3-redraw-20261101 | verified | 冻结坐标重绘 |
-
-两项重绘采用 seed=99、显示 5,000 点，projection 和 descriptor 均与原分析逐字节一致。
-旧 LDA artifact、原 cache 校验、97 项 steering/共识/分支/capture 相关测试、Ruff 和
-git diff --check 均通过。测试还覆盖无来源重绘、固定 seed 重复拟合、单标签、退化输入、
-非法参数和内存预算拒绝；未运行整个工程测试套件。
-临时日志和拓展增量补丁位于 worktree 内 `temp/steering-manifold-validation/`。
-

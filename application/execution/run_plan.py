@@ -109,7 +109,7 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
                    'generation.max_tokens', 'generation.thinking_token_budget',
                    'generation.require_reasoning_close',
                    'webarena.environment_pool_ref', 'webarena.browser_image_ref',
-                   'parallel.estimator_ref', 'parallel.max_inflight_branches',
+                   'parallel.estimator_ref',
                    'paths.artifact_roots', 'model.verify_identity'}
         cfg = copy.deepcopy(source['config'])
         frozen_selection = copy.deepcopy(cfg.pop('selection'))
@@ -157,7 +157,16 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
             'task_order': 'reversed' if reverse_task_order else 'source',
             'created_at': now()}
 
+    from core.config import with_derived_parallel_capacity
     from core.parallel_policy import apply_run_parallel
+
+    # This is creation, including clones of older snapshots. Loading/resuming
+    # the source still uses its frozen capacity without modifying its bytes.
+    cfg = with_derived_parallel_capacity(cfg)
+    parallel = cfg.get("parallel", {})
+    if (parallel.get("enabled") and not parallel.get("dynamic_branch_admission", False)
+            and parallel.get("branch_count", 1) > parallel["max_inflight_branches"]):
+        raise ValueError("parallel capacity must accommodate one decision")
 
     cfg, parallel_input = apply_run_parallel(
         cfg, parallel_config, from_run=from_run, overrides=clone_overrides or cfg.get("overrides", ()))
@@ -235,6 +244,9 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
     if cfg.get("parallel_policy"):
         effective_config["parallel"] = {
             k: v for k, v in cfg["parallel"].items() if k != "estimator_sha256"}
+    # Human-readable YAML is an input surface; the derived value is recorded
+    # only in resolved-config.json and the audit/hash chain.
+    effective_config.get("parallel", {}).pop("max_inflight_branches", None)
 
     (run / "config.yaml").write_text(
 

@@ -1,7 +1,5 @@
 # 多 GPU、每卡 TP=1 的轨迹调度
 
-日期：2026-10-31。
-
 在同一个 run 内，每张指定 GPU 启动一个独立 TP=1 serving worker，完整 agent 轨迹固定使用领取它的服务。轨迹每一步的所有候选分支仍在该卡上采样；这不改变 `parallel.branch_count`、选枝策略或重复采样身份。
 
 在根 `config.yaml` 的既有 `serving` 节中设置以下字段，其余配置继续使用原值：
@@ -55,7 +53,7 @@ serving:
   run create NEW_RUN --operation rollout --from-run SOURCE_RUN --repeat-count 1
 ```
 
-`NEW_RUN` 须为新 ID，示例 GPU 与端口须替换为实际分配；来源有多个 repetitions 时，将 `--repeat-count` 改为来源的确切值。已有 run 可在停止并确认清理完成后，通过 `revise-serving-placement` 显式修订拓扑，再以原 ID resume；单独 `resume` 不改变模式。克隆的其他覆盖字段见[冻结克隆](RUN-CLONE-CN.md)。
+`NEW_RUN` 须为新 ID，示例 GPU 与端口须替换为实际分配；来源有多个 repetitions 时，将 `--repeat-count` 改为来源的确切值。已有 run 可在停止并确认清理完成后，通过 `revise-serving-placement` 显式修订拓扑，再以原 ID resume；单独 `resume` 不改变模式。克隆与离线修订的边界见[入口约定](ENTRYPOINTS.md#runs-samples-and-attempts)。
 
 `run status` 和 `report run` 的 `serving_workers` 展示每卡端口、CPU 槽位占用与上限；本地证据位于 `runs/RUN/serving/worker-pool.json`。各服务的 launch、process、service 和 server.log 位于 `serving/workers/worker-NN/`。每个真实物理 attempt 另存 `serving-assignment.json`，结果中也含 `serving_assignment`，可追溯 sample/attempt/execution 与 GPU/服务的绑定。
 

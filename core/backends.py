@@ -149,8 +149,12 @@ def execution_context(cfg, tasks):
     if snapshot.get("schema_version") != 1 or snapshot.get("benchmark") != benchmark:
         raise ValueError("Invalid benchmark snapshot")
     for key, task in tasks.items():
+        # Partition is mutable Catalog selection metadata, not task content.
+        frozen_task = snapshot["tasks"].get(key, {})
+        frozen_definition = {k: v for k, v in frozen_task.items() if k != "partition"}
+        current_definition = {k: v for k, v in task.items() if k != "partition"}
         if (task["benchmark"] != benchmark or task["revision"] != snapshot["revision"]
-                or snapshot["tasks"].get(key) != task):
+                or frozen_definition != current_definition):
             raise ValueError("Task does not belong to frozen benchmark snapshot")
     context = {"schema_version": 1, "benchmark": benchmark, "agent": agent,
                "revision": snapshot["revision"], "snapshot_sha256": sha256(snapshot_path),

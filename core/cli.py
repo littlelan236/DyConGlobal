@@ -178,12 +178,16 @@ def main(argv=None):
     q.add_argument("--revision-id", required=True)
     q.add_argument("--max-cpu-workers-per-gpu", type=int)
     q.add_argument("--max-num-seqs", type=int)
-    q.add_argument("--max-inflight-branches", type=int)
     q.add_argument("--reason", required=True)
     q = run_sub.add_parser("revise-model-verification", help="Audit an offline model identity verification flag revision")
     q.add_argument("run_id")
     q.add_argument("--revision-id", required=True)
     q.add_argument("--verify-identity", choices=["true", "false"], required=True)
+    q.add_argument("--reason", required=True)
+    q = run_sub.add_parser("revise-wheelhouse", help="Audit a stopped run's shared wheelhouse revision")
+    q.add_argument("run_id")
+    q.add_argument("--revision-id", required=True)
+    q.add_argument("--wheelhouse", required=True)
     q.add_argument("--reason", required=True)
     q = run_sub.add_parser("revise-serving-placement", help="Audit an offline GPU device and serving endpoint move")
     q.add_argument("run_id")
@@ -213,6 +217,13 @@ def main(argv=None):
     q.add_argument("--reason", required=True)
     q.add_argument("--sample-key", action="append", default=[], help="Restrict retry to exact task/repetition sample keys")
     q.add_argument("--expect-attempt", action="append", default=[], metavar="SAMPLE_KEY=ATTEMPT_ID", help="Reject changed terminal cursors before writing retry evidence")
+    q = run_sub.add_parser("compare-skillsbench", help="Compare accepted SkillsBench repetitions and trajectories across runs")
+    q.add_argument("run_ids", nargs="+", metavar="RUN_ID")
+    q.add_argument("--baseline", help="Reference run, which must occur in RUN_IDs")
+    q.add_argument("--repetition", action="append", default=[], metavar="RUN_ID=REPETITION",
+                   help="Select one repetition per run (zero-based index or rep-000); repeat for each multi-repetition run")
+    q.add_argument("--format", choices=["json", "markdown"], default="markdown")
+    q.add_argument("--output", type=Path, help="Optional new report file; refuses overwrite")
     q = run_sub.add_parser("compare", help="Compare physical exits and common final submitted task/repetition pairs")
     q.add_argument("run_ids", nargs="+", metavar="RUN_ID")
     q.add_argument("--baseline", help="Reference run, which must occur in RUN_IDs")
@@ -311,6 +322,9 @@ def main(argv=None):
     p.add_argument("run_id")
     p.add_argument("publication_id")
     p.add_argument("--session-id", action="append", required=True)
+    p.add_argument("--eligibility", choices=["resolved_only", "positive_reward"], default="resolved_only")
+    p.add_argument("--coverage-scope", choices=["all_branches", "canonical_native"], default="all_branches",
+                   help="canonical_native requires complete selected native coverage; unselected branch gaps remain recorded")
     p = sub.add_parser("online-index")
     p.add_argument("--publication-id")
     p.add_argument("run_id")
@@ -329,14 +343,16 @@ def main(argv=None):
     q.add_argument("--rollout-id", action="append", default=[])
     q.add_argument("--rollout-list", type=Path)
     q.add_argument("--label-normalization", choices=["raw", "trajectory_fraction"], default="raw")
+    q.add_argument("--eligibility", choices=["resolved_only", "positive_reward"], default="resolved_only")
     p = sub.add_parser("difficulty-split", help="Freeze a reusable dataset split")
     p.add_argument("dataset_id")
     p.add_argument("split_id")
-    p.add_argument("--strategy", choices=["event_random_v1", "task_random_v1", "repo_source_quota_v1", "inherit_task_split_v1"], default="event_random_v1")
+    p.add_argument("--strategy", choices=["event_random_v1", "task_random_v1", "repo_source_quota_v1", "inherit_task_split_v1", "task_manifest_v1"], default="event_random_v1")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--validation-fraction", type=float, default=0.15)
     p.add_argument("--test-fraction", type=float, default=0.15)
     p.add_argument("--validation-tasks", type=int, default=48)
+    p.add_argument("--task-partitions", type=Path, help="Bind task partition manifest; validation stays inside train")
     p.add_argument("--parent-attempt-id")
     p.add_argument("--parent-receipt-sha256")
     for cmd in ["tasks-import", "rollouts-import", "evaluations-import"]:
@@ -582,6 +598,30 @@ def main(argv=None):
             result = compare_runs(Path(a.config).resolve().parent, a.run_ids, baseline=a.baseline,
                                   repetitions=repetitions)
             rendered = (format_markdown(result) if a.format == "markdown"
+                        else json.dumps(result, ensure_ascii=False, indent=2))
+            if a.output:
+                with a.output.open("x", encoding="utf-8") as stream:
+                    stream.write(rendered + "\n")
+        except (ValueError, OSError) as exc:
+            parser.error(str(exc))
+        print(rendered)
+        return
+    if a.command == "run" and a.run_command == "compare-skillsbench":
+        if a.analysis_run_id:
+            parser.error("run compare-skillsbench takes explicit run IDs; do not pass --run-id")
+        from application.execution.comparison import accepted_task_counts, format_accepted_markdown
+        try:
+            repetitions = {}
+            for selector in a.repetition:
+                run_id, separator, repetition = selector.partition("=")
+                if not separator or not run_id or not repetition:
+                    raise ValueError("--repetition requires RUN_ID=INDEX or RUN_ID=rep-000")
+                if run_id in repetitions:
+                    raise ValueError(f"Duplicate repetition selector for run: {run_id}")
+                repetitions[run_id] = repetition
+            result = accepted_task_counts(Path(a.config).resolve().parent, a.run_ids, baseline=a.baseline,
+                                          repetitions=repetitions)
+            rendered = (format_accepted_markdown(result) if a.format == "markdown"
                         else json.dumps(result, ensure_ascii=False, indent=2))
             if a.output:
                 with a.output.open("x", encoding="utf-8") as stream:
@@ -963,12 +1003,15 @@ def main(argv=None):
             result = revise_concurrency(cfg["project_root"], a.run_id,
                 revision_id=a.revision_id, reason=a.reason,
                 max_cpu_workers_per_gpu=a.max_cpu_workers_per_gpu,
-                max_num_seqs=a.max_num_seqs,
-                max_inflight_branches=a.max_inflight_branches)
+                max_num_seqs=a.max_num_seqs)
         elif a.run_command == "revise-model-verification":
             from application.execution.capture_budget_revision import revise_model_verification
             result = revise_model_verification(cfg["project_root"], a.run_id,
                 revision_id=a.revision_id, verify_identity=a.verify_identity == "true", reason=a.reason)
+        elif a.run_command == "revise-wheelhouse":
+            from application.execution.capture_budget_revision import revise_wheelhouse
+            result = revise_wheelhouse(cfg["project_root"], a.run_id,
+                revision_id=a.revision_id, wheelhouse=a.wheelhouse, reason=a.reason)
         elif a.run_command == "revise-serving-placement":
             from application.execution.capture_budget_revision import revise_serving_placement
             result = revise_serving_placement(cfg["project_root"], a.run_id, revision_id=a.revision_id,
@@ -1038,7 +1081,8 @@ def main(argv=None):
         result = reclassify_online(cfg, a.run_id, a.session_id, wait_for_run=a.wait_for_run)
     elif a.command == "capture-trace":
         from hidden.publish_finalized import publish_finalized
-        result = publish_finalized(cfg, a.run_id, a.publication_id, a.session_id)
+        result = publish_finalized(cfg, a.run_id, a.publication_id, a.session_id, eligibility=a.eligibility,
+                                   coverage_scope=a.coverage_scope)
     elif a.command == "online-index":
         from difficulty.datasets.online import build_published_index
 
@@ -1050,13 +1094,14 @@ def main(argv=None):
         else:
             from difficulty.datasets.resolved import build_resolved_selection
             result = build_resolved_selection(cfg["project_root"], a.source_run, a.index_id, a.dataset_id,
-                                              a.rollout_id, a.rollout_list, a.label_normalization)
+                                              a.rollout_id, a.rollout_list, a.label_normalization, eligibility=a.eligibility)
     elif a.command == "difficulty-split":
         from difficulty.training.splits import create_split
         result = create_split(cfg["project_root"], a.dataset_id, a.split_id,
             strategy=a.strategy, seed=a.seed, validation_fraction=a.validation_fraction,
             test_fraction=a.test_fraction, validation_tasks=a.validation_tasks,
-            parent_experiment_id=a.parent_attempt_id, parent_receipt_sha256=a.parent_receipt_sha256)
+            parent_experiment_id=a.parent_attempt_id, parent_receipt_sha256=a.parent_receipt_sha256,
+            task_partitions=a.task_partitions)
     elif a.command == "tasks-import":
         result = catalog.register_tasks(read_json(a.list))
     elif a.command == "rollouts-import":

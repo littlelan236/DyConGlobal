@@ -1,82 +1,47 @@
 # DyConGlobal 领域术语
 
-本词汇表区分轨迹终止、成功提交和剩余工作量，供工程设计与实验定义使用。
+## 任务与运行
 
-## 轨迹与结果
+**Task**：由 benchmark、revision 和 `instance_id` 标识的问题。
 
-**Task（任务）**：由指定 benchmark 版本和 instance_id 共同标识的一项代码修复问题。
+**Run**：一次冻结配置和任务选择的项目操作。Run 保存 rollout、attempt、patch、evaluation 及来源证据。
 
-**Rollout（轨迹）**：智能体在一次独立尝试中，对一个任务产生的模型回复、动作、环境观察和终止结果的有序记录。复用同一次尝试的副本不构成新的独立样本。
+**Rollout / trajectory**：一个独立采样产生的模型回复、工具动作、环境观察和终止结果的有序记录。复制已有轨迹不构成新样本。
 
-**Agent step（智能体步骤）**：一次模型调用返回的一条 assistant 回复及其后续动作执行阶段；一次步骤可以包含零个或多个工具调用。
+**Repetition**：同一 task 的一个独立采样槽位。`repeat_count` 是每个 task 计划的 repetition 数。
 
-**Trajectory termination（轨迹终止）**：一次尝试停止继续运行，原因可以是提交、预算耗尽、错误或基础设施故障。
+**Attempt**：执行一个 sample slot 的物理尝试。基础设施 retry 属于同一个 sample slot；重新采样必须使用新的 repetition 身份。
 
-**Submission（提交）**：智能体按协议结束并交付修复结果的行为；提交不蕴含修复正确。
+**Submission**：agent 交付 patch 的行为，不代表 patch 已解决任务。
 
-**Resolved rollout（成功轨迹）**：最终交付的修复结果经过绑定该结果的评测，被判定为解决了任务的轨迹。
+**Resolved rollout**：被选中的 patch 经绑定的 benchmark evaluation 判定解决任务的轨迹。
 
-## 预测与信息位置
+**Infrastructure error**：阻止可靠完成执行或评分的环境/服务错误。它不是 benchmark 未解决结果，resolved 保持 null。
 
-**Boundary anchor（边界锚点）**：一条模型回复中指定的可观测时点，决定估计器能够读取哪些已发生的信息。
+## 数据与标签
 
-**Remaining workload（剩余工作量）**：从指定锚点到该成功轨迹最终成功提交，实际发生的后续步骤数量或推理 token 数量；它是轨迹相关的剩余难度代理。
-_Avoid_：最小必要推理量、已被证明的真实难度。
+**Catalog**：版本化 benchmark task 定义及 task partition。它不是 run 证据或训练数据 split。
 
-**Time to termination（距终止长度）**：从指定锚点到任意原因导致的轨迹终止所经历的剩余长度。失败轨迹也能观测此量，但它与剩余成功工作量不同。
+**Run evidence**：绑定 run 的 task、sample、attempt、canonical rollout、patch、evaluation 及 provenance。
 
-**Action information（动作信息）**：锚点处表示对随后动作或此前动作的可预测信息；两种时间方向需要分别定义。
+**Trajectory selection**：在明确来源 run 后，冻结供某一操作使用的 rollout 成员集合。
 
-## Action 分类
+**Boundary anchor**：一条模型回复中固定的信息观察位置，例如 `think_close`。
 
-**Action observation unit（动作观测单位）**：一个 assistant message 及其提交的 tool-call 记录；action 分类以此为一行统计单位。
+**Remaining workload**：成功轨迹在指定 anchor 之后到最终成功提交之间的实际步骤数或 reasoning token 数。它是轨迹相关代理，不是最小必要工作量。
 
-**Primitive component（原子组成）**：从一个 shell tool-call AST 中识别出的读取、修改、执行、环境、清理或交付行为；一个观测单位可包含多个组成。
+**Time to termination**：从 anchor 到轨迹以任意原因终止的剩余长度。失败轨迹也可观测，但它不等于剩余成功工作量。
 
-**Primary action category（主动作类别）**：按固定优先级从组成集合得到的唯一类别；同一个观测单位不会同时拥有两个主类别。
+**Exact native token IDs**：由运行时原生 tokenization 记录的精确 ID。Tokenizer 重建值是不同证据，不能互相冒充。
 
-**Compound action（复合动作）**：一个 tool-call 同时包含多个不同组成，例如先写入脚本再运行它；保留 components，但只输出一个主类别。
+## Analysis
 
-**Unknown action（未判定动作）**：静态规则无法安全确定目的的观测单位；标为 OTHER，不强行解释为模型意图。
+**Action observation**：一个 assistant message 及其提交的 tool-call 记录，是 action 分类的观测单位。
 
-**Inspect / Edit / Environment / Run / Clean / Deliver**：分别表示信息获取、修改实现、环境准备、执行验证、清理状态和交付结果六类可观察目的。
+**Primary action category**：按固定优先级从可观察 action 组成得到的唯一类别；无法安全判定的记录标为 `OTHER`。
 
+**Difficulty dataset / split / attempt**：分别是冻结样本与特征的数据集、该数据集上的固定成员划分、以及使用固定输入和配置的一次训练/评估操作。
 
-## Difficulty 实验身份
+**Published predictor**：从训练结果显式发布、供推理使用且绑定来源参数和数据身份的模型版本。
 
-**Source run（来源运行）**：产生轨迹、hidden 或标签证据的一次运行；一批训练数据可以来自多次来源运行。
-
-**Difficulty dataset（难度训练数据集）**：具有固定样本、标签定义、特征身份和来源证据的一批数据。
-
-**Difficulty split（难度训练划分）**：某一固定数据集上明确的训练、验证和测试成员分配；相同数据集可有多套独立划分。
-
-**Training attempt（训练尝试）**：使用固定数据、划分、模型结构和超参数执行的一次拟合或候选搜索。
-_Avoid_：来源运行、数据采集批次。
-
-**Difficulty checkpoint（难度估计器参数）**：某次训练尝试输出的、与特定模型结构、输入特征和目标定义绑定的模型参数。
-
-**Published predictor（已发布预测器）**：从已训练参数显式发布、供推理使用的版本；保留参数及训练来源的身份。
-
-## 任务清单与运行证据
-
-**Benchmark catalog（基准任务清单）**：由指定基准版本定义的任务集合，以及各任务的身份和分区。
-
-**Run evidence（运行证据）**：属于一次明确运行的轨迹、补丁、评测结果及其来源证明。
-
-**Trajectory selection（轨迹选择）**：先确定来源运行，再在该运行的轨迹中明确选定成员的过程；轨迹副本仍属于同一个独立样本。
-
-## Rollout repetitions and evaluation outcomes
-
-**Repetition??????**??? task ??? run ?????????? rollout??????? sample identity ? seed?????????? repetition ???
-
-**Repeat count???????**????? task ??????? repetition ??????????? `run create --repeat-count` ??? run plan ??
-
-**Sample slot??????**??? task ??? repetition ????????????????????????????????????
-
-**Execution attempt??????**?????? sample slot ????????????????? retry ????? slot?????? repetition?
-
-**Harness `invalid_patch`??????**?patch ?????????????????? `completed`?`resolved=false`?
-
-**Harness `infra_error`????????**??????????? patch ??????????? `infra_error`?`resolved=null`?
-
-**Harness `ConnectionError`??????**???????/??????? harness ????????????? `ConnectionError`?`resolved=null`??? attempt ???????
+**Capture publication**：带 receipt 的 finalized hidden 及标签发布。它证明所绑定数据已发布，不证明 rollout 成功或 evaluation resolved。

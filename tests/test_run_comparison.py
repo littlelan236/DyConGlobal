@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from application.execution.comparison import compare_runs, format_markdown
+from application.execution.comparison import (accepted_task_counts, compare_runs,
+                                              format_accepted_markdown, format_markdown)
 from application.execution.evidence import RunEvidence
 from application.execution.run_plan import create_run, load_plan
 from catalog.store import Catalog
@@ -58,7 +59,7 @@ def add_attempt(cfg, run, iid, status="Submitted", *, attempt=0, final=True,
                                "run_id": run.name, "attempt_id": aid, "sample": item,
                                "model_fingerprint": "fixture"})
     result = {**context, "rollout_id": rid, "exit_status": status, "agent_exit_status": status,
-              "disposition": "accepted"}
+              "raw_reward": {"reward": 0.5}, "disposition": "accepted"}
     write_json(out / "attempt.json", result)
     if final:
         write_json(work / "result.json", result)
@@ -94,6 +95,48 @@ def test_common_tasks_retry_dedup_selected_costs_and_changes(cfg):
     assert b["changes_from_baseline"]["common_submitted"]["prompt_tokens"]["relative_change"] == 1
     assert b["changes_from_baseline"]["common_submitted"]["resolved_rate"]["percentage_point_change"] == -100
     assert "-100.00 pp" in format_markdown(report)
+
+
+def test_accepted_task_counts_use_shared_tasks_and_minimums(cfg):
+    left, right = make_runs(cfg, "accepted-left", "accepted-right", count=3,
+                            ids=("a", "b", "c"))
+    for repetition in range(3):
+        add_attempt(cfg, left, "a", repetition=repetition)
+    for repetition in (1, 2):
+        add_attempt(cfg, right, "a", repetition=repetition)
+    add_attempt(cfg, left, "b")
+    for repetition in range(3):
+        add_attempt(cfg, right, "b", repetition=repetition)
+    add_attempt(cfg, left, "c", final=False)
+    add_attempt(cfg, right, "c")
+    report = accepted_task_counts(cfg["project_root"], [left.name, right.name])
+    assert report["common_task_count"] == 3
+    assert report["common_accepted_task_count"] == 2
+    assert report["common_accepted_count"] == 3
+    assert [(row["instance_id"], row["minimum_accepted_count"]) for row in report["tasks"]] == [
+        ("a", 2), ("b", 1), ("c", 0)]
+    assert report["runs"][0]["accepted_sample_count"] == 4
+    assert report["runs"][1]["accepted_sample_count"] == 6
+    assert report["common_accepted_sample_count"] == 3
+    assert report["common_accepted_metrics_by_run"][left.name]["steps"] == 3
+    assert report["common_accepted_metrics_by_run"][left.name]["prompt_tokens"] == 30
+    assert report["common_accepted_metrics_by_run"][left.name]["reward_mean"] == 0.5
+    assert report["tasks"][0]["common_accepted_count"] == 2
+    assert "| a | 3 / n=2; steps=2; tokens=26; reward=1/0.5 |" in format_accepted_markdown(report)
+
+
+def test_accepted_compare_uses_minimum_count_without_matching_repetition(cfg):
+    left, right = make_runs(cfg, "minimum-left", "minimum-right", count=3, ids=("a",))
+    for repetition in (1, 2):
+        add_attempt(cfg, left, "a", repetition=repetition, prompt=10 + repetition)
+    for repetition in (0, 2):
+        add_attempt(cfg, right, "a", repetition=repetition, prompt=20 + repetition)
+    report = accepted_task_counts(cfg["project_root"], [left.name, right.name], baseline=left.name)
+    assert report["common_accepted_count"] == 2
+    assert report["common_accepted_sample_count"] == 2
+    assert [sample["repetition_index"] for sample in report["common_accepted_samples_by_run"][left.name]] == [1, 2]
+    assert [sample["repetition_index"] for sample in report["common_accepted_samples_by_run"][right.name]] == [0, 2]
+    assert report["common_accepted_metrics_by_run"][right.name]["changes_from_baseline"]["prompt_tokens"]["relative_change"] > 0
 
 
 def test_mixed_repeat_counts_need_selection_and_invalid_run_selection_rejected(cfg):

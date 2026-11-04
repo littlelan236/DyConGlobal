@@ -7,7 +7,25 @@ from enrichment.online_trace import finalize_token_events, publication_directory
 from hidden.artifacts import read_request, response_records, event_records
 
 
-def publish_finalized(cfg,run_id,publication_id,session_ids):
+def _check_finalization(completion, rollout_id, coverage, coverage_scope):
+    if coverage_scope not in {'all_branches', 'canonical_native'}:
+        raise ValueError('Unknown capture coverage scope')
+    if completion.get('rollout_id') != rollout_id:
+        raise ValueError('Capture finalization rollout identity differs')
+    if completion.get('capture_status') == 'complete':
+        return
+    if (coverage_scope == 'canonical_native' and completion.get('capture_status') == 'partial'
+            and type(coverage.get('expected')) is int and coverage['expected'] > 0
+            and coverage.get('observed') == coverage['expected'] and coverage.get('missing') == []):
+        return
+    raise ValueError('Attempt has no successful immutable capture finalization for requested scope')
+
+
+def publish_finalized(cfg,run_id,publication_id,session_ids,*,eligibility="resolved_only",coverage_scope="all_branches"):
+    from difficulty.datasets.eligibility import eligible_evaluation, validate_policy
+    validate_policy(eligibility)
+    if coverage_scope not in {'all_branches', 'canonical_native'}:
+        raise ValueError('Unknown capture coverage scope')
     from core.config import load_snapshot
     root=Path(cfg['project_root']).resolve();frozen=load_snapshot(root,run_id)
     publication_id=identifier(publication_id);sessions=sorted({identifier(s) for s in session_ids})
@@ -15,7 +33,9 @@ def publish_finalized(cfg,run_id,publication_id,session_ids):
     nas=Path(frozen['paths']['nas_root'])/frozen['capture']['export']['root']/run_id
     output=publication_directory(root,run_id,publication_id)
     signature={'run_id':run_id,'publication_id':publication_id,'session_ids':sessions,
-               'config_hash':frozen['config_hash'],'policy':'sealed_resolved_sessions_v1'}
+               'config_hash':frozen['config_hash'],'policy':('sealed_resolved_sessions_v1' if eligibility == 'resolved_only' else 'sealed_positive_reward_sessions_v1')}
+    if coverage_scope != 'all_branches':
+        signature['coverage_scope'] = coverage_scope
     with file_lock(root/'state/capture-trace-locks'/run_id/(publication_id+'.lock')):
         if output.exists():
             receipt=read_json(output/'receipt.json')
@@ -31,12 +51,11 @@ def publish_finalized(cfg,run_id,publication_id,session_ids):
             if receipt.get('status') not in {'stopped','complete'} or coverage.get('missing'):
                 raise ValueError('Session is not stopped with complete native coverage: '+sid)
             rid=final['rollout_id'];row=data['rollouts'][rid]
-            if row['resolved'] is not True or row['evaluation_status']!='completed':
-                raise ValueError('Session has no completed successful official evaluation')
+            if not eligible_evaluation(row, data, rid, eligibility):
+                raise ValueError('Session does not satisfy official evaluation eligibility: '+eligibility)
             attempt=owned_path(root,row['provenance']['source']).parent.parent
             final_receipt=attempt/'capture-finalization.json';completion=read_json(final_receipt)
-            if completion.get('capture_status')!='complete' or completion.get('rollout_id')!=rid:
-                raise ValueError('Attempt has no successful immutable capture finalization')
+            _check_finalization(completion, rid, coverage, coverage_scope)
             proofs[str(final_receipt)]=sha256(final_receipt)
             trajectory=owned_path(root,row['trajectory_path'])
             if sha256(trajectory)!=final['trajectory_sha256']:raise ValueError('Session/canonical identity differs')

@@ -20,7 +20,7 @@ def parallel_cfg(cfg, monkeypatch):
     manifest = Path(cfg["project_root"]) / "fixture-estimator.json"
     manifest.write_text("{}")
     value["parallel"] = Parallel(enabled=True, mode="parallel_consensus", branch_count=4,
-                                 estimator_ref=str(manifest), max_inflight_branches=4,
+                                 estimator_ref=str(manifest),
                                  save_sites=[3], fallback_policy="stop").model_dump()
     value["capture"].update(enabled=True, anchors=["think_close"], layers=[3])
     value["capture"]["export"]["enabled"] = True
@@ -356,13 +356,13 @@ def test_cli_clone_can_reduce_dynamic_branch_capacity_with_max_sequences(paralle
                             "retention_rule": "effective_count_plus_n_v1", "n": 6}))
     source_sha = sha256(source / "resolved-config.json")
     main(["--config", str(Path(cfg["project_root"]) / "config.yaml"),
-          "--set", "parallel.max_inflight_branches=3", "--set", "serving.max_num_seqs=3",
+          "--set", "serving.max_num_seqs=3",
           "run", "create", "dynamic-clone", "--operation", "rollout", "--from-run", source.name])
     loaded = load_plan(cfg["project_root"], "dynamic-clone")["config"]
     assert loaded["parallel"]["max_inflight_branches"] == loaded["serving"]["max_num_seqs"] == 3
     assert loaded["parallel"]["branch_count"] == 4
     assert loaded["parallel"]["entropy"]["n"] == 6
     assert sha256(source / "resolved-config.json") == source_sha
-    with pytest.raises(ValueError, match="parallel capacity must not exceed"):
+    with pytest.raises(ValueError, match="Unsupported frozen-clone override"):
         create_run(cfg, "invalid-capacity-clone", operation="rollout", from_run=source.name,
                    clone_overrides=["parallel.max_inflight_branches=5", "serving.max_num_seqs=3"])

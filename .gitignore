@@ -61,6 +61,7 @@ desktop.ini
 /catalog/manifest.lock
 /catalog/imports/**
 /catalog/maintenance/**
+/catalog/partitions/**
 /enrichment/manifest.json
 /enrichment/manifest.lock
 /hidden/manifest.json

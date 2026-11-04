@@ -71,13 +71,12 @@ start/resume/analysis 只读本 run 快照，不重新读取外部策略文件�
 
 ## 证据与检查
 
-### effective_count_full_above_v1（2026-10-31）
+### Full retention threshold
 
 新增映射先完整计算 `effective_count_v1` 的最终整数分支预算
 `base_keep_count=min(N,max(m,stable_ceil(exp(H))))`。仅当该预算**严格大于**
 `entropy.full_retention_threshold`（默认 10、可配置正整数）时，改为保留候选池全部 N 条。
-本实验 branch_count=32，完整合法池触发时保留全部 32 条；无效或 loop escape 排除的分支不会被恢复。
-否则与 `effective_count_v1` 一致；候选不足仍按原规则报告不可用。
+无效或 loop escape 排除的分支不会被恢复；候选不足仍按原规则报告不可用。
 例如原 k=10 保留 10，原 k=11 改为 32。比较发生在取整、最小值和候选数量裁剪之后。
 
 ```yaml
@@ -95,17 +94,7 @@ decision 记录候选池、canonical 类别、原始 H、规则、raw_keep、k�
 
 action-branch-stats 增加 decision_pool_entropy、decision_keep_count、representative_policy、retention_rule，可按策略分组。旧分析的指标定义不变。策略 SHA 不包含可独立审计修订的 admission/timeout 资源项；正式离线 serving-memory/concurrency 修订不改变选择策略，完整 config hash 仍按原修订链更新。
 
-```bash
-CUDA_VISIBLE_DEVICES='' .venvs/runner/bin/python -m pytest -q \
-  tests/test_parallel_entropy.py tests/test_run_parallel_policy.py \
-  tests/test_parallel_entropy_integration.py tests/test_parallel_consensus.py \
-  tests/test_parallel_loop_escape.py tests/test_native_receipt_contract.py
-```
-
-`run start --check-only` 会启动 managed serving，仍需要 GPU。此次实现调试不执行该入口，不启动 GPU rollout/harness run。
-
-
-## Effective count 加法偏移映射（2026-11-01）
+### Additive effective-count mapping
 
 Run 独立策略新增 `effective_count_plus_n_v1`，必须显式配置非负整数 `entropy.n`：
 
@@ -127,7 +116,7 @@ entropy 证据额外记录 `base_keep_count`、`n`，`raw_keep` 保留原 exp(H)
 旧 run 的快照、缺少此映射的选择行为均不补写。
 
 
-冻结 clone 同时允许 `--set parallel.max_inflight_branches=CAPACITY`。
-该值不得超过新 run 的 `serving.max_num_seqs`；当候选分支总数大于容量时，
-仍须启用 `dynamic_branch_admission`。例如 32 个候选分支、max_num_seqs=24 时，
-设置 max_inflight_branches=24，通过已有动态准入机制分批运行，不改变候选池大小。
+`parallel.max_inflight_branches` 不接受根 YAML、`--set`、clone 或并发修订中的手工值。
+创建或修订新 run 时，项目自动将它设为该 run 的 `serving.max_num_seqs`；当候选
+分支总数大于该值时，仍须启用 `dynamic_branch_admission`，通过已有动态准入机制
+分批运行，不改变候选池大小。历史冻结 run 保留原快照值，不能被重新解释。

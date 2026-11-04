@@ -56,7 +56,7 @@ def grouped_reports(samples, y, prediction):
     for field in ("repo", "source_kind", "task_group"):
         groups = defaultdict(list)
         for i, sample in enumerate(samples):
-            groups[sample[field]].append(i)
+            groups[sample.get(field, "not_applicable")].append(i)
         output[field] = {}
         for key, indices in sorted(groups.items()):
             value = report(y[indices], prediction[indices])
@@ -90,7 +90,9 @@ def save_checkpoint(path, model, metadata):
 
 def code_evidence(root):
     names = ["core/config.py", "core/cli.py", "core/io.py", "difficulty/probe_config.py",
-             "difficulty/datasets/submission.py", "difficulty/training/split.py",
+             "difficulty/datasets/submission.py", "difficulty/datasets/eligibility.py",
+             "difficulty/datasets/resolved.py", "hidden/publish_finalized.py",
+             "difficulty/training/split.py",
              "difficulty/training/splits.py", "difficulty/datasets/compose.py",
              "difficulty/receipts.py", "difficulty/datasets/paths.py",
              "difficulty/models/estimators.py", "difficulty/models/ridge_grid.py",
@@ -199,6 +201,10 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
     root = Path(cfg["project_root"])
     before_code = code_evidence(root)
     rollouts, samples, evidence = load_selection(cfg, settings)
+    contract = evidence['feature_contract']
+    width, native_sites = contract['width'], contract['native_sites']
+    if any(layer >= len(native_sites) for layer in settings.layers):
+        raise ValueError('Requested public layer is outside captured hidden sites')
     split_path = root / "difficulty/datasets" / settings.dataset_id / "splits" / split_id
     if not split_path.exists():
         if explicit_split:
@@ -216,6 +222,7 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
         "test_fraction": split.get("test_fraction", settings.test_fraction),
     })
     threeway = {"train", "validation", "test"} <= set(split["sample_ids"])
+    external_refit = settings.refit_train_validation and not threeway
     roles = {sample_id: role for role, ids in split["sample_ids"].items() for sample_id in ids}
 
     def role_for(sample):
@@ -229,7 +236,7 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
                   "dataset_receipt_sha256": settings.dataset_receipt_sha256,
                   "split_receipt_sha256": split_receipt_sha,
                   "model_contract": {"model_kind": "ridge", "architecture_id": "linear-ridge-v1",
-                      "feature_schema": "public-hidden-last-token-v1", "input_width": 4096,
+                      "feature_schema": "public-hidden-last-token-v1", "input_width": width,
                       "layer_policy": settings.layers, "targets": settings.targets,
                       "target_transforms": {target: target_transform(target, ridge=True)
                                             for target in settings.targets}},
@@ -256,13 +263,14 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
     cache = prepare_cache(cfg, settings, samples)
     write_json(output / "data-check.json", {**evidence, "cache": str(cache),
                "cache_manifest_sha256": sha256(cache / "cache.json"),
-               "verified_shape": [len(samples), 32, 4096], "sites": list(range(32)),
+               "verified_shape": [len(samples), len(native_sites), width], "sites": list(range(len(native_sites))), "native_sites": native_sites,
                "labels": "common submitted, uncensored samples", "checked_at": now()})
     if mode == "check-data":
         finish(output, experiment, root, before_code)
         return {"path": str(output), "mode": mode, "samples": len(samples), "cache": str(cache)}
     indices = {role: np.array([i for i, sample in enumerate(samples) if role_for(sample) == role], dtype=np.int64)
                for role in split_roles}
+    indices.setdefault("test", np.array([], dtype=np.int64))
     validation = [samples[i] for i in indices["validation"]]
     raw = np.column_stack([[s[LABELS[target]] for s in samples] for target in settings.targets])
     y = np.column_stack([transform_target(raw[:, i], target) for i, target in enumerate(settings.targets)])
@@ -292,20 +300,20 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
                              "feature_mean": grid.scaler.mean, "feature_scale": grid.scaler.scale}
                     relative = f"models/{target}/site-{layer:02d}/alpha-{alpha:.17g}.npz"
                     input_spec = {"source": "public_hidden", "feature_schema": "public-hidden-last-token-v1",
-                                  "public_sites": [layer], "native_site": layer if layer < 31 else 32,
-                                  "feature_transform": "single-site-vector", "dtype": "float32", "width": 4096}
+                                  "public_sites": [layer], "native_site": native_sites[layer],
+                                  "feature_transform": "single-site-vector", "dtype": "float32", "width": width}
                     save_checkpoint(output / relative, model, {"target": target, "target_transform":
                                target_transform(target, ridge=True),
                                "model_kind": "ridge", "architecture_id": "linear-ridge-v1",
                                "feature_schema": "public-hidden-last-token-v1",
                                "input_spec_json": json.dumps(input_spec, sort_keys=True),
                                "layer": layer, "alpha": alpha,
-                               "native_site": layer if layer < 31 else 32, "split_sha256": split_sha,
+                               "native_site": native_sites[layer], "split_sha256": split_sha,
                                "dataset_receipt_sha256": settings.dataset_receipt_sha256,
                                "attempt_id": experiment_id,
                                "model_fingerprint": rollouts[0]['model_fingerprint'],
                                "dataset_id": settings.dataset_id, "split_id": split_id,
-                               "split_receipt_sha256": split_receipt_sha, "input_width": 4096,
+                               "split_receipt_sha256": split_receipt_sha, "input_width": width,
                                "train_sample_ids_sha256": hash_json(split["sample_ids"]["train"]),
                                "fit_scope": "train", "loss": "sum_squared_error; intercept_unpenalized"})
                     trial.update(model=relative, model_sha256=sha256(output / relative))
@@ -334,33 +342,33 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
         winner = winners[target]
         # Candidate score is validation-only. For three-way protocols, refit the selected
         # configuration on train+validation before measuring the untouched test rows.
-        if threeway:
+        if threeway or external_refit:
             matrix = np.load(cache / f"layer-{winner['layer']:02d}.f32.npy", mmap_mode="r", allow_pickle=False)
             refit_x = matrix[fit_indices].astype(float)
             test_x = matrix[indices["test"]].astype(float)
             refit_grid = RidgeGrid(refit_x, y[fit_indices])
             refit_z = refit_grid.scaler.transform(refit_x)
-            test_z = refit_grid.scaler.transform(test_x)
+            test_z = refit_grid.scaler.transform(test_x) if len(test_x) else np.empty((0, width))
             refit_coef, refit_intercept = refit_grid.coefficients(winner["alpha"])
             refit_model = {"coef": refit_coef[:, i], "intercept": refit_intercept[i],
                            "feature_mean": refit_grid.scaler.mean, "feature_scale": refit_grid.scaler.scale}
             refit_relative = f"models/{target}/site-{winner['layer']:02d}/selected-refit.npz"
             input_spec = {"source": "public_hidden", "feature_schema": "public-hidden-last-token-v1",
                           "public_sites": [winner["layer"]],
-                          "native_site": winner["layer"] if winner["layer"] < 31 else 32,
-                          "feature_transform": "single-site-vector", "dtype": "float32", "width": 4096}
+                          "native_site": native_sites[winner["layer"]],
+                          "feature_transform": "single-site-vector", "dtype": "float32", "width": width}
             save_checkpoint(output / refit_relative, refit_model, {"target": target, "target_transform":
                        target_transform(target, ridge=True),
                        "model_kind": "ridge", "architecture_id": "linear-ridge-v1",
                        "feature_schema": "public-hidden-last-token-v1",
                        "input_spec_json": json.dumps(input_spec, sort_keys=True),
                        "layer": winner["layer"],
-                       "alpha": winner["alpha"], "native_site": winner["layer"] if winner["layer"] < 31 else 32,
+                       "alpha": winner["alpha"], "native_site": native_sites[winner["layer"]],
                        "split_sha256": split_sha, "dataset_receipt_sha256": settings.dataset_receipt_sha256,
                        "attempt_id": experiment_id,
                        "model_fingerprint": rollouts[0]['model_fingerprint'],
                        "dataset_id": settings.dataset_id, "split_id": split_id,
-                       "split_receipt_sha256": split_receipt_sha, "input_width": 4096,
+                       "split_receipt_sha256": split_receipt_sha, "input_width": width,
                        "train_sample_ids_sha256": hash_json(split['sample_ids']['train'] + split['sample_ids']['validation']),
                        "fit_scope": "train_validation", "loss": "sum_squared_error; intercept_unpenalized"})
             pfit, ptest = refit_z @ refit_coef[:, i] + refit_intercept[i], test_z @ refit_coef[:, i] + refit_intercept[i]
@@ -379,8 +387,14 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
                     np.full(len(indices["test"]), y[fit_indices, i].mean())),
                 "test_raw_units": report(raw[indices["test"], i], test_raw_pred),
                 "raw_prediction_nonfinite_count": int((~np.isfinite(test_raw_pred)).sum()),
-                "groups_transformed": grouped_reports([samples[j] for j in indices["test"]], y[indices["test"], i], ptest),
+                "groups_transformed": grouped_reports([samples[j] for j in indices["test"]], y[indices["test"], i], ptest) if threeway else {},
                 "refit_model": refit_relative}
+            if external_refit:
+                for field in ('test', 'test_baseline_train_validation_mean', 'test_raw_units',
+                              'groups_transformed', 'raw_prediction_nonfinite_count'):
+                    metrics[target].pop(field, None)
+                metrics[target]['refit_raw_units'] = report(raw[fit_indices, i], inverse_target(pfit, target))
+                metrics[target]['evaluation_note'] = 'Validation selects site/alpha; refit uses all train-cohort rows. External test tasks were not evaluated.'
             for j, sample in enumerate(validation):
                 validation_predictions.append({"sample_id": sample["sample_id"], "rollout_id": sample["rollout_id"],
                     "task_group": sample["task_group"], "target": target, "split": "validation",

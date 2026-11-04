@@ -30,7 +30,7 @@ def _build_split(rollouts, samples, strategy, seed, validation_fraction, test_fr
 
 def create_split(root, dataset_id, split_id, *, strategy="task_random_v1", seed=42,
                  validation_fraction=0.2, test_fraction=0.2, validation_tasks=48,
-                 parent_experiment_id=None, parent_receipt_sha256=None):
+                 parent_experiment_id=None, parent_receipt_sha256=None, task_partitions=None):
     root = Path(root).resolve()
     dataset_id, split_id = identifier(dataset_id), identifier(split_id)
     if seed < 0 or not math.isfinite(validation_fraction) or not math.isfinite(test_fraction):
@@ -79,8 +79,20 @@ def create_split(root, dataset_id, split_id, *, strategy="task_random_v1", seed=
                 parent_split_digest = sha256(parent_split_dir / "split.json")
             if proof.get("files", {}).get("split.json") and proof["files"]["split.json"] != parent_split_digest:
                 raise ValueError("Parent split is not bound to parent receipt")
-        split = _build_split(rollouts, samples, strategy, seed, validation_fraction,
-                             test_fraction, validation_tasks, parent=parent)
+        assignment_source = None
+        if strategy == 'task_manifest_v1':
+            if task_partitions is None:
+                raise ValueError('task_manifest_v1 requires --task-partitions')
+            source = Path(task_partitions).resolve()
+            assignment_source = {'path': str(source), 'sha256': sha256(source)}
+            split = make_manifest_split(rollouts, samples, read_json(source), seed, validation_fraction)
+        else:
+            if task_partitions is not None:
+                raise ValueError('--task-partitions only applies to task_manifest_v1')
+            split = _build_split(rollouts, samples, strategy, seed, validation_fraction,
+                                 test_fraction, validation_tasks, parent=parent)
+        if assignment_source:
+            split['task_partition_source'] = assignment_source
         split["dataset_id"] = dataset_id
         split["dataset_receipt_sha256"] = dataset_receipt_sha
         split.pop("role_by_sample", None)
@@ -99,6 +111,7 @@ def create_split(root, dataset_id, split_id, *, strategy="task_random_v1", seed=
             "schema_version": 1, "state": "complete", "dataset_id": dataset_id,
             "dataset_receipt_sha256": dataset_receipt_sha, "split_id": split_id,
             "split_sha256": sha256(output / "split.json"), "created_at": now(),
+            'source_files': {assignment_source['path']: assignment_source['sha256']} if assignment_source else {},
             "code": {"difficulty/training/split.py": sha256(Path(__file__).with_name("split.py")),
                      "difficulty/training/splits.py": sha256(Path(__file__))},
             "files": {"split.json": sha256(output / "split.json")},
@@ -126,6 +139,9 @@ def load_split(root, dataset_id, split_id, dataset_receipt_sha256, samples):
     for name, digest in receipt.get("files", {}).items():
         if sha256(owned_path(path, name)) != digest:
             raise ValueError(f"Split checksum mismatch: {name}")
+    for source, digest in receipt.get('source_files', {}).items():
+        if sha256(source) != digest:
+            raise ValueError('Bound task partition source changed')
     split = read_json(split_path)
     sample_ids = {row["sample_id"] for row in samples}
     assigned = [sample_id for ids in split["sample_ids"].values() for sample_id in ids]
@@ -151,3 +167,62 @@ def load_split(root, dataset_id, split_id, dataset_receipt_sha256, samples):
             if by_task.setdefault(sample["task_group"], role) != role:
                 raise ValueError("Task split leaks samples across partitions")
     return split, receipt
+
+
+def make_manifest_split(rollouts, samples, manifest, seed, validation_fraction):
+    """Bind dataset rows to explicit task holdout; validate inside the train cohort."""
+    import hashlib
+    from difficulty.datasets.identity import task_descriptor, task_group
+    assignments = manifest.get('task_assignments', [])
+    by_key = {row['task_key']: row for row in assignments}
+    if len(by_key) != len(assignments) or not by_key:
+        raise ValueError('Task partition manifest has duplicate or empty identities')
+    if any(row.get('partition') not in {'train', 'test', 'val', 'validation'} for row in assignments):
+        raise ValueError('Unsupported task partition')
+    groups = {}
+    roles = {}
+    for row in rollouts:
+        key = row['task_key']
+        assignment = by_key.get(key)
+        if assignment is None or assignment['instance_id'] != row['instance_id']:
+            raise ValueError('Dataset task is absent or mismatched in task partition manifest')
+        group = row.get('task_group') or task_group(row)
+        if group in groups and groups[group]['task_key'] != key:
+            raise ValueError('Logical task group has conflicting identities')
+        groups[group] = row
+        role = assignment['partition']
+        roles[group] = 'validation' if role == 'val' else role
+    if not 0 < validation_fraction < 1:
+        raise ValueError('Validation fraction must be in (0,1)')
+    if 'validation' not in roles.values():
+        candidates = sorted((g for g in roles if roles[g] == 'train'),
+                            key=lambda g: (hashlib.sha256(f'{seed}|{g}'.encode()).hexdigest(), g))
+        if len(candidates) < 2:
+            raise ValueError('Need at least two training tasks for internal validation')
+        count = max(1, min(len(candidates) - 1, round(len(candidates) * validation_fraction)))
+        for group in candidates[:count]:
+            roles[group] = 'validation'
+    role_names = ['train', 'validation'] + (['test'] if 'test' in roles.values() else [])
+    ids = {role: [row['sample_id'] for row in samples if roles[row.get('task_group') or task_group(row)] == role]
+           for role in role_names}
+    if not all(ids.values()) or sum(map(len, ids.values())) != len(samples):
+        raise ValueError('Task partition leaves an empty role or unassigned samples')
+    hashes = {}
+    for row in rollouts:
+        role = roles[row.get('task_group') or task_group(row)]
+        previous = hashes.setdefault(row['trajectory_sha256'], role)
+        if previous != role:
+            raise ValueError('Identical trajectory crosses task partitions')
+    return {'schema_version': 2, 'strategy': 'task_manifest_v1', 'seed': seed,
+            'validation_fraction': validation_fraction,
+            'tasks': [{**task_descriptor(row), 'task_key': row['task_key'], 'split': roles[group]}
+                      for group, row in sorted(groups.items())],
+            'rollouts': [{**task_descriptor(row), 'rollout_id': row['rollout_id'],
+                          'trajectory_sha256': row['trajectory_sha256'], 'split': roles[row.get('task_group') or task_group(row)]}
+                         for row in rollouts],
+            'task_counts': dict(Counter(roles.values())),
+            'sample_ids': ids, 'sample_counts': {role: len(values) for role, values in ids.items()},
+            'external_test_tasks': sorted(row['instance_id'] for row in assignments
+                                          if row['partition'] == 'test' and row['task_key'] not in
+                                          {r['task_key'] for r in rollouts}),
+            'sample_order_sha256': hash_json([row['sample_id'] for row in samples])}

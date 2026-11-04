@@ -172,14 +172,23 @@ Edit standalone `difficulty/training/config.yaml`, then run `source difficulty/s
 TensorBoard binds to remote loopback port 6006 by default. On the local PC run `ssh -N -L 16006:127.0.0.1:6006 wangtianyi@10.249.187.9`, then open `http://localhost:16006`. MLP events expose evaluation-mode train/validation MSE per epoch and separate optimization loss; Ridge events use candidate-trial steps. Events are included in the attempt receipt. Check or stop the managed service with `dycon difficulty-tensorboard ATTEMPT_ID --action status|stop`.
 
 
-## 重复 rollout 预测与真实剩余量对照（2026-10-27）
+## 重复 rollout 预测与真实剩余量对照
 
 使用 `dycon difficulty-plot-trajectories RUN_ID PLOT_ID --attempt-id RIDGE_ATTEMPT --dataset-id RESOLVED_DATASET --target submission_remaining_reasoning_tokens_log1p`。
 按 canonical repetition 统计成功次数；每条成功轨迹绘制预测与 native 真值双面板，同 task 同行汇总到自包含 HTML。缺失证据保留断线及说明图。
 完整口径与统一 artifact 校验见 [轨迹对照说明](../docs/TRAJECTORY-COMPARISON-CN.md)。
 
 
-### 预测与真值独立覆盖（2026-10-27）
+### 预测与真值独立覆盖
 
 在 `difficulty-plot-trajectories` 中显式添加 `--repair-id REPAIR_ID`，即可对全部可验证的 repaired canonical close hidden 预测，独立于真值是否可用。
 预测、真值分别统计覆盖数；canonical-identity-only 预测点单列，不冒充 native token 标签。输出 `coverage-audit.json`，旧训练数据集和旧图保持不可变。
+
+5120 维 capture 的 hidden/site 契约、task manifest 划分和 Ridge refit 边界见[Difficulty 特征与训练契约](../docs/DIFFICULTY-FEATURE-CONTRACT-CN.md)。
+
+
+## Positive-reward terminal trajectory selection
+
+For SkillsBench workspace evaluations, `capture-trace RUN PUBLICATION --eligibility positive_reward --session-id SESSION` and `difficulty-dataset resolved DATASET --source-run RUN --index-id INDEX --rollout-list FILE --eligibility positive_reward` explicitly include completed official evaluations whose numeric `rewards.reward` is finite and greater than zero. Defaults remain `resolved_only`. Use the normal `online-index` between these commands; its success-only labels stay null for unresolved trajectories. Positive-reward selection consumes the existing exact finalized suffix labels (`remaining_steps` and `remaining_reasoning_tokens_after`) and preserves resolved=false for partial credit. Targets describe the actual terminal endpoint, not eventual success. Canonical AgentCompleted, complete native capture, exact evaluation subject/report hashes and canonical action alignment are still required. A post-agent export failure can be included only if those preserved artifacts verify. The dataset receipt and loader recheck the positive evaluation report. No original run evidence or success labels are rewritten.
+
+Use the existing `difficulty-split --strategy event_random_v1 --seed 42 --validation-fraction 0.15 --test-fraction 0.15` and schema-2 Ridge training YAML. Validation selects site and alpha; refit train+validation leaves the test set held out.
