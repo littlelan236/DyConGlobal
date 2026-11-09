@@ -156,11 +156,16 @@ def execution_context(cfg, tasks):
         if (task["benchmark"] != benchmark or task["revision"] != snapshot["revision"]
                 or frozen_definition != current_definition):
             raise ValueError("Task does not belong to frozen benchmark snapshot")
+    compatibility = profile.get('verifier_index_compatibility')
+    if compatibility != snapshot.get('verifier_index_compatibility'):
+        raise ValueError('Frozen SkillsBench profile and task index compatibility policies differ')
     context = {"schema_version": 1, "benchmark": benchmark, "agent": agent,
                "revision": snapshot["revision"], "snapshot_sha256": sha256(snapshot_path),
                "profile_sha256": sha256(profile_path), "profile": profile,
                "task_keys": sorted(tasks), "decoder": copy.deepcopy(cfg.get("parallel", {})),
                "generation": copy.deepcopy(cfg["generation"])}
+    from runtime.agents.openhands import condenser_context
+    context.update(condenser_context(cfg, profile))
     if snapshot.get("validation_only"):
         context["validation_only"] = True
     return {**context, "context_sha256": hash_json(context)}

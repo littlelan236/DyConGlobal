@@ -14,6 +14,8 @@ def cfg(tmp_path):
     raw.pop("parallel", None)  # Unit fixtures do not depend on a GPU acceptance config.
     raw["benchmark"].update(backend="swebench", snapshot_ref=None)
     raw["agent"].update(backend="minisweagent", profile_ref=None)
+    raw["agent"].pop("condenser_max_tokens", None)  # Generic fixtures retain legacy profile policy.
+    raw["execution"]["sample_completion_token_budget"] = None
     raw["generation"].update(thinking_token_budget=None, require_reasoning_close=False)
     raw["paths"]["artifact_roots"] = {}
     raw["paths"]["artifact_scan_roots"] = []

@@ -39,7 +39,7 @@ class SampleContext:
         }
 
 
-def make_work_items(selection: dict, run_id: str, repeat_count: int, base_seed: int, branch_count: int = 1):
+def make_work_items(selection: dict, run_id: str, repeat_count: int, base_seed: int, branch_count: int = 1, *, extension=None):
     """Expand frozen tasks into deterministic task x repetition items."""
     identifier(run_id)
     if type(repeat_count) is not int or repeat_count < 1:
@@ -47,6 +47,13 @@ def make_work_items(selection: dict, run_id: str, repeat_count: int, base_seed: 
     if type(base_seed) is not int:
         raise ValueError("base seed must be an integer")
     stride = branch_count if type(branch_count) is int and branch_count > 1 else 1
+    if extension is not None:
+        if (set(extension) != {'original_repeat_count', 'seed_block_size'}
+                or type(extension['original_repeat_count']) is not int
+                or not 1 <= extension['original_repeat_count'] <= repeat_count
+                or type(extension['seed_block_size']) is not int
+                or extension['seed_block_size'] != 2**32):
+            raise ValueError('Invalid repetition extension seed policy')
     items = []
     for index in range(repeat_count):
         for task_key in selection["task_keys"]:
@@ -65,8 +72,13 @@ def make_work_items(selection: dict, run_id: str, repeat_count: int, base_seed: 
                 repetition_id=repetition_id,
                 repetition_index=index,
                 sample_key=sample_key,
-                sample_seed=base_seed + index * stride,
+                sample_seed=(base_seed - (index - extension['original_repeat_count'] + 1)
+                             * extension['seed_block_size'] * stride
+                             if extension and index >= extension['original_repeat_count']
+                             else base_seed + index * stride),
             )
+            if not -(2**63) <= sample.sample_seed <= sample.sample_seed + stride - 1 <= 2**63 - 1:
+                raise ValueError('seed_space_exhausted: repetition seed must fit signed int64')
             items.append(sample.as_dict())
     return {
         "schema_version": WORK_ITEMS_SCHEMA,
@@ -76,6 +88,7 @@ def make_work_items(selection: dict, run_id: str, repeat_count: int, base_seed: 
             "name": SEED_POLICY,
             "base_seed": base_seed,
             "branch_stride": stride,
+            **({"extension": extension} if extension else {}),
         },
         "selection_sha256": hash_json(selection),
         "items": items,
@@ -145,7 +158,14 @@ def effective_seed(sample, manifest, seed_round, actual_branches=1):
     stride = manifest['seed_policy']['branch_stride']
     if not 1 <= actual_branches <= stride:
         raise ValueError('Frozen branch stride cannot cover active branches')
-    seed = sample.sample_seed + seed_round * manifest['repeat_count'] * stride
+    extension = manifest.get('seed_policy', {}).get('extension')
+    if extension and sample.repetition_index >= extension['original_repeat_count']:
+        if seed_round >= extension['seed_block_size']:
+            raise ValueError('seed_space_exhausted: appended repetition exhausted its seed block')
+        round_stride = stride
+    else:
+        round_stride = (extension['original_repeat_count'] if extension else manifest['repeat_count']) * stride
+    seed = sample.sample_seed + seed_round * round_stride
     if not -(2**63) <= seed <= seed + actual_branches - 1 <= 2**63 - 1:
         raise ValueError('seed_space_exhausted: vLLM seed must fit signed int64')
     return seed

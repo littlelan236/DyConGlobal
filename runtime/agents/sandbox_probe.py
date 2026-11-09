@@ -22,6 +22,10 @@ def probe(workspace, model_seconds):
         DYCON_OPENHANDS_MODEL_SECONDS=str(model_seconds), LITELLM_LOCAL_MODEL_COST_MAP='true',
         OPENHANDS_SUPPRESS_BANNER='1')
     agent = AgentStore().load_or_create(env_overrides_enabled=True, critic_disabled=True)
+    for name, field in (("OPENHANDS_CONDENSER_MAX_SIZE", "max_size"),
+                        ("OPENHANDS_CONDENSER_KEEP_FIRST", "keep_first")):
+        if name in os.environ and getattr(agent.condenser, field) != int(os.environ[name]):
+            raise ValueError("Published CLI did not apply " + name)
     terminal = next(t for t in agent.tools if t.name == 'terminal')
     if terminal.params.get('terminal_type') != 'subprocess' or agent.llm.timeout != model_seconds:
         raise ValueError('Published CLI does not consume the frozen terminal/SDK timeout contract')
@@ -78,6 +82,8 @@ def probe(workspace, model_seconds):
     return {'schema_version': 1, 'uid': os.getuid(), 'gid': os.getgid(), 'home': os.environ['HOME'],
             'cwd': os.getcwd(), 'terminal_backend': terminal.params['terminal_type'],
             'model_timeout_seconds': agent.llm.timeout, 'sdk_retries': agent.llm.num_retries,
+            'condenser': {'max_size': agent.condenser.max_size,
+                          'keep_first': agent.condenser.keep_first},
             'real_tool_executed': True, 'acp': receipts, 'model_requests': 0, 'verified': True}
 
 

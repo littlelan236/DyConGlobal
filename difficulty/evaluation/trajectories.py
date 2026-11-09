@@ -83,6 +83,70 @@ def write_csv(path, rows, fields):
         writer.writerows(rows)
 
 
+def compression_triggers(trajectory, actions=()):
+    """Return explicit condenser/compression events with their nearest assistant step."""
+    events = trajectory.get('raw_acp_events') or []
+    if isinstance(events, dict):
+        events = events.get('events') or []
+    result = []
+    trigger_types = {'condensation', 'condensed', 'context_condensed', 'context_compressed',
+                     'compression_triggered', 'condenser_triggered', 'conversation_condensed'}
+    for ordinal, item in enumerate(events):
+        event = item.get('event', item) if isinstance(item, dict) else {}
+        if not isinstance(event, dict):
+            continue
+        kind = str(event.get('type') or event.get('event') or '').lower()
+        tool_names = {'condenser', 'condense', 'compress_context', 'compact_context',
+                      'context_compression', 'conversation_condenser'}
+        tool_identity = {str(event.get(key) or '').lower() for key in ('name', 'tool_name', 'action')}
+        tool_identity.add(str(event.get('title') or '').split(':', 1)[0].strip().lower())
+        tool_trigger = ('tool_call' in kind or 'tool' in kind) and bool(tool_names & tool_identity)
+        triggered = kind in trigger_types or any(
+            word in kind for word in ('condens', 'compress')) or tool_trigger
+        if triggered:
+            explicit_step = next((event.get(key) for key in
+                                  ('agent_step_index', 'step_id')
+                                  if type(event.get(key)) is int), None)
+            if explicit_step is None and event.get('tool_call_id'):
+                explicit_step = next((step for step, action in enumerate(actions)
+                                      if event['tool_call_id'] in {
+                                          call.get('id') for call in action.get('tool_calls', [])
+                                          if isinstance(call, dict)}), None)
+            result.append({'event_index': item.get('index', ordinal) if isinstance(item, dict) else ordinal,
+                           'step_id': explicit_step,
+                           'event_type': kind or 'compression_event',
+                           'label': str(event.get('title') or event.get('name') or kind or 'compression')})
+    return result
+
+
+def condensation_requests(rollout):
+    """Bind completed internal condenser requests to the next agent decision step."""
+    source = Path(rollout.get('provenance', {}).get('source', ''))
+    if not source.is_absolute():
+        return [], []
+    request_dir = source.parent.parent / 'requests'
+    if not request_dir.is_dir():
+        return [], []
+    requests = [read_json(path) for path in request_dir.glob('req-*.json')]
+    decisions = sorted((row for row in requests if row.get('role') == 'agent_decision'
+                        and type(row.get('step_id')) is int), key=lambda row: row.get('started_at', ''))
+    found = []
+    files = []
+    for record in requests:
+        if record.get('role') != 'condensation' or record.get('status') != 'completed':
+            continue
+        started = record.get('started_at') or ''
+        following = next((row for row in decisions if row.get('started_at', '') > started), None)
+        if following is None:
+            continue
+        found.append({'request_id': record.get('request_id'), 'step_id': following['step_id'],
+                      'started_at': started, 'finished_at': record.get('finished_at'),
+                      'status': record['status']})
+    for path in sorted(request_dir.glob('req-*.json')):
+        files.append((str(path), sha256(path)))
+    return found, files
+
+
 def build_html(task_rows, trajectories, output, summary):
     esc = lambda value: html.escape(str(value), quote=True)
     by_task = defaultdict(list)
@@ -111,8 +175,10 @@ def build_html(task_rows, trajectories, output, summary):
              '横轴为原始 0-based assistant step；close 时当前 action 尚未执行，剩余 steps=T−s。'
              '同 task 共用坐标范围；每条轨迹单独绘图，不平均、不平滑、不截断负预测。</p>',
              '<label>筛选 task：<input id="filter" placeholder="输入 task 名称"></label>',
-             '<p>同一 task 的所选轨迹位于同一行，可横向滚动。显式轨迹视图的绿线是到本次 agent 结束的实际剩余量，'
-             '不代表到成功解题的剩余量；评测状态独立显示。此 HTML 已嵌入全部图像，可单独复制打开。</p>',
+            '<p>同一 task 的所选轨迹位于同一行，可横向滚动。红色虚线标出 ACP 事件中识别到的 condenser/compression 触发位置；'
+            'OpenHands 内部 condensation 请求也会映射到紧随其后的 agent step。请求总数、图上标记数和无法映射的位置均保存在 trajectories.csv。'
+            '显式轨迹视图的绿线是到本次 agent 结束的实际剩余量，'
+            '不代表到成功解题的剩余量；评测状态独立显示。此 HTML 已嵌入全部图像，可单独打开。</p>',
              '<details><summary>全部 task 的 resolved 次数</summary><table><thead><tr>'
              '<th>Task</th><th>最终 resolved</th><th>Unresolved</th><th>未评测/故障</th><th>已完成</th>'
              '<th>计划次数</th><th>缺最终结果</th><th>全部成功轨迹</th>'
@@ -131,8 +197,13 @@ def build_html(task_rows, trajectories, output, summary):
             data = base64.b64encode((output / row['plot']).read_bytes()).decode('ascii')
             parts.append('<figure><img loading="lazy" alt="' + esc(row['rollout_id']) +
                          '" src="data:image/svg+xml;base64,' + data + '"><figcaption>' +
-                         esc(row['repetition_id']) + ' | ' + esc(row.get('selection_role', 'final')) + ' | ' + esc(row['rollout_id']) + '<br>' +
+             esc(row['repetition_id']) + ' | ' + esc(row.get('attempt_id', 'attempt unknown')) + ' | ' +
+             esc(row.get('selection_role', 'final')) + ' | ' + esc(row['rollout_id']) + '<br>' +
                          'resolved=' + esc(row.get('resolved', 'unknown')) + ' | ' + esc(row.get('termination_reason', '')) + '<br>' +
+                         '压缩请求=' + str(row.get('compression_trigger_count', 0)) + '；图上标记=' +
+                         str(len(row.get('compression_trigger_steps', []))) +
+                         '；未绘制=' + str(row.get('compression_trigger_unplotted_count', 0)) + '<br>' +
+                         '触发 step=' + esc(', '.join(map(str, row.get('compression_trigger_steps', []))) or '未记录') + '<br>' +
                          str(row['predicted_points']) + '/' + str(row['total_steps']) +
                          ' steps 有预测；真值 ' + str(row.get('true_points', 0)) + '/' + str(row['total_steps']) + '；' + esc(row['coverage_status']) + '</figcaption></figure>')
         if not by_task[task['task_id']]:
@@ -146,7 +217,7 @@ def build_html(task_rows, trajectories, output, summary):
 
 @exclusive_artifact('difficulty-evaluation', 'plot_id')
 def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id=None, target, repair_id=None, reuse_predictions_id=None,
-                           rollout_ids=(), rollout_list=None):
+                           rollout_ids=(), rollout_list=None, publication_id=None):
     """Reuse strict dataset/cache/model readers; publish one immutable report."""
     if target not in TARGETS:
         raise ValueError('Unsupported trajectory target')
@@ -154,7 +225,9 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id=None,
     explicit = bool(rollout_ids) or rollout_list is not None
     if not explicit and not dataset_id:
         raise ValueError('Default resolved view requires --dataset-id')
-    if explicit and (dataset_id or repair_id or reuse_predictions_id):
+    if publication_id and not explicit:
+        raise ValueError('Visualization publication requires explicit --rollout-id or --rollout-list')
+    if explicit and (dataset_id or (reuse_predictions_id and not (repair_id or publication_id))):
         raise ValueError('Explicit trajectory view uses original native publications; omit dataset/repair/cache options')
     for value in (run_id, plot_id, attempt_id):
         identifier(value)
@@ -165,6 +238,11 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id=None,
         raise FileExistsError(out)
     attempt_dir = artifact_dir(cfg, 'difficulty', attempt_id, 'checkpoints')
     dataset_dir = artifact_dir(cfg, 'difficulty', dataset_id, 'datasets') if dataset_id else None
+    if publication_id and not (attempt_dir/'receipt.json').is_file():
+        return dict(status='unavailable',run_id=run_id,publication_id=publication_id,
+            prediction_layer='unavailable',reason_code='compatible_checkpoint_unavailable',
+            reason='Use an existing compatible fit attempt for predictions; the stored-score parallel plot remains available',
+            attempt_id=attempt_id)
     verify_receipt(root, attempt_dir)
     attempt = read_json(attempt_dir / 'attempt.json')
     if attempt.get('mode') != 'fit':
@@ -193,9 +271,11 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id=None,
         # Freeze only the requested cohort for native loading, while retaining
         # the independent full-run final-result counts above.
         catalog['rollouts'] = requested['rollouts']
-    tasks = summarize_repetitions(catalog['tasks'], requested['rollouts'] if requested else selection['rollouts'])
+    tasks = summarize_repetitions(catalog['tasks'], selection['rollouts'])
     if requested:
-        tasks = [task for task in tasks if task['selected_rollouts']]
+        selected_task_ids = {catalog['tasks'][row['task_key']]['instance_id']
+                             for row in requested['rollouts'].values()}
+        tasks = [task for task in tasks if task['task_id'] in selected_task_ids]
     for task in tasks:
         task['expected_rollouts'] = sum(i['instance_id'] == task['task_id'] for i in work_items)
         task['pending'] = sum(i['instance_id'] == task['task_id'] for i in pending)
@@ -214,7 +294,28 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id=None,
     true_map = {(s['rollout_id'], s['agent_step']): s[field] for s in samples}
     training_by_step = {(s['rollout_id'], s['agent_step']): s for s in samples}
     coverage_sources, coverage_audit = {}, {}
-    if explicit:
+    if publication_id:
+        from hidden.publish_visualization import read_visualization_publication
+        from difficulty.evaluation.trajectory_sources import predict_visualization
+        view=read_visualization_publication(cfg,run_id,publication_id,repair_id=repair_id)
+        repair_id=view['signature']['repair_id']
+        allowed={row['rollout_id'] for row in view['coverage']['sessions']}
+        if not set(catalog['rollouts'])<=allowed: raise ValueError('Requested rollout is not in visualization publication')
+        predictions,coverage_sources,coverage_audit,action_map=predict_visualization(
+            cfg,run_id,view,catalog,model,layer,cache_id=reuse_predictions_id,model_path=model_path,target=target)
+        if field=='remaining_reasoning_tokens_to_submission':
+            true_map.update({(row['rollout_id'],row['step_id']):row['remaining_reasoning_tokens']
+                for row in view['canonical-truth'] if row['token_truth_available']})
+        scored=list(predictions.values())
+    elif explicit and repair_id:
+        repaired,coverage_sources,coverage_audit,action_map=predict_repaired(
+            cfg,run_id,repair_id,catalog,model,layer,cache_id=reuse_predictions_id,model_path=model_path,
+            target=target,include_unresolved=True)
+        repaired,observed,original_audit=extend_original_publications(
+            cfg,run_id,catalog,repaired,action_map,{},model,layer,coverage_sources)
+        if field=='remaining_reasoning_tokens_to_submission': true_map.update(observed)
+        scored=list(repaired.values())
+    elif explicit:
         action_map = {rid: read_actions(root, dict(row, rollout_id=rid)) for rid, row in catalog['rollouts'].items()}
         original, observed, coverage_audit = extend_original_publications(
             cfg, run_id, catalog, {}, action_map, {}, model, layer, coverage_sources)
@@ -300,6 +401,17 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id=None,
         task = catalog['tasks'][row['task_key']]['instance_id']
         source = {**row, 'rollout_id': rid}
         actions = read_actions(root, source)
+        trigger_events = compression_triggers(read_json(owned_path(root, row['trajectory_path'])), actions)
+        condenser_events, condenser_files = condensation_requests(row)
+        trigger_events.extend({'event_index': event['request_id'], 'step_id': event['step_id'],
+                               'event_type': 'condenser_request',
+                               'label': 'OpenHands context condensation',
+                               'started_at': event['started_at'], 'finished_at': event['finished_at'],
+                               'status': event['status']} for event in condenser_events)
+        for request_path, digest in condenser_files:
+            source_files[request_path] = digest
+        compression_steps = sorted({event['step_id'] for event in trigger_events
+                                    if event['step_id'] is not None and 0 <= event['step_id'] < len(actions)})
         verify_subject(root, row)
         eid = row.get('selected_evaluation_id')
         if eid:
@@ -333,6 +445,7 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id=None,
                                remaining_steps_true=len(actions)-step))
         curves.extend(points)
         manifest = dict(task_id=task, rollout_id=rid, repetition_id=row.get('repetition_id', ''),
+                        attempt_id=row.get('attempt_id', ''),
                         resolved=row.get('resolved'), evaluation_status=row.get('evaluation_status'),
                         termination_reason=row.get('termination_reason'),
                         truth_endpoint='observed_agent_terminal' if explicit else 'successful_submission',
@@ -340,6 +453,12 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id=None,
                         trajectory_sha256=row['trajectory_sha256'], selected_evaluation_id=eid,
                         total_steps=len(actions), predicted_points=sum(p['prediction'] is not None for p in points),
                         true_points=sum(p['target'] is not None for p in points),
+                        compression_trigger_count=len(trigger_events),
+                        compression_trigger_steps=compression_steps,
+                        compression_trigger_unplotted_count=sum(
+                            event['step_id'] is None or not 0 <= event['step_id'] < len(actions)
+                            for event in trigger_events),
+                        compression_trigger_events=trigger_events,
                         prediction_only_points=sum(p['prediction'] is not None and p['target'] is None for p in points),
                         truth_only_points=sum(p['prediction'] is None and p['target'] is not None for p in points),
                         plot=f'plots/{rid}.svg')
@@ -364,12 +483,15 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id=None,
                    final_resolved_rollouts=sum(t['resolved'] for t in tasks),
                    expected_repetitions=len(work_items), pending_repetitions=len(pending),
                    without_predictions=sum(m['predicted_points'] == 0 for m in manifests),
+                   compression_trigger_count=sum(m['compression_trigger_count'] for m in manifests),
+                   compression_trigger_markers=sum(len(m['compression_trigger_steps']) for m in manifests),
+                   compression_trigger_unplotted=sum(m['compression_trigger_unplotted_count'] for m in manifests),
                    complete_curves=sum(m['predicted_points'] == m['total_steps'] for m in manifests),
                    prediction_points=sum(m['predicted_points'] for m in manifests),
                    true_points=sum(m['true_points'] for m in manifests),
                    prediction_only_points=sum(m['prediction_only_points'] for m in manifests),
                    truth_only_points=sum(m['truth_only_points'] for m in manifests),
-                   repair_id=repair_id, reuse_predictions_id=reuse_predictions_id, coverage_policy='independent_prediction_and_truth',
+                   repair_id=repair_id, publication_id=publication_id, reuse_predictions_id=reuse_predictions_id, coverage_policy='independent_prediction_and_truth',
                    added_prediction_points=len(sample_map)-len(samples),
                    success_histogram=dict(sorted(Counter(t['resolved'] for t in tasks).items())),
                    interpretation=('Explicit native trajectories; observed termination is not successful completion; '
@@ -391,7 +513,8 @@ def visualize_trajectories(cfg, run_id, plot_id, *, attempt_id, dataset_id=None,
                                 ylabel=target.replace('submission_remaining_', '').replace('_log1p', '').replace('_linear', ''),
                                 comparison=True, xlim=(-0.5, max(0.5, xmax+0.5)), ylim=limits, logylim=loglimits,
                                 note=manifest['coverage_status'] + ' | resolved=' + str(manifest['resolved']),
-                                truth_label='Observed to agent termination' if explicit else 'True remaining')
+                truth_label='Observed to agent termination' if explicit else 'True remaining',
+                compression_steps=manifest['compression_trigger_steps'])
             print('plotted ' + task, flush=True)
         write_json(staged / 'summary.json', summary)
         write_json(staged / 'coverage-audit.json', coverage_audit)

@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from application.execution.capture_budget_revision import revise_capture_budget
+from application.execution.config_revision import revise_config
 from application.execution.run_plan import create_run, load_plan
 from catalog.store import Catalog
 from core.io import hash_json, read_json, sha256, write_json
@@ -19,9 +19,11 @@ def make_run(cfg):
 
 
 def revise(cfg, **kwargs):
-    return revise_capture_budget(cfg['project_root'], 'budget-test', revision_id='r128',
-                                 max_bytes=128 * 2**30, high=.95, low=.95,
-                                 reason='Explicit test authorization', **kwargs)
+    return revise_config(cfg['project_root'], 'budget-test', revision_id='r128',
+                         updates={'capture.export.spool_max_bytes': 128 * 2**30,
+                                  'capture.export.spool_high_watermark': .95,
+                                  'capture.export.spool_low_watermark': .95},
+                         reason='Explicit test authorization', **kwargs)
 
 
 def test_revision_preserves_tasks_model_and_previous_snapshot(cfg):
@@ -85,7 +87,7 @@ def test_storage_status_reports_live_budget_not_a_copied_limit(tmp_path):
     controller.config = {'export': {'spool_max_bytes': 99,
                          'spool_high_watermark': .95, 'spool_low_watermark': .95}}
     controller.spool = SimpleNamespace(base=tmp_path,
-        budget=SimpleNamespace(limit=128 * 2**30, reserve=8 * 2**30, usage=lambda: 11))
+        budget=SimpleNamespace(limit=128 * 2**30, usage=lambda: 11))
     controller.capture_config_ref = 'capture-config-revisions/test.json'
     value = controller.storage_status()
     assert value['spool_max_bytes'] == 128 * 2**30

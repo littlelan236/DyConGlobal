@@ -1,7 +1,10 @@
-"""One cross-process reservation ledger for image admission and capture spool."""
+"""Track logical capture limits and image reservations across processes.
+
+Physical free space is checked by image admission where needed; subtracting existing
+reservations from filesystem free space double-counts bytes already allocated on disk.
+"""
 
 import os
-import shutil
 import sqlite3
 import threading
 import uuid
@@ -13,10 +16,10 @@ from core.locking import file_lock
 
 
 class DiskBudget:
-    def __init__(self, root, path, limit, reserve=0):
+    def __init__(self, root, path, limit):
         self.root, self.path = Path(root), Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
-        self.limit, self.reserve = int(limit), int(reserve)
+        self.limit = int(limit)
         self.state = self.root / "state/disk-budget.sqlite3"
         self.state.parent.mkdir(parents=True, exist_ok=True)
         self.lock = self.state.with_suffix(".lock")
@@ -92,11 +95,8 @@ class DiskBudget:
             old = old_row[0] if old_row else 0
             cap = self._total(db, "capture")
             dev = self.path.stat().st_dev
-            total = self._total(db, "device:" + str(dev))
             if kind == "capture" and cap - old + size > self.limit:
                 raise BufferError("capture project spool byte limit reached")
-            if size > old and shutil.disk_usage(self.path).free < self.reserve + total - old + size:
-                raise BufferError("shared local disk reserve would be exceeded")
             self._put(
                 db,
                 key,

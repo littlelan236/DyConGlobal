@@ -153,7 +153,7 @@ class ImageLeaseManager:
         from core.disk_budget import DiskBudget
 
         disk = DiskBudget(
-            self.cfg["project_root"], self.docker_root, 2**63 - 1, self.options["reserve_bytes"]
+            self.cfg["project_root"], self.docker_root, 2**63 - 1
         )
         shared_token = "image:" + uuid.uuid4().hex
         token = uuid.uuid4().hex

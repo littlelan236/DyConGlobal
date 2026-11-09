@@ -20,7 +20,7 @@ from difficulty.datasets.identity import task_descriptor
 from difficulty.datasets.paths import dataset_directory
 from difficulty.datasets.selection import select_run
 from difficulty.datasets.eligibility import eligible_evaluation, validate_policy
-from enrichment.online_trace import publication_directory
+from enrichment.online_trace import publication_directory, verify_publication
 
 
 def trajectory_fraction_labels(*, total_steps, step, remaining_reasoning_tokens, total_reasoning_tokens):
@@ -55,6 +55,8 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
     if sha256(trace / 'receipt.json') != index['source_receipt_sha256']:
         raise ValueError('Online index does not bind current immutable trace receipt')
     trace_receipt = read_json(trace / 'receipt.json')
+    if index.get('publication_id'):
+        verify_publication(trace, index['hidden_root'])
     for name in ('index.json', 'requests.json'):
         if sha256(trace / name) != trace_receipt['files'][name]:
             raise ValueError('Finalized trace checksum mismatch')

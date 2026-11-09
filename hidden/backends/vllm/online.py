@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from typing import Any, Mapping
+import time
+from uuid import uuid4
 
 from core.io import hash_json
+from runtime.serving.diagnostics import response_error_type, safe_response_summary, sanitize_error_text
 
 
 def safe_cache_hit_length(num_tokens: int, capture_cache_boundary: int | None) -> int:
@@ -122,9 +125,50 @@ class CaptureClient:
     def _request(self, method, path, payload=None):
         import requests
 
-        response = requests.request(method, self.base_url + path, json=payload, timeout=self.timeout)
-        response.raise_for_status()
-        return response.json()
+        correlation_id = uuid4().hex
+        started = time.monotonic()
+        response = None
+        try:
+            response = requests.request(
+                method, self.base_url + path, json=payload, timeout=self.timeout,
+                headers={"X-DyCon-Correlation-ID": correlation_id},
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            headers = getattr(response, "headers", {}) if response is not None else {}
+            response_summary = safe_response_summary(response.content[:512], 512) if response is not None else ""
+            exc.capture_diagnostic = {
+                "schema_version": 1, "stage": "control_request",
+                "method": str(method).upper(), "path": str(path).split("?", 1)[0],
+                "status_code": getattr(response, "status_code", None),
+                "duration_seconds": round(time.monotonic() - started, 6),
+                "error_type": type(exc).__name__,
+                "reason_code": ("http_5xx" if response is not None and response.status_code >= 500
+                                else "http_4xx" if response is not None else "connection_error"),
+                "correlation_id": headers.get("X-DyCon-Correlation-ID", correlation_id),
+                "response_summary": response_summary,
+                "server_error_type": response_error_type(response_summary),
+                "error_summary": sanitize_error_text(exc, 512),
+            }
+            raise
+        try:
+            return response.json()
+        except (ValueError, requests.RequestException) as exc:
+            exc.capture_diagnostic = {
+                "schema_version": 1, "stage": "control_response",
+                "method": str(method).upper(), "path": str(path).split("?", 1)[0],
+                "status_code": response.status_code,
+                "duration_seconds": round(time.monotonic() - started, 6),
+                "error_type": type(exc).__name__, "reason_code": "invalid_json_response",
+                "correlation_id": response.headers.get("X-DyCon-Correlation-ID", correlation_id),
+                "response_summary": safe_response_summary(response.content[:512], 512),
+                "error_summary": sanitize_error_text(exc, 512),
+            }
+            raise
+
+    def report_diagnostics(self, session_id: str, diagnostics: Mapping[str, Any]):
+        return self._request("POST", f"/dycon/capture/session/{session_id}/diagnostics",
+                             {"diagnostics": dict(diagnostics)})
 
     def start(self, metadata: Mapping[str, Any], **options):
         return self._request("POST", "/dycon/capture/session/start", {"metadata": dict(metadata), **options})

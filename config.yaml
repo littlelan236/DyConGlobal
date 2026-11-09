@@ -11,29 +11,32 @@ paths:
   - /data3/wangtianyi/DyConGlobal
 benchmark:
   partition: null
-  snapshot_ref: null
-  backend: swebench
+  snapshot_ref: catalog/snapshots/skillsbench-agent75-aliyun-cpufirst-v2-20261105/manifest.json
+  backend: skillsbench
+sandbox:
+  memory_mb: 16384
 model:
-  path: /VM/wangtianyi/DyConGlobal/models/Qwen3.5-9B
-  fingerprint: f97643c15ea3cb04517379dd13482b48548458c3a3f6c3a7eb93dcaa6adf86a2
-  served_name: Qwen3.5-9B
+  path: /VM/wangtianyi/DyConGlobal/models/Qwen3.6-27B
+  fingerprint: 1f5eeca46580a37641928dc7cd1eeeb78d8c82b8364dcf2f2bca16223663e808
+  served_name: Qwen3.6-27B
   trust_remote_code: false
   verify_identity: false
 serving:
-  startup_mode: serial  # serial | parallel
+  startup_mode: serial
   base_url: http://127.0.0.1:18222/v1
   api_key_env: DYCON_API_KEY
   management: managed
   python: .venvs/easysteer/bin/python
   dtype: float16
   kv_cache_memory_bytes: null
-  max_num_seqs: 6
+  max_num_seqs: 20
   max_num_batched_tokens: 2048
   gpus:
   - 0
   - 1
+  - 2
   tensor_parallel_size: 1
-  gpu_memory_utilization: 0.54
+  gpu_memory_utilization: 0.9
   max_model_len: 262144
   startup_seconds: 1200
   shutdown_seconds: 30
@@ -44,7 +47,8 @@ serving:
   replica_base_urls:
   - http://127.0.0.1:18222/v1
   - http://127.0.0.1:18223/v1
-  max_cpu_workers_per_gpu: 8
+  - http://127.0.0.1:18224/v1
+  max_cpu_workers_per_gpu: 28
 generation:
   temperature: 0.6
   top_p: 0.95
@@ -52,12 +56,12 @@ generation:
   min_p: 0.0
   presence_penalty: 0.0
   repetition_penalty: 1.0
-  max_tokens: 81920
+  max_tokens: 98304
   seed: 42
   enable_thinking: true
   preserve_thinking: true
-  thinking_token_budget: null
-  require_reasoning_close: false
+  thinking_token_budget: 81920
+  require_reasoning_close: true
 agent:
   loop_repeat_limit: 8
   loop_max_period: 7
@@ -372,8 +376,12 @@ agent:
     {%- endif %}
 
     '
+  condenser_max_size: 80
+  condenser_keep_first: 4
+  # null: serving.max_model_len - generation.max_tokens - 1, frozen per run.
+  condenser_max_tokens: null
   backend: openhands
-  profile_ref: runtime/agent-profiles/swebench-openhands-verified80-baseline-20261031-qualified/manifest.json
+  profile_ref: runtime/agent-profiles/openhands-sdkv4-cpufirst-events-v2-qualified-20261105/manifest.json
 environment:
   docker_host: unix:///run/user/1018/docker.sock
   docker_executable: /usr/bin/docker
@@ -398,8 +406,9 @@ images:
   admission_seconds: 1800
   cleanup: true
 execution:
+  supervisor_max_open_files: 262144
   preflight:
-    long_checks: true  # SkillsBench shared startup only; frozen per run
+    long_checks: false
   cancellation:
     control_request_seconds: 3.0
     cooperative_grace_seconds: 120.0
@@ -412,11 +421,12 @@ execution:
     - LimitsExceeded
     - reasoning_loop
     seed_policy: repetition_round_offset_v1
-  rollout_workers: 16
+  rollout_workers: 48
   harness_workers: 8
-  infrastructure_retry_limit: 3
+  infrastructure_retry_limit: 0
   pipeline_wall_seconds: 0
-  startup_failure_limit: 3
+  startup_failure_limit: null
+  sample_completion_token_budget: 262144
 timeouts:
   container_start_seconds: 900
   container_lifetime_seconds: 28800
@@ -610,52 +620,20 @@ capture:
     enabled: true
     root: hidden/online
     format: npz
-    queue_size: 256
+    queue_size: 4096
     flush_interval_ms: 100
     spool_root: hidden/spool
     spool_max_bytes: 137438953472
-    spool_high_watermark: 0.8
-    spool_low_watermark: 0.6
-    shard_max_bytes: 134217728
-    upload_workers: 2
-    upload_max_elapsed_seconds: 600
+    spool_high_watermark: 0.95
+    spool_low_watermark: 0.95
+    shard_max_bytes: 1073741824
+    upload_workers: 24
+    upload_max_elapsed_seconds: 3000
   control_workers: 16
   flush_timeout_seconds: 1800
   finalize_seconds: 900
   finalize_request_seconds: 7200
   admission_seconds: 21600
-parallel:
-  loop_escape:
-    enabled: false
-  reasoning_loop:
-    enabled: true
-    include_post_close: true
-    min_generated_tokens: 2048
-    repeat_count: 8
-    max_period_tokens: 8192
-    min_repeated_tokens: 1024
-    check_interval_tokens: 64
-  enabled: true
-  branch_count: 4
-  mode: parallel_baseline
-  policy: every_step
-  every_k_steps: null
-  estimator_ref: runtime/parallel-artifacts/ridge-resolved-migration331-event70-15-15-reasoning-log1p-20261024/manifest.json
-  dynamic_branch_admission: false
-  admission_timeout_seconds: 28800
-  score_timeout_ms: 5000
-  decision_ttl_seconds: 64800
-  persist_all_branch_close: true
-  save_sites:
-  - 3
-  fallback_policy: stop
-  consensus:
-    retention_ratio: 0.5
-    min_retained_branches: 2
-  validation_repetitions: 1
-  control_request_seconds: 600
-  results_wait_seconds: 600
-  result_workers: 16
 skillsbench_images:
   source_root: benchmarks/skillsbench
   revision: f860ecf02ef53412a030f8661c83d644b739ff01
@@ -666,7 +644,7 @@ skillsbench_images:
   host_proxy: http://127.0.0.1:7890
   build_proxy: http://10.249.187.9:17898
   manage_build_proxy: true
-  python_index: https://pypi.org/simple
+  python_index: https://mirrors.aliyun.com/pypi/simple/
   python_read_seconds: 60
   ubuntu_mirror: http://mirrors.aliyun.com/ubuntu
   debian_mirror: http://mirrors.aliyun.com/debian

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -96,3 +97,39 @@ def test_task_file_accepts_string_ids(cfg):
     write_json(path,["entry-task"])
     run=create_run(cfg,"file-selection",operation="analysis",tasks_file=path)
     assert read_json(run/"tasks.json")["tasks"][0]["instance_id"]=="entry-task"
+
+
+
+def test_run_steps_reports_latest_running_attempt_per_task(cfg, capsys):
+    from core.cli import main
+
+    run = make_run(cfg)
+    old_attempt = run / "rollout/tasks/entry-task/repetitions/rep-000/attempts/rep-000-attempt-001"
+    latest_attempt = run / "rollout/tasks/entry-task/repetitions/rep-001/attempts/rep-001-attempt-001"
+    (old_attempt / "requests").mkdir(parents=True)
+    (latest_attempt / "requests").mkdir(parents=True)
+    write_json(run / "progress.json", {"updated_at": "now", "samples": {
+        "old": {"instance_id": "entry-task", "task_key": "task-key", "sample_key": "old",
+                 "repetition_id": "rep-000", "repetition_index": 0,
+                 "attempt_id": "rep-000-attempt-001", "exit_status": "Running"},
+        "latest": {"instance_id": "entry-task", "task_key": "task-key", "sample_key": "latest",
+                    "repetition_id": "rep-001", "repetition_index": 1,
+                    "attempt_id": "rep-001-attempt-001", "exit_status": "Running"},
+        "done": {"instance_id": "entry-task", "task_key": "task-key", "sample_key": "done",
+                  "repetition_id": "rep-002", "repetition_index": 2,
+                  "attempt_id": "rep-002-attempt-001", "exit_status": "Submitted"},
+    }})
+    old_request = old_attempt / "requests/req-old.json"
+    new_request = latest_attempt / "requests/req-new.json"
+    write_json(old_request, {"request_id": "old", "role": "agent_decision", "step_id": 3, "status": "completed"})
+    write_json(new_request, {"request_id": "new", "role": "agent_decision", "step_id": 8, "status": None})
+    os.utime(old_request, (100.0, 100.0))
+    os.utime(new_request, (200.0, 200.0))
+
+    main(["--config", cfg["config_source"], "run", "steps", run.name])
+    result = json.loads(capsys.readouterr().out)
+    assert result["running_task_count"] == 1
+    assert result["tasks"][0]["repetition_id"] == "rep-001"
+    assert result["tasks"][0]["step_id"] == 8
+    assert result["tasks"][0]["step_count"] == 9
+    assert result["tasks"][0]["request_id"] == "new"

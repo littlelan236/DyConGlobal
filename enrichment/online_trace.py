@@ -7,6 +7,13 @@ from core.io import hash_json, owned_path, read_json, sha256, write_json
 from hidden.artifacts import event_records, read_arrays, read_request
 
 
+class OnlineCoverageError(ValueError):
+    """Preserve ValueError compatibility while exposing the finalizer stage."""
+
+    stage = "indexed"
+    reason_code = "coverage_mismatch"
+
+
 def publication_directory(project_root, run_id, publication_id=None):
     """Resolve an explicit immutable trace without aliasing another run."""
     from core.io import identifier
@@ -14,6 +21,22 @@ def publication_directory(project_root, run_id, publication_id=None):
     if publication_id is not None:
         relative = f"runs/{identifier(run_id)}/enrichment/online-publications/{identifier(publication_id)}"
     return owned_path(project_root, relative)
+
+
+def verify_publication(trace, native_root):
+    """Validate labels and their immutable source chain without rewriting artifacts."""
+    trace, native_root = Path(trace), Path(native_root)
+    receipt = read_json(trace / 'receipt.json')
+    if receipt.get('purpose') == 'visualization':
+        raise ValueError('Visualization-only capture publication is not eligible for training/index consumption')
+    sources = {str(owned_path(trace, name)): digest for name, digest in receipt['files'].items()}
+    sources.update(receipt.get('publication_sources', {}))
+    sources.update({str(owned_path(native_root, name)): digest
+                    for name, digest in receipt.get('source_files', {}).items()})
+    for path, digest in sources.items():
+        if sha256(path) != digest:
+            raise ValueError('Published token-event source checksum mismatch')
+    return receipt
 
 
 def reasoning_blocks(prompt, output, open_ids, close_ids):
@@ -159,7 +182,9 @@ def finalize_token_events(export_root, output, *, open_ids, close_ids,
         source_files[str(path.relative_to(root))] = digest
     annotate_remaining_workloads(trajectories)
     accepted, excluded = [], []
+    persisted_points = set()
     for path, event in (event_records(root) if event_rows is None else event_rows):
+        persisted_points.add((event["request_id"], event["absolute_position"], event["anchor"]))
         if event["request_id"] in rejected_requests:
             excluded.append({"sample_id": event["sample_id"], "reason": "not_in_finalized_trajectory"})
             continue
@@ -278,6 +303,11 @@ def finalize_token_events(export_root, output, *, open_ids, close_ids,
     coverage["policy"] = "available_points" if allow_missing else "complete"
     coverage["expected_count_scope"] = "explicitly_bound_native_requests"
     write_json(out / "coverage.json", coverage)
+    try:
+        from runtime.serving.diagnostics import write_index_diagnostics
+        write_index_diagnostics(root, out, requests, expected, observed, persisted_points)
+    except Exception:
+        pass  # Derived evidence must not change coverage or finalizer outcomes.
     receipt = {
         "schema_version": 1,
         "source_root": str(root),
@@ -294,5 +324,5 @@ def finalize_token_events(export_root, output, *, open_ids, close_ids,
     }
     write_json(out / "receipt.json", receipt)
     if coverage["unexpected"] or (coverage["missing"] and not allow_missing):
-        raise ValueError("Online reasoning-event coverage differs from exact token receipts")
+        raise OnlineCoverageError("Online reasoning-event coverage differs from exact token receipts")
     return out

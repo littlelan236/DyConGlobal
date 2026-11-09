@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from core.io import now, read_json, write_json
 from pathlib import Path
-from core.locking import file_lock
 from uuid import uuid4
 
-from .run_plan import load_plan, list_runs, run_path
+from core.io import now, read_json, update_status, write_json
+from core.locking import file_lock
 
+from .run_plan import list_runs, load_plan, run_path
 
 _FAILURE_DISPOSITIONS = {"failed", "blocked", "retry_pending"}
 _NON_FAILURE_EXIT_STATUSES = {
     "Submitted", "AgentCompleted", "Resolved", "Complete", "completed",
-    "Running", "pending", "queued", "unknown",
+    "Running", "Pending", "pending", "queued", "unknown",
 }
 
 
@@ -43,8 +43,7 @@ def _sample_summary(samples, latest_attempt_id):
     if latest_attempt_id is not None:
         latest_rows = [
             sample for sample in rows
-            if isinstance(sample.get("serving_assignment"), dict)
-            and str(sample["serving_assignment"].get("execution_attempt_id"))
+            if str(_sample_execution_attempt(sample))
             == str(latest_attempt_id)
         ]
     return {
@@ -53,12 +52,129 @@ def _sample_summary(samples, latest_attempt_id):
     }
 
 
+def _sample_execution_attempt(sample):
+    return (sample.get("_queued_execution_attempt_id")
+            or (sample.get("serving_assignment") or {}).get("execution_attempt_id"))
+
+
 def _latest_execution_attempt(run):
     path = run / "execution" / "latest.json"
     if not path.exists():
         return None
     latest = read_json(path)
     return latest.get("attempt") if isinstance(latest, dict) else None
+
+
+def _active_sample_rows(loaded, progress, latest_attempt_id):
+    """Project current sample state; an authorized queue supersedes old attempts."""
+    import re
+
+    from .failed_retry import retry_index, superseded, worker_failure_authorization
+
+    run = loaded["run"]
+    samples = progress.get("samples") or {}
+    retries = retry_index(run)
+
+    def pending(item):
+        return {**item, "exit_status": "Pending", "disposition": "pending",
+                "_queued_execution_attempt_id": latest_attempt_id}
+
+    floors_path = run / "rollout/replan-attempt-floors.json"
+    floors = read_json(floors_path) if floors_path.exists() else {}
+    rows = {}
+    for item in loaded["work_items"]["items"]:
+        key = item["sample_key"]
+        row = {**item, "exit_status": "Pending", "disposition": "pending",
+               **samples.get(key, {})}
+        work = run / "rollout/tasks" / item["instance_id"] / "repetitions" / item["repetition_id"]
+        attempts = work / "attempts"
+        pattern = re.compile(re.escape(item["repetition_id"]) + r"-attempt-(\d+)$")
+        floor = floors.get(item["instance_id"] + "/" + item["repetition_id"], -1)
+        candidates = []
+        if attempts.exists():
+            for path in attempts.iterdir():
+                match = pattern.fullmatch(path.name)
+                if (match and int(match.group(1)) > floor and path.is_dir()
+                        and ((path / "attempt.json").exists() or (path / "attempt-started.json").exists())):
+                    candidates.append((int(match.group(1)), path))
+        if not candidates:
+            rows[key] = (pending(item) if row.get("exit_status") == "Pending"
+                         or superseded(retries, key, row) else row)
+            continue
+
+        _, attempt = max(candidates)
+        result_path = attempt / "attempt.json"
+        started_path = attempt / "attempt-started.json"
+        assignment_path = attempt / "serving-assignment.json"
+        started = read_json(started_path) if started_path.exists() else {}
+        assignment = read_json(assignment_path) if assignment_path.exists() else {}
+        # A live progress row may still carry the preceding attempt's assignment.
+        if not assignment and row.get("attempt_id") == attempt.name:
+            previous_assignment = row.get("serving_assignment") or {}
+            if previous_assignment.get("attempt_id", attempt.name) == attempt.name:
+                assignment = previous_assignment
+        execution_id = started.get("execution_attempt_id") or assignment.get("execution_attempt_id")
+        result = read_json(result_path) if result_path.exists() else None
+        if result is not None and superseded(retries, key, result):
+            rows[key] = pending(item)
+            continue
+        authorization = worker_failure_authorization(retries, key)
+        if result is None and authorization is not None:
+            from datetime import datetime
+            started_at = started.get("started_at")
+            if (started_at is not None
+                    and datetime.fromisoformat(started_at)
+                    <= datetime.fromisoformat(authorization["requested_at"])
+                    and (execution_id is None or authorization["previous_execution"] is None
+                         or int(execution_id) <= int(authorization["previous_execution"]))):
+                rows[key] = pending(item)
+                continue
+        cursor = samples.get(key) or {}
+        if (cursor.get("exit_status") == "Pending" and cursor.get("attempt_id") is None
+                and (execution_id is None or str(execution_id) != str(latest_attempt_id))):
+            # Resume has explicitly put this sample back in its current queue.
+            # Old cancelled/failed physical attempts are history, not queue state.
+            rows[key] = pending(item)
+            continue
+        if result_path.exists():
+            row = {**item, **result}
+            if execution_id is None:
+                execution_id = (row.get("serving_assignment") or {}).get("execution_attempt_id")
+        elif row.get("attempt_id") != attempt.name or row.get("exit_status") in {"Pending", "Running"}:
+            execution = run / "execution/attempts" / str(execution_id)
+            termination_path = execution / "termination.json"
+            termination = read_json(termination_path) if termination_path.exists() else {}
+            if (execution / "exit.json").exists():
+                # Match the rollout recovery classification, without recovering or writing.
+                cancelled = termination.get("request_id") is not None
+                status = "Cancelled" if cancelled else "Interrupted"
+                disposition = "interrupted" if cancelled else "infrastructure_retry"
+            elif execution_id is not None and str(execution_id) == str(latest_attempt_id):
+                status, disposition = "Running", "pending"
+            else:
+                status, disposition = "unknown", "unknown"
+            row = {**item, "exit_status": status, "disposition": disposition}
+        row["attempt_id"] = attempt.name
+        row["serving_assignment"] = {**assignment, "execution_attempt_id": execution_id}
+        rows[key] = row
+    return rows
+
+
+def _active_sample_summary(samples, latest_attempt_id):
+    from collections import Counter
+
+    def counts(rows):
+        return dict(sorted(Counter(str(row.get("exit_status") or "unknown") for row in rows).items()))
+
+    latest = _sample_summary(samples, latest_attempt_id)["latest_attempt"]
+    latest_rows = [row for row in samples.values()
+                   if latest_attempt_id is not None
+                   and str(_sample_execution_attempt(row))
+                   == str(latest_attempt_id)]
+    overall = _sample_summary(samples, latest_attempt_id)
+    overall.pop("latest_attempt")
+    return {**overall, "exit_status_counts": counts(samples.values()),
+            "latest_attempt": {**latest, "exit_status_counts": counts(latest_rows)}}
 
 
 def run_status(root, run_id):
@@ -71,7 +187,8 @@ def run_status(root, run_id):
             result[name.removesuffix(".json")] = read_json(path)
     stages={}
     for name,path in {"harness":run/"harness/status.json", "online_coverage":run/"enrichment/online/coverage.json",
-                      "hidden_publication":run/"hidden/publication.json"}.items():
+                      "hidden_publication":run/"hidden/publication.json",
+                      "capture_publication":run/"capture-publication.json"}.items():
         if path.exists():
             stages[name] = read_json(path)
     result["stages"]=stages
@@ -103,6 +220,114 @@ def run_status(root, run_id):
         **{key: value for key, value in result.items() if key not in {"run_id", "sample_summary"}},
     }
 
+
+
+def running_step_status(root, run_id):
+    """Return the latest recorded agent step for each task with a running sample."""
+    from datetime import datetime, timezone
+
+    loaded = load_plan(root, run_id)
+    run = loaded["run"]
+    progress_path = run / "progress.json"
+    progress = read_json(progress_path) if progress_path.exists() else {}
+    samples = progress.get("samples") or {}
+    if isinstance(samples, list):
+        samples = {str(index): sample for index, sample in enumerate(samples)}
+
+    run_root = run.resolve()
+    rows_by_task = {}
+    for sample in samples.values():
+        if not isinstance(sample, dict) or sample.get("exit_status") != "Running":
+            continue
+        task_id = sample.get("instance_id") or sample.get("task_id") or sample.get("task_key")
+        if not task_id:
+            continue
+        repetition_id = str(sample.get("repetition_id") or "")
+        attempt_id = str(sample.get("attempt_id") or "")
+        attempt = (run / "rollout" / "tasks" / str(task_id) / "repetitions" /
+                   repetition_id / "attempts" / attempt_id)
+        try:
+            resolved_attempt = attempt.resolve()
+            if not resolved_attempt.is_relative_to(run_root):
+                continue
+        except (OSError, RuntimeError):
+            continue
+
+        activity_mtime = 0.0
+        started = attempt / "attempt-started.json"
+        try:
+            if started.exists():
+                activity_mtime = started.stat().st_mtime
+            elif attempt.exists():
+                activity_mtime = attempt.stat().st_mtime
+        except OSError:
+            pass
+
+        latest_request = None
+        latest_request_key = (0.0, -1, "")
+        requests = attempt / "requests"
+        if requests.exists():
+            for request_path in requests.glob("req-*.json"):
+                try:
+                    mtime = request_path.stat().st_mtime
+                    request = read_json(request_path)
+                except (OSError, ValueError, TypeError):
+                    continue
+                activity_mtime = max(activity_mtime, mtime)
+                if request.get("role") != "agent_decision" or request.get("step_id") is None:
+                    continue
+                try:
+                    step_value = int(request["step_id"])
+                except (TypeError, ValueError):
+                    continue
+                key = (mtime, step_value, request_path.name)
+                if key > latest_request_key:
+                    latest_request_key = key
+                    latest_request = request
+
+        trajectory_dir = attempt / "benchflow"
+        if trajectory_dir.exists():
+            for trajectory in trajectory_dir.glob("*/trajectory/acp_trajectory.jsonl"):
+                try:
+                    activity_mtime = max(activity_mtime, trajectory.stat().st_mtime)
+                except OSError:
+                    continue
+
+        request = latest_request or {}
+        step_id = request.get("step_id")
+        try:
+            step_count = int(step_id) + 1 if step_id is not None and int(step_id) >= 0 else None
+        except (TypeError, ValueError):
+            step_count = None
+        row = {
+            "instance_id": str(task_id),
+            "task_key": sample.get("task_key"),
+            "sample_key": sample.get("sample_key"),
+            "repetition_id": sample.get("repetition_id"),
+            "repetition_index": sample.get("repetition_index"),
+            "attempt_id": sample.get("attempt_id"),
+            "step_id": step_id,
+            "step_count": step_count,
+            "request_id": request.get("request_id"),
+            "request_status": request.get("status"),
+            "request_started_at": request.get("started_at"),
+            "request_finished_at": request.get("finished_at"),
+            "attempt_updated_at": (datetime.fromtimestamp(activity_mtime, timezone.utc).isoformat()
+                                    if activity_mtime else None),
+        }
+        candidate_key = (activity_mtime, latest_request_key, repetition_id, attempt_id)
+        previous = rows_by_task.get(str(task_id))
+        if previous is None or candidate_key > previous[0]:
+            rows_by_task[str(task_id)] = (candidate_key, row)
+
+    rows = [value[1] for value in rows_by_task.values()]
+    rows.sort(key=lambda row: row["instance_id"])
+    return {
+        "run_id": run_id,
+        "progress_updated_at": progress.get("updated_at"),
+        "running_task_count": len(rows),
+        "tasks": rows,
+    }
 
 def cancel_run(root, run_id, reason):
     loaded = load_plan(root, run_id)
@@ -142,11 +367,60 @@ def reconcile_run(root, run_id):
         "task_count": len(loaded["tasks"]["tasks"]),
         "cancellation": cancellation,
     }
+def _run_summary_projection(loaded, status, progress):
+    # Shared single-run projection for active-status and persisted snapshots.
+    run = loaded["run"]
+    latest_attempt_id = _latest_execution_attempt(run)
+    samples = _active_sample_rows(loaded, progress, latest_attempt_id)
+    return {
+        "run_id": run.name,
+        "operation": loaded["plan"].get("operation"),
+        "task_count": len(loaded["tasks"]["tasks"]),
+        "status": status,
+        "progress_updated_at": progress.get("updated_at"),
+        "sample_count": len(samples),
+        "sample_summary": _active_sample_summary(samples, latest_attempt_id),
+    }
+
+
+def refresh_run_status_summary(root, run_id):
+    # Atomically refresh a derived view; source evidence remains read-only.
+    root = Path(root).resolve()
+    run = run_path(root, run_id)
+    error_path = run / "status-summary-error.json"
+    try:
+        with file_lock(run / "status-summary.lock"):
+            loaded = load_plan(root, run_id)
+            status_path = run / "status.json"
+            status = read_json(status_path) if status_path.exists() else {}
+            progress_path = run / "progress.json"
+            progress = read_json(progress_path) if progress_path.exists() else {}
+            document = {
+                "schema_version": 1,
+                "summary_updated_at": now(),
+                **_run_summary_projection(loaded, status, progress),
+            }
+            write_json(run / "status-summary.json", document)
+            error_path.unlink(missing_ok=True)
+            return document
+    except Exception as exc:
+        try:
+            write_json(error_path, {"run_id": run.name, "at": now(), "error": repr(exc)})
+        except Exception:
+            pass
+        return None
+
+
+def update_run_status(run, stage, **values):
+    run = Path(run)
+    update_status(run / "status.json", stage, **values)
+    refresh_run_status_summary(run.parent.parent, run.name)
+    return read_json(run / "status.json")
+
+
 def active_run_statuses(root):
     """Return compact summaries for live and queued runs."""
     import subprocess
-    from collections import Counter
-    from runtime.containers.dependencies import failure_status
     root = Path(root).resolve()
     active = []
     processes = subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True, check=False).stdout
@@ -162,32 +436,7 @@ def active_run_statuses(root):
         loaded = load_plan(root, run_id)
         progress_path = run / "progress.json"
         progress = read_json(progress_path) if progress_path.exists() else {}
-        samples = progress.get("samples") or {}
-        sample_summary = _sample_summary(samples, _latest_execution_attempt(run))
-        exit_counts = Counter(str(x.get("exit_status", "unknown")) for x in samples.values())
-        disposition_counts = Counter(str(x.get("disposition", "unknown")) for x in samples.values())
-        task_count = len(loaded["tasks"]["tasks"])
-        completed = sum(exit_counts.get(x, 0) for x in ("Submitted", "Resolved", "Complete", "completed"))
-        failure_statuses = {"failed", "Failure", "ConnectionError", "ParallelSelectionError",
-                            "ContextWindowExceededError", "LimitsExceeded", "infra_error", "error"}
-        error_samples = sum(1 for sample in samples.values() if sample.get("error"))
-        capture_error_samples = sum(1 for sample in samples.values() if sample.get("capture_errors"))
-        failure_counts = {key: count for key, count in exit_counts.items() if key in failure_statuses}
-        environment = failure_status(root, run_id)
-        environment_count = int(environment.get("count", 0)) if isinstance(environment, dict) else 0
-        anomaly = {
-            "detected": bool(failure_counts or error_samples or capture_error_samples or environment_count),
-            "failure_status_counts": dict(sorted(failure_counts.items())),
-            "sample_error_count": error_samples,
-            "capture_error_sample_count": capture_error_samples,
-            "environment_failure_count": environment_count,
-        }
-        active.append({"run_id": run_id, "operation": loaded["plan"].get("operation"), "task_count": task_count,
-                       "status": status, "progress_updated_at": progress.get("updated_at"), "sample_count": len(samples),
-                       "sample_summary": sample_summary,
-                       "completed_count": completed, "pending_count": max(task_count-completed, 0),
-                       "exit_status_counts": dict(sorted(exit_counts.items())),
-                       "disposition_counts": dict(sorted(disposition_counts.items())), "anomalies": anomaly})
+        active.append(_run_summary_projection(loaded, status, progress))
     queued = []
     queue_root = root / "state" / "run-resume-queue"
     if queue_root.exists():

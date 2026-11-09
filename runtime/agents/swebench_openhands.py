@@ -62,6 +62,8 @@ def execution_context(cfg, tasks):
                "task_keys": sorted(tasks), "generation": copy.deepcopy(cfg["generation"]),
                "driver": "openhands-acp-1.22.1", "subject": "patch",
                "evaluator": "swebench-4.1.0"}
+    from runtime.agents.openhands import condenser_context
+    context.update(condenser_context(cfg, profile))
     return {**context, "context_sha256": hash_json(context)}
 
 

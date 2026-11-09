@@ -232,7 +232,6 @@ class ServingManager:
                         **capture_cfg,
                         "run_id": self.run_id,
                         "nas_root": cfg["paths"]["nas_root"],
-                        "reserve_bytes": cfg["images"]["reserve_bytes"],
                         "open_token_ids": self.capture_token_inventory["open_token_ids"],
                         "model_fingerprint": cfg["model"]["fingerprint"],
                         "serving_dtype": s.get("dtype", "float16"),
@@ -311,7 +310,6 @@ class ServingManager:
                 env["DYCON_CAPTURE_CONTROL_WORKERS"] = str(capture_cfg.get("control_workers", 2))
                 env["DYCON_CAPTURE_PROJECT"] = str(root)
                 env["DYCON_CAPTURE_EXPORT_OPTIONS"] = json.dumps(capture_cfg["export"])
-                env["DYCON_CAPTURE_RESERVE_BYTES"] = str(cfg["images"]["reserve_bytes"])
                 self.capture_controller._write("inventory.json", self.capture_token_inventory)
                 self.capture_controller.write_configuration()
                 self.runtime.update({

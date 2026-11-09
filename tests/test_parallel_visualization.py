@@ -98,6 +98,17 @@ def test_actual_path_joins_and_gaps(published):
         "no_winner", "format_error_response_not_an_action"}
 
 
+def test_workspace_task_without_repo_keeps_canonical_binding(published,monkeypatch):
+    cfg,catalog,_,_,_=published
+    from action.datasets.trajectories import select_trajectories
+    task=next(iter(catalog['tasks'].values()))
+    task.pop('repo',None)
+    monkeypatch.setattr(RunEvidence,'validate',lambda *args:None)
+    selected=select_trajectories(cfg,'run',['r-one'])
+    assert selected['sources'][0]['repo'] is None
+    assert selected['sources'][0]['rollout_id']=='r-one'
+
+
 def test_preserve_actual_winner_instead_of_reselecting_minimum(published):
     cfg, _, _, ds, seal = published
     ds[0]["candidates"][2]["score"] = 3.
@@ -105,6 +116,35 @@ def test_preserve_actual_winner_instead_of_reselecting_minimum(published):
     seal()
     data = collect_parallel_scores(cfg, "run", "r-one")
     assert data["steps"][0]["selected_score"] == 3.  # Minimum is 1, but it did not continue.
+
+
+def test_parallel_proof_preserves_nonzero_winner_and_rejects_alias(published):
+    from hidden.artifacts import read_parallel_proof
+
+    cfg, catalog, session, decisions, seal = published
+    root = Path(cfg['project_root']) / 'nas/hidden/online/run'
+    trajectory_hash = catalog['rollouts']['r-one']['trajectory_sha256']
+    proof = read_parallel_proof(root, session.name, rollout_id='r-one', trajectory_sha256=trajectory_hash)
+    winner = next(row for row in proof['samples'] if row['decision_id'] == 'z-step0' and row['selected'])
+    assert winner['branch_id'] == 2 and winner['native_request_id'] == 's0b2'
+    decisions[0]['candidates'][0]['native_request_id'] = 's0b2'
+    seal()
+    with pytest.raises(ValueError, match='multiple candidates'):
+        read_parallel_proof(root, session.name, rollout_id='r-one', trajectory_sha256=trajectory_hash)
+
+
+def test_parallel_proof_rejects_unreceipted_branch_index(published):
+    from hidden.artifacts import read_parallel_proof
+
+    cfg, catalog, session, _, _ = published
+    root = Path(cfg['project_root']) / 'nas/hidden/online/run'
+    receipt_path = session / 'parallel/branch-receipt.json'
+    receipt = read_json(receipt_path)
+    receipt['files'].pop((session / 'parallel/branch-index.json').relative_to(root).as_posix())
+    write_json(receipt_path, receipt)
+    with pytest.raises(ValueError, match='omits branch-index'):
+        read_parallel_proof(root, session.name, rollout_id='r-one',
+                            trajectory_sha256=catalog['rollouts']['r-one']['trajectory_sha256'])
 
 
 def test_headless_files_and_receipt(published):

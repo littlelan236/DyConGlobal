@@ -154,7 +154,8 @@ def test_buffered_stream_has_one_winner_and_final_finish_only():
 
 def test_compose_cpu_exception_has_explicit_receipt_and_preserves_memory():
     value = resource_override(1, 4096, cfs_supported=False, policy="unenforced_with_receipt")
-    assert value["compose_override"]["environment"] == {"CPUS": "0"}
+    assert value["compose_override"]["environment"] == {"CPUS": "0", "LOKY_MAX_CPU_COUNT": "1"}
+    assert value["receipt"]["joblib_process_hint"] == 1
     assert value["receipt"]["requested_cpu_quota"] == 1
     assert value["receipt"]["memory_limit_preserved"] is True
     with pytest.raises(ValueError, match="explicit"):

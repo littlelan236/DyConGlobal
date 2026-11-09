@@ -73,8 +73,17 @@ def adapt_sdk_transport(wheels):
         'reason': 'Propagate explicit zero retries into OpenAI; observe actual HTTP timeout and phase without changing the model budget'}
 
 
-def build_snapshot(cfg, snapshot_id, wheelhouse, cli_archive, uv, python_runtime=None):
-    """Build pinned CLI source, resolve wheels, and atomically publish a closure."""
+def build_snapshot(cfg, snapshot_id, wheelhouse=None, cli_archive=None, uv=None,
+                   python_runtime=None, from_snapshot=None):
+    """Build pinned CLI source, or derive a verified offline condenser publication."""
+    if from_snapshot is not None:
+        if any(value is not None for value in (wheelhouse, cli_archive, uv, python_runtime)):
+            raise ValueError("--from-snapshot cannot be combined with raw build inputs")
+        from runtime.agents.condenser import derive_snapshot
+        return derive_snapshot(cfg, snapshot_id, from_snapshot)
+    if any(value is None for value in (wheelhouse, cli_archive, uv)):
+        raise ValueError("dependencies-build requires --from-snapshot or "
+                         "--wheelhouse, --cli-archive and --uv")
     root = Path(cfg['project_root'])
     target = root / 'runtime/dependency-snapshots' / identifier(snapshot_id)
     if target.exists():
@@ -149,6 +158,7 @@ def build_snapshot(cfg, snapshot_id, wheelhouse, cli_archive, uv, python_runtime
         condenser_llm = self._with_llm_metadata(
             condenser.llm, session_id=session_id, llm_type="condenser")
         return condenser.model_copy(update={"llm": condenser_llm})'''
+    from runtime.agents.condenser import adapt_source, POLICY
     text=context_file.read_text()
     if text.count(old_context)!=1:raise ValueError('Pinned CLI condenser seam changed')
     context_file.write_text(text.replace(old_context,new_context))
@@ -156,6 +166,11 @@ def build_snapshot(cfg, snapshot_id, wheelhouse, cli_archive, uv, python_runtime
         'before_sha256':before_context_hash,'after_sha256':sha256(context_file),
         'policy':'stock_condenser_for_minimal_BenchFlow_settings_v1',
         'reason':'Restore native default condenser for minimal BenchFlow settings and allow an explicit token threshold'})
+    before_event_hash = sha256(context_file)
+    context_file.write_text(adapt_source(context_file.read_text()))
+    adaptations.append({"path": "openhands_cli/stores/agent_store.py",
+        "before_sha256": before_event_hash, "after_sha256": sha256(context_file),
+        "policy": POLICY, "reason": "Validate and apply frozen event-count condenser settings"})
     before_runtime_hash = sha256(context_file)
     text = context_file.read_text()
     seam = '        updated_tools = self._resolve_tools(session_id)'
@@ -336,6 +351,10 @@ async def probe_runtime(env, cfg, output, ownership, workspace):
     source = Path(__file__).with_name('sandbox_probe.py').read_text()
     seconds = cfg['timeouts']['model_seconds']
     command = 'export HOME=/home/agent LITELLM_LOCAL_MODEL_COST_MAP=true OPENHANDS_SUPPRESS_BANNER=1; '
+    settings = cfg['execution_context'].get('condenser', {})
+    if settings.get('runtime_configurable'):
+        command += ('export OPENHANDS_CONDENSER_MAX_SIZE=' + str(settings['max_size']) +
+                    ' OPENHANDS_CONDENSER_KEEP_FIRST=' + str(settings['keep_first']) + '; ')
     command += 'cd /home/agent && /opt/dycon-openhands/bin/python -c ' + shlex.quote(source)
     # -c cannot run the __main__ block with arguments without sys.argv[0].
     command += ' ' + shlex.quote(workspace) + ' ' + str(seconds)

@@ -15,7 +15,7 @@ from core.config import load_snapshot
 from core.io import artifact_dir, identifier, now, owned_path, read_json, sha256, write_json
 from core.locking import exclusive_artifact
 from difficulty.evaluation.visualize import plot_parallel_scores
-from hidden.artifacts import read_branch_index
+from hidden.artifacts import read_parallel_proof
 
 
 class ParallelEvidenceUnavailable(ValueError):
@@ -53,7 +53,7 @@ def _session(root, rollout_id):
     return matches[0]
 
 
-def collect_parallel_scores(cfg, run_id, rollout_id, *, identity_mode=None):
+def collect_parallel_scores(cfg, run_id, rollout_id, *, identity_mode=None, publication_id=None, repair_id=None):
     """Join receipt-checked decisions with finalized actual assistant steps."""
     root = Path(cfg["project_root"])
     selection = select_trajectories(cfg, run_id, [rollout_id])
@@ -64,13 +64,36 @@ def collect_parallel_scores(cfg, run_id, rollout_id, *, identity_mode=None):
     if not frozen.get("parallel", {}).get("enabled"):
         raise ValueError("Source run did not enable parallel decoding")
     published = Path(frozen["paths"]["nas_root"]) / frozen["capture"]["export"]["root"] / run_id
-    final_path, final = _session(published, rollout_id)
+    publication = None
+    if publication_id:
+        from hidden.publish_visualization import read_visualization_publication
+        publication=read_visualization_publication(frozen,run_id,publication_id,repair_id=repair_id)
+        entries=[entry for entry in publication['decisions'] if entry['rollout_id']==rollout_id]
+        if not entries: raise ParallelEvidenceUnavailable('Publication has no decisions for the requested rollout')
+        final=entries[0]['finalization']
+        final_path=publication['directory']/'decisions.json'
+        sid=entries[0]['session_id']
+    else:
+        if repair_id: raise ValueError('--repair-id requires --publication-id for parallel plots')
+        final_path, final = _session(published, rollout_id)
+        sid=final_path.parent.name
     if (final["trajectory_sha256"] != source["trajectory_sha256"]
             or final["model_fingerprint"] != source["model_fingerprint"]):
         raise ValueError("Finalized session does not bind the canonical trajectory/model")
-    if not (final_path.parent / "parallel/branch-receipt.json").exists():
+    if not publication and not (final_path.parent / "parallel/branch-receipt.json").exists():
         raise ParallelEvidenceUnavailable("Session has no published branch receipt")
-    evidence = read_branch_index(published, final_path.parent.name)
+    if publication:
+        entries=[entry for entry in entries if entry.get('score_receipt_bound')]
+        evidence={'samples':[{**candidate,'decision_id':entry['decision']['decision_id'],
+            'selected':candidate['branch_id']==entry['decision']['selected_branch_id'],
+            'rollout_id':rollout_id,'trajectory_sha256':source['trajectory_sha256']}
+            for entry in entries for candidate in entry['decision']['candidates']],
+            'decisions':[entry['decision'] for entry in entries],
+            'receipt':{'rollout_id':rollout_id,'trajectory_sha256':source['trajectory_sha256']}}
+    else:
+        evidence = read_parallel_proof(published, final_path.parent.name,
+                                   rollout_id=rollout_id,
+                                   trajectory_sha256=source["trajectory_sha256"])
     receipt = evidence["receipt"]
     if (receipt["rollout_id"] != rollout_id
             or receipt["trajectory_sha256"] != source["trajectory_sha256"]):
@@ -95,19 +118,12 @@ def collect_parallel_scores(cfg, run_id, rollout_id, *, identity_mode=None):
                     or steps[step]["message_index"] != mapping["message_index"] or step in bound):
                 raise ValueError("Finalization response-to-action-step binding mismatch")
             bound[step] = native
-    if set(bound) != set(range(len(steps))):
+    if not publication and set(bound) != set(range(len(steps))):
         raise ValueError("Finalization does not cover all actual assistant steps")
     indexed = {(r["decision_id"], r["branch_id"]): r for r in evidence["samples"]}
     if len(indexed) != len(evidence["samples"]):
         raise ValueError("Duplicate branch identities")
-    decisions = []
-    for relative in receipt["files"]:
-        path = owned_path(published, relative)
-        if path.parent == final_path.parent / "parallel/decisions":
-            decision = read_json(path)
-            if decision["session_id"] != final_path.parent.name:
-                raise ValueError("Decision belongs to another session")
-            decisions.append(decision)
+    decisions = evidence["decisions"]
     if not decisions:
         raise ParallelEvidenceUnavailable("No receipt-bound parallel decisions in this session")
     from difficulty.evaluation.parallel_identity import CandidateIdentityReader, IdentityUnavailable
@@ -145,15 +161,23 @@ def collect_parallel_scores(cfg, run_id, rollout_id, *, identity_mode=None):
             continue
         native = winner.get("native_request_id")
         mapping = response_map.get(native)
+        if not mapping and publication:
+            mapping=final.get('decision_mappings',{}).get(native)
         if not mapping:
+            if publication:
+                excluded.append({'decision_id':did,'step_id':decision['step_id'],'reason':'native_mapping_unavailable'})
+                continue
             raise ValueError(f"Selected decision {did} is absent from the final trajectory bindings")
         if not mapping["is_action_response"]:
             excluded.append({"decision_id": did, "step_id": decision["step_id"],
                              "reason": "format_error_response_not_an_action"})
             continue
         step = mapping["agent_step_index"]
+        if (type(step) is not int or not 0<=step<len(steps)
+                or steps[step]['message_index']!=mapping['message_index']):
+            raise ValueError('Parallel canonical decision action mapping mismatch')
         row = steps[step]
-        if row["decision_id"] is not None or bound[step] != native:
+        if row["decision_id"] is not None or bound.get(step,native if publication else None) != native:
             raise ValueError("Parallel decision-to-actual-step binding mismatch")
         if expected_estimator and decision.get("estimator_sha256") != expected_estimator:
             raise ValueError("Decision predictor identity differs from the frozen run")
@@ -182,6 +206,16 @@ def collect_parallel_scores(cfg, run_id, rollout_id, *, identity_mode=None):
                              "native_request_id": c.get("native_request_id"),
                              "close_sample_id": c.get("close_sample_id"),
                              "fallback_reason": decision.get("fallback_reason")})
+            if publication:
+                points=[p for p in publication['branch-point-index'] if p['rollout_id']==rollout_id
+                        and p['recovery'].get('decision_id')==did and p['recovery'].get('branch_id')==c['branch_id']]
+                scope=next(s for s in publication['coverage']['sessions'] if s['rollout_id']==rollout_id)
+                capture=next((r['close_capture'] for r in scope.get('branches',[])
+                              if r['decision_id']==did and r['branch_id']==c['branch_id']),{})
+                branches[-1].update(hidden_available=bool(points),score_available=_finite(value),
+                    target=decision.get('target'),endpoint=decision.get('endpoint'),
+                    estimator_sha256=decision.get('estimator_sha256'),
+                    close_status=capture.get('status'),close_reason=capture.get('reason'))
             if decision.get("selection_mode") == "parallel_consensus":
                 branches[-1].update({k: c.get(k) for k in ("retained", "estimator_rank", "exclusion_reason")})
             if identity_reader:
@@ -201,17 +235,18 @@ def collect_parallel_scores(cfg, run_id, rollout_id, *, identity_mode=None):
     return {"selection": selection, "source": source, "steps": steps, "branches": branches,
             "target": next(iter(targets), "unspecified stored score"),
             "endpoint": next(iter(endpoints), None), "excluded_decisions": excluded,
-            "session_id": final_path.parent.name, "hidden_root": str(published),
+            "session_id": sid, "hidden_root": str(published),
             "estimator_sha256": expected_estimator,
             "identity_source_files": identity_reader.sources if identity_reader else {},
             "source_hashes": {"run_snapshot": sha256(root / "runs" / run_id / "resolved-config.json"),
                               "finalization": sha256(final_path),
-                              "branch_receipt": sha256(final_path.parent / "parallel/branch-receipt.json")}}
+                              "branch_receipt": sha256(publication['directory']/'receipt.json') if publication else
+                                  sha256(final_path.parent / "parallel/branch-receipt.json")}}
 
 
 @exclusive_artifact("difficulty", "plot_id")
 def visualize_parallel(cfg, run_id, plot_id, *, rollout_id=None, task_id=None,
-                       attempt_id=None, step_start=0, step_end=None):
+                       attempt_id=None, step_start=0, step_end=None, publication_id=None, repair_id=None):
     """Publish PNG/SVG plus auditable score tables under a new analysis ID."""
     identifier(run_id)
     if bool(rollout_id) == bool(task_id) or (attempt_id and not task_id):
@@ -228,7 +263,7 @@ def visualize_parallel(cfg, run_id, plot_id, *, rollout_id=None, task_id=None,
             choices = ", ".join(f'{r["attempt_id"]}={r["rollout_id"]}' for r in matches) or "none"
             raise ValueError(f"Expected one trajectory; specify --attempt-id/--rollout-id. Matches: {choices}")
         rollout_id = matches[0]["rollout_id"]
-    data = collect_parallel_scores(cfg, run_id, rollout_id)
+    data = collect_parallel_scores(cfg, run_id, rollout_id, publication_id=publication_id,repair_id=repair_id)
     steps = [r for r in data["steps"] if r["step_id"] >= step_start
              and (step_end is None or r["step_id"] <= step_end)]
     if not steps:

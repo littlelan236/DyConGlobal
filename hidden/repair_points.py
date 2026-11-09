@@ -3,12 +3,14 @@
 Called by the locked capture repair CLI. Original evidence is never overwritten;
 native-exact, identity-only, and orphan points are explicitly distinguished.
 """
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, OrderedDict
 from pathlib import Path
 import copy
 import hashlib
 import io
 import json
+from contextlib import ExitStack
+import tarfile
 
 import numpy as np
 
@@ -70,11 +72,14 @@ def _event_groups(roots, cohort, issues, proofs):
             try:
                 value = read_json(path)
                 rows = value if isinstance(value, list) else [value]
+                relevant = False
                 for row in rows:
                     sid = row.get('session_id')
                     if sid in cohort:
+                        relevant = True
                         groups[sid][row['sample_id']].append((base, row))
-                proofs[str(path)] = sha256(path)
+                if relevant:
+                    proofs[str(path)] = sha256(path)
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 issues.append({'stage': 'index', 'path': str(path), 'reason': str(exc)})
     return groups
@@ -98,10 +103,34 @@ def _tensor(variants, nas, cfg, cache):
             digest = _digest(path, cache)
             if locator and digest != locator['shard_sha256']:
                 raise ValueError('Tensor shard checksum mismatch')
-            data = artifact_bytes(base, event)
+            if locator and cache.get('_tensor_stack') is not None:
+                archives=cache.setdefault('_archives',OrderedDict())
+                key=str(path.resolve())
+                if key not in archives:
+                    if len(archives)>=8:
+                        _,old=archives.popitem(last=False)
+                        old[0].close()
+                    archive=cache['_tensor_stack'].enter_context(tarfile.open(path,'r:'))
+                    members={}
+                    for member in archive.getmembers():
+                        if member.name in members:
+                            raise ValueError('Duplicate tensor shard member')
+                        members[member.name]=member
+                    archives[key]=(archive,members)
+                else:
+                    archives.move_to_end(key)
+                archive,members=archives[key]
+                member=members.get(locator['member'])
+                if member is None or not member.isfile():
+                    raise ValueError('Missing or duplicate tensor shard member')
+                data=archive.extractfile(member).read()
+                if hashlib.sha256(data).hexdigest()!=locator['member_sha256']:
+                    raise ValueError('Tensor member checksum mismatch')
+            else:
+                data = artifact_bytes(base, event)
             with np.load(io.BytesIO(data), allow_pickle=False) as archive:
                 arrays = {k: archive[k] for k in archive.files}
-            if len(arrays) != len(cfg['capture']['layers']):
+            if set(arrays) != {'layer_' + str(layer) for layer in cfg['capture']['layers']}:
                 raise ValueError('Incomplete tensor layer count')
             if set(arrays) != set(event.get('storage_shapes', {})) or set(arrays) != set(event.get('storage_dtypes', {})):
                 raise ValueError('Missing or inconsistent tensor layer metadata')
@@ -165,10 +194,12 @@ def _bindings(sid, task, run_id, responses, requests):
                 raise ValueError('Reused native request binding')
             if response.get('dycon_native_request_id') not in {None, req['request_id']}:
                 raise ValueError('Native request ID disagreement')
+            if response.get('ledger_sha256') is not None and response['ledger_sha256'] != req.get('ledger_sha256'):
+                raise ValueError('Canonical/native ledger checksum disagreement')
             if response.get('prompt_token_ids') is not None and response['prompt_token_ids'] != req['prompt_token_ids']:
                 raise ValueError('Native prompt tokens disagree with canonical response')
             choice = (response.get('choices') or [{}])[0]
-            output = choice.get('token_ids', (choice.get('provider_specific_fields') or {}).get('token_ids'))
+            output = response.get('output_token_ids', choice.get('token_ids', (choice.get('provider_specific_fields') or {}).get('token_ids')))
             if output is not None and output != req['output_token_ids']:
                 raise ValueError('Native output tokens disagree with canonical response')
             if not req.get('close_token_ids'):
@@ -226,18 +257,30 @@ def _publish_dependencies(dependencies, nas, cache, deadline):
             cache[str(owned_path(nas, relative).resolve())] = digest
 
 
-def recover_points(cfg, run_id, *, rollout_ids=(), session_ids=(), apply=False, repair_id=None):
+def recover_points(cfg,run_id,**kwargs):
+    """Reuse tensor shard handles within one audit, closing them on all exits."""
+    if not kwargs.get('visualization_parallel'):
+        return _recover_points(cfg,run_id,**kwargs)
+    with ExitStack() as stack:
+        return _recover_points(cfg,run_id,_tensor_stack=stack,**kwargs)
+
+
+def _recover_points(cfg, run_id, *, rollout_ids=(), session_ids=(), apply=False, repair_id=None,
+                   selection_sha256=None, checkpoint=lambda: None, visualization_parallel=False,_tensor_stack=None):
     """Recover every integrity-checked point; caller owns the exclusive run lock."""
     root = Path(cfg['project_root']).resolve(); run = root / 'runs' / run_id
     if apply and not repair_id:
         raise ValueError('Pointwise apply requires --repair-id')
-    if cfg.get('parallel', {}).get('enabled') and cfg['parallel'].get('branch_count', 1) > 1:
+    if (cfg.get('parallel', {}).get('enabled') and cfg['parallel'].get('branch_count', 1) > 1
+            and not visualization_parallel):
         raise ValueError('Pointwise repair currently supports nonparallel capture only')
     if cfg['capture']['anchors'] != ['think_close']:
         raise ValueError('Pointwise repair requires close-only capture')
     evidence = RunEvidence(root, run_id).read()
     canonical = defaultdict(list)
     for rid, row in evidence['rollouts'].items():
+        if rollout_ids and rid not in rollout_ids:
+            continue
         key = row.get('sample_key') or row.get('provenance', {}).get('sample_key')
         if key and row.get('attempt_id'):
             sid = identifier('cap-' + key + '-' + row['attempt_id'])
@@ -252,21 +295,32 @@ def recover_points(cfg, run_id, *, rollout_ids=(), session_ids=(), apply=False, 
     roots = [p for p in (spool, nas) if p.is_dir()]
     out = run / 'hidden/capture-repairs' / identifier(repair_id or 'pointwise-audit')
     signature = {'run_id': run_id, 'repair_id': repair_id, 'sessions': sorted(cohort), 'config_sha256': sha256(run/'resolved-config.json')}
+    if visualization_parallel:
+        signature.update(purpose='visualization', policy='parallel_pointwise_v1')
+    if selection_sha256 is not None:
+        signature['selection_sha256'] = selection_sha256
     if apply:
         out.mkdir(parents=True, exist_ok=True)
         if (out/'selection.json').exists() and read_json(out/'selection.json') != signature:
             raise ValueError('Pointwise recovery namespace selection conflict')
         write_json(out/'selection.json', signature)
     issues, proofs, cache = [], {}, {}
+    cache['_tensor_stack']=_tensor_stack
     if apply and (out/'source-proofs.json').exists():
         proofs.update(read_json(out/'source-proofs.json'))
     if apply and (nas/'capture-repairs'/repair_id/'receipt.json').exists():
         manifest = read_json(nas/'capture-repairs'/repair_id/'receipt.json')
         if manifest['run_id'] != run_id or manifest['repair_id'] != repair_id:
             raise ValueError('Published repair manifest identity mismatch')
+        if manifest.get('selection_sha256') != selection_sha256:
+            raise ValueError('Published repair selection mismatch')
         for relative, digest in {**manifest['files'], **manifest['session_receipts']}.items():
             if _digest(owned_path(nas,relative),cache) != digest:
                 raise ValueError('Published repair manifest checksum mismatch')
+        published_proofs = read_json(nas/'capture-repairs'/repair_id/'source-proofs.json')
+        for source, digest in published_proofs.items():
+            if Path(source).exists() and _digest(Path(source), cache) != digest:
+                raise ValueError('Original repaired source checksum mismatch')
         for relative in manifest['session_receipts']:
             receipt = read_json(owned_path(nas,relative))
             for dependency,digest in {**receipt['files'],**receipt['dependencies']}.items():
@@ -283,17 +337,79 @@ def recover_points(cfg, run_id, *, rollout_ids=(), session_ids=(), apply=False, 
     reports=[]; prefix='capture-repairs/'+identifier(repair_id or 'pointwise-audit')
     payload=out/'payload'; deadline=cfg['capture']['export']['upload_max_elapsed_seconds']
     for number,sid in enumerate(sorted(cohort),1):
+        checkpoint()
         session_report=out/'session-reports'/(sid+'.json')
         if apply and session_report.exists():
             prior=read_json(session_report)
             if prior.get('published') and sha256(nas/prior['receipt'])==prior['receipt_sha256']:
+                from hidden.artifacts import read_repaired_session
+                read_repaired_session(nas, repair_id, sid)
                 reports.append(prior); continue
         errors=[]; points=[]; dependencies=[]; bound={}; expected=set(); identity={}; unbound=[]
         rid=row=task=None; responses=[]; fingerprint=None; canonical_error=None
+        decisions={}; candidates={}; selected={}; candidate_bound={}; branch_issues=[];receipt_bound=set()
         try:
             rid,row,task,responses=_canonical(root,run_id,sid,canonical.get(sid,[]),evidence,proofs)
             fingerprint=row['model_fingerprint']
             bound,expected,unbound,identity=_bindings(sid,task,run_id,responses,request_groups[sid])
+            if visualization_parallel:
+                from hidden.parallel_proof import decision_inventory, validate_canonical_decisions
+                decisions, branch_sources, receipt_bound = decision_inventory(roots, sid, rid, row['trajectory_sha256'])
+                proofs.update(branch_sources)
+                for source,digest in branch_sources.items():
+                    for source_root in roots:
+                        if Path(source).is_relative_to(source_root):
+                            dependencies.append((source_root, str(Path(source).relative_to(source_root)), digest))
+                            break
+                selected = validate_canonical_decisions(responses, decisions)
+                for decision in decisions.values():
+                    for candidate in decision['candidates']:
+                        request_id = candidate.get('native_request_id')
+                        if not request_id:
+                            continue
+                        if request_id in candidates:
+                            raise ValueError('Parallel request belongs to multiple candidates')
+                        candidates[request_id] = (decision, candidate)
+                        req = requests.get(request_id)
+                        if req is None:
+                            branch_issues.append({'request_id': request_id, 'reason': 'missing_native_receipt'})
+                            continue
+                        if (req.get('session_id') != sid or req.get('run_id') != run_id
+                                or req.get('task_id') != task or req.get('decision_id') != decision['decision_id']
+                                or req.get('branch_id') != candidate['branch_id']
+                                or req.get('query_id') != decision.get('query_id')
+                                or req.get('api_attempt_id') != candidate.get('api_attempt_id')
+                                or req.get('parent_prefix_sha256') != decision.get('parent_prefix_sha256')):
+                            branch_issues.append({'request_id': request_id, 'reason': 'candidate_native_identity_conflict'})
+                            continue
+                        if candidate.get('ledger_sha256') is not None and candidate['ledger_sha256'] != req.get('ledger_sha256'):
+                            branch_issues.append({'request_id':request_id,'reason':'candidate_ledger_checksum_conflict'})
+                            continue
+                        response=candidate.get('response') or {}
+                        if (response.get('dycon_native_request_id') not in {None,request_id}
+                                or (response.get('prompt_token_ids') is not None and response['prompt_token_ids']!=req['prompt_token_ids'])
+                                or (response.get('output_token_ids') is not None and response['output_token_ids']!=req['output_token_ids'])):
+                            branch_issues.append({'request_id':request_id,'reason':'candidate_native_token_conflict'})
+                            continue
+                        choice=(response.get('choices') or [{}])[0]
+                        tokens=choice.get('token_ids',(choice.get('provider_specific_fields') or {}).get('token_ids'))
+                        if tokens is not None and tokens!=req['output_token_ids']:
+                            branch_issues.append({'request_id':request_id,'reason':'candidate_response_token_conflict'})
+                            continue
+                        try:
+                            targets,_ = reasoning_targets(req, req.get('open_token_ids', [248068]), req['close_token_ids'])
+                        except (ValueError,KeyError,TypeError) as exc:
+                            branch_issues.append({'request_id':request_id,'reason':'invalid_native_inventory','detail':str(exc)})
+                            continue
+                        candidate_bound[request_id] = {'request': req, 'targets': set(targets), 'message_index': None}
+                for request_id, proof in selected.items():
+                    if request_id not in bound or request_id not in candidate_bound:
+                        unbound.append({'message_index': proof['message_index'], 'reason': 'winner_native_unavailable'})
+                        bound.pop(request_id, None)
+                for request_id in list(bound):
+                    req = bound[request_id]['request']
+                    if req.get('decision_id') and request_id not in selected:
+                        raise ValueError('Parallel canonical request lacks winner proof')
         except (OSError,ValueError,KeyError,TypeError) as exc:
             canonical_error=str(exc)
             # Bytes may be preserved diagnostically, never promoted to canonical.
@@ -315,18 +431,46 @@ def recover_points(cfg, run_id, *, rollout_ids=(), session_ids=(), apply=False, 
         for sample_id,variants in groups.get(sid,{}).items():
             try:
                 base,relative,digest,event=_tensor(variants,nas,cfg,cache)
-                classification,index=_classification(event,sid,run_id,task,fingerprint,bound,identity)
+                if visualization_parallel and event.get('request_id') in candidates:
+                    decision,candidate=candidates[event['request_id']]
+                    if (event.get('decision_id') != decision['decision_id']
+                            or event.get('branch_id') != candidate['branch_id']):
+                        raise ValueError('Captured event and candidate identity disagree')
+                elif visualization_parallel and event.get('decision_id'):
+                    raise ValueError('Captured branch has no decision binding')
+                if visualization_parallel and event.get('request_id') in candidate_bound and event.get('request_id') not in selected:
+                    classification,index=_classification(event,sid,run_id,task,fingerprint,candidate_bound,{})
+                    if classification == 'native_exact': classification = 'native_exact_candidate'
+                else:
+                    classification,index=_classification(event,sid,run_id,task,fingerprint,bound,identity)
                 if metadata_conflict: classification='diagnostic_session_conflict'; index=None
                 if classification=='native_exact': observed.add((event['request_id'],event['absolute_position'],event['anchor']))
                 event['recovery']={'repair_id':repair_id,'binding':classification,'canonical_rollout_id':rid,
                     'canonical_message_index':index,'trajectory_sha256':row['trajectory_sha256'] if row else None,
                     'eligible_for_training':False}
+                if visualization_parallel and event.get('request_id') in candidates:
+                    decision,candidate=candidates[event['request_id']]
+                    event['recovery'].update(decision_id=decision['decision_id'],branch_id=candidate['branch_id'],
+                        actual_path=event['request_id'] in selected)
                 points.append(event); counts[classification]+=1
                 dependencies.append((base,relative,digest))
                 proofs[str(owned_path(base,relative))]=digest
             except (OSError,ValueError,KeyError,TypeError) as exc:
                 errors.append({'stage':'point','sample_id':sample_id,'reason':str(exc)})
-        native_ids=set(bound)|{p.get('request_id') for p in points}
+        coordinates = Counter((p['request_id'], p['absolute_position'], p['anchor']) for p in points
+                              if p['recovery']['binding'] in {'native_exact','native_exact_candidate'})
+        duplicates = {key for key, count in coordinates.items() if count > 1}
+        if duplicates:
+            kept = []
+            for p in points:
+                if p['recovery']['binding'] in {'native_exact','native_exact_candidate'} and (p['request_id'], p['absolute_position'], p['anchor']) in duplicates:
+                    counts[p['recovery']['binding']] -= 1
+                    errors.append({'stage': 'point', 'sample_id': p['sample_id'], 'reason': 'Duplicate captured point coordinate'})
+                else:
+                    kept.append(p)
+            points = kept
+            observed -= duplicates
+        native_ids=set(bound)|{p.get('request_id') for p in points}|set(candidate_bound)
         for req_id in native_ids:
             if req_id in requests and sources.get(req_id):
                 source=sources[req_id][0]; dependencies.append(source)
@@ -339,6 +483,27 @@ def recover_points(cfg, run_id, *, rollout_ids=(), session_ids=(), apply=False, 
             'expected_count_complete':canonical_error is None and not unbound, 'unbound_responses':unbound,
             'canonical_error':canonical_error,'retained_points':len(points),'binding_counts':dict(counts),
             'eligible_for_training':False,'status':status}
+        if visualization_parallel:
+            from hidden.branch_coverage import classify_close, summarize_branches
+            branches=[]
+            for decision in decisions.values():
+                for candidate in decision['candidates']:
+                    request_id=candidate.get('native_request_id')
+                    matched=[p for p in points if p.get('request_id') == request_id and
+                             p['recovery']['binding'] in {'native_exact','native_exact_candidate'}]
+                    branches.append({'decision_id':decision['decision_id'],'branch_id':candidate['branch_id'],
+                        'selected':candidate['branch_id']==decision.get('selected_branch_id'),
+                        'native_request_id':request_id,'close_capture':classify_close(requests.get(request_id) if request_id in candidate_bound else None,matched,
+                            (requests.get(request_id) or {}).get('open_token_ids',[248068])),
+                        'sample_ids':[p['sample_id'] for p in matched]})
+            all_scope=summarize_branches(branches)
+            inventory_complete=bool(decisions) and len(receipt_bound)==len(decisions)
+            all_scope.update(expected_count_complete=inventory_complete, issues=branch_issues,
+                             status='complete' if inventory_complete and not all_scope['missing'] and not branch_issues else 'partial')
+            coverage.update(canonical_coverage={'status':status,'expected_known':len(expected),
+                'observed':len(observed),'missing_known':missing,
+                'expected_count_complete':canonical_error is None and not unbound},
+                all_candidate_coverage=all_scope, branches=branches, purpose='visualization')
         record={'session_id':sid,'rollout_id':rid,'status':status,'source_sample_ids':len(groups.get(sid,{})),
             'recovered_points':len(points),'binding_counts':dict(counts),'coverage':coverage,'errors':errors,'published':False}
         if apply:
@@ -353,7 +518,9 @@ def recover_points(cfg, run_id, *, rollout_ids=(), session_ids=(), apply=False, 
                 receipt_rel=base_rel+'/receipt.json'
                 receipt={'schema_version':1,'run_id':run_id,'repair_id':repair_id,'session_id':sid,
                     'files':files,'dependencies':{relative:digest for _,relative,digest in dependencies},
-                    'points':len(points),'status':status,'canonical_rollout_id':rid,'created_at':now()}
+                    'points':len(points),'status':status,'canonical_rollout_id':rid,
+                    'trajectory_sha256': row['trajectory_sha256'] if row else None,
+                    'selection_sha256': selection_sha256, 'created_at':now()}
                 # Never overwrite a previously acknowledged receipt on a retry.
                 if (nas/receipt_rel).exists():
                     previous=read_json(nas/receipt_rel)
@@ -386,6 +553,19 @@ def recover_points(cfg, run_id, *, rollout_ids=(), session_ids=(), apply=False, 
             'rejected_points':sum(sum(e['stage']=='point' for e in r['errors']) for r in reports)},
         'sessions':reports,'input_issues':issues,'nas_root':str(nas),'source_proofs_sha256':None}
     if apply:
+        if not all(r['published'] for r in reports):
+            write_json(out/'report.json', report)
+            write_json(out/'progress.json', {'phase': 'pending_upload', 'updated_at': now(), **report['summary']})
+            return report  # A top-level receipt must never seal unfinished sessions.
+        existing_report = nas / prefix / 'report.json'
+        if existing_report.exists():
+            # Crash after payload ACK but before manifest ACK: reuse the sealed
+            # report/proofs and validate their session cohort instead of rewriting.
+            prior = read_json(existing_report)
+            if prior['sessions'] != reports or prior.get('repair_id') != repair_id:
+                raise ValueError('Interrupted repair report session conflict')
+            report = prior
+            proofs = read_json(nas / prefix / 'source-proofs.json')
         write_json(out/'source-proofs.json',proofs)
         report['source_proofs_sha256']=sha256(out/'source-proofs.json')
         write_json(out/'report.json',report)
@@ -394,6 +574,7 @@ def recover_points(cfg, run_id, *, rollout_ids=(), session_ids=(), apply=False, 
         files={prefix+'/report.json':sha256(payload/(prefix+'/report.json')),prefix+'/source-proofs.json':sha256(payload/(prefix+'/source-proofs.json'))}
         publish_files(payload,nas,files,deadline)
         report_receipt={'schema_version':1,'run_id':run_id,'repair_id':repair_id,'files':files,
+            'selection_sha256': selection_sha256,
             'session_receipts':{r['receipt']:r['receipt_sha256'] for r in reports if r['published']}}
         rel=prefix+'/receipt.json'; write_json(payload/rel,report_receipt)
         publish_files(payload,nas,{rel:sha256(payload/rel)},deadline)

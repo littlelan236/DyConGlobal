@@ -26,3 +26,14 @@
 依赖错误应检查失败 distribution、Python 版本与平台标签、wheelhouse receipt 及冻结 requirements；网络或镜像失败应分别检查服务可达性、镜像身份和容器输出。不要用宿主机“已安装”推断任务容器依赖满足，也不要把基础设施错误记作 benchmark unresolved。
 
 `runtime-check`、gold check、单任务 smoke 与全量 benchmark 运行是不同等级的验证。变更后使用目标 benchmark 的 preflight 和最小 run 验证，再按任务规模执行正式工作负载。确切参数见 `dycon runtime-check --help`、`dycon docker-storage --help` 与 benchmark CLI help。
+# Docker 网络清理与地址池
+
+任务退出按 `dycon.project/run/execution` 清理；单个 SkillsBench 环境另绑定 task/sample/attempt/epoch。
+正常结束、失败、取消和 supervisor 异常退出均核验容器及网络。仅删除归属匹配且已无附着容器的网络，
+不执行全局 prune，不断开其他容器连接，也不清理其他 run 或 execution 的网络。清理回执含
+`removed_networks`、`remaining_networks`，存在残留时 `cleanup_complete` 不得标为成功。
+
+用户 rootless Docker 使用 `~/.config/docker/daemon.json`，不要误改 `/etc/docker/daemon.json`。
+例如 `default-address-pools: [{"base":"172.16.0.0/16","size":23}]` 可提供 128 个自动分配子网；
+必须先确认网段与现有网络和访问目标无冲突。生效需要重启对应用户 Docker daemon，已有网络不会缩小。
+重启前通过正式 cancel/wait 停止目标 run，并核对同一 daemon 上的其他工作。

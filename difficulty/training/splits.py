@@ -30,7 +30,7 @@ def _build_split(rollouts, samples, strategy, seed, validation_fraction, test_fr
 
 def create_split(root, dataset_id, split_id, *, strategy="task_random_v1", seed=42,
                  validation_fraction=0.2, test_fraction=0.2, validation_tasks=48,
-                 parent_experiment_id=None, parent_receipt_sha256=None, task_partitions=None):
+                 parent_experiment_id=None, parent_receipt_sha256=None, task_partitions=None, inner_seed=42):
     root = Path(root).resolve()
     dataset_id, split_id = identifier(dataset_id), identifier(split_id)
     if seed < 0 or not math.isfinite(validation_fraction) or not math.isfinite(test_fraction):
@@ -80,7 +80,16 @@ def create_split(root, dataset_id, split_id, *, strategy="task_random_v1", seed=
             if proof.get("files", {}).get("split.json") and proof["files"]["split.json"] != parent_split_digest:
                 raise ValueError("Parent split is not bound to parent receipt")
         assignment_source = None
-        if strategy == 'task_manifest_v1':
+        if strategy == 'task_holdout_event_v1':
+            from difficulty.training.split import make_task_holdout_split
+            manifest = None
+            if task_partitions is not None:
+                source = Path(task_partitions).resolve()
+                assignment_source = {'path': str(source), 'sha256': sha256(source)}
+                manifest = read_json(source)
+            split = make_task_holdout_split(rollouts, samples, test_fraction, seed,
+                                            validation_fraction, inner_seed, manifest)
+        elif strategy == 'task_manifest_v1':
             if task_partitions is None:
                 raise ValueError('task_manifest_v1 requires --task-partitions')
             source = Path(task_partitions).resolve()
@@ -143,6 +152,18 @@ def load_split(root, dataset_id, split_id, dataset_receipt_sha256, samples):
         if sha256(source) != digest:
             raise ValueError('Bound task partition source changed')
     split = read_json(split_path)
+    if split.get('strategy') == 'task_holdout_event_v1':
+        from difficulty.training.split import make_task_holdout_split
+        rollouts = read_json(dataset / 'rollouts.json')['rollouts']
+        expected = make_task_holdout_split(rollouts, samples, split['outer']['test_fraction'] or 0.2,
+            split['seed'], split['inner']['validation_fraction'], split['inner']['seed'], split['outer']['manifest'])
+        for field, value in expected.items():
+            if split.get(field) != value:
+                raise ValueError(f'Nested split protocol mismatch: {field}')
+        if (split.get('dataset_id') != dataset_id or split.get('dataset_receipt_sha256') != dataset_receipt
+                or receipt.get('split_id') != split_id):
+            raise ValueError('Nested split identity mismatch')
+        return split, receipt
     sample_ids = {row["sample_id"] for row in samples}
     assigned = [sample_id for ids in split["sample_ids"].values() for sample_id in ids]
     if len(assigned) != len(set(assigned)) or set(assigned) != sample_ids:

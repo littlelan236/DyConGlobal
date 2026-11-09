@@ -53,7 +53,7 @@ serving:
   run create NEW_RUN --operation rollout --from-run SOURCE_RUN --repeat-count 1
 ```
 
-`NEW_RUN` 须为新 ID，示例 GPU 与端口须替换为实际分配；来源有多个 repetitions 时，将 `--repeat-count` 改为来源的确切值。已有 run 可在停止并确认清理完成后，通过 `revise-serving-placement` 显式修订拓扑，再以原 ID resume；单独 `resume` 不改变模式。克隆与离线修订的边界见[入口约定](ENTRYPOINTS.md#runs-samples-and-attempts)。
+`NEW_RUN` 须为新 ID，示例 GPU 与端口须替换为实际分配；来源有多个 repetitions 时，将 `--repeat-count` 改为来源的确切值。已有 run 可在停止并确认清理完成后，通过 `run revise-config` 显式修订拓扑，再以原 ID resume；单独 `resume` 不改变模式。克隆与离线修订的边界见[入口约定](ENTRYPOINTS.md#runs-samples-and-attempts)。
 
 `run status` 和 `report run` 的 `serving_workers` 展示每卡端口、CPU 槽位占用与上限；本地证据位于 `runs/RUN/serving/worker-pool.json`。各服务的 launch、process、service 和 server.log 位于 `serving/workers/worker-NN/`。每个真实物理 attempt 另存 `serving-assignment.json`，结果中也含 `serving_assignment`，可追溯 sample/attempt/execution 与 GPU/服务的绑定。
 
@@ -69,17 +69,17 @@ serving:
 先通过 `run cancel` 停止并核验 `cancellation.termination.cleanup_complete=true`，再执行：
 
 ```bash
-.venvs/runner/bin/dycon run revise-serving-placement RUN_ID \
-  --revision-id tp1-gpu01 --gpus 0 1 \
-  --base-url http://127.0.0.1:18200/v1 \
-  --trajectory-sharding per_gpu_tp1 \
-  --replica-base-urls http://127.0.0.1:18200/v1 http://127.0.0.1:18201/v1 \
-  --max-cpu-workers-per-gpu 2 --gpu-memory-utilization 0.4 \
+.venvs/runner/bin/dycon run revise-config RUN_ID \
+  --revision-id tp1-gpu01 --set 'serving.gpus=[0, 1]' \
+  --set serving.base_url=http://127.0.0.1:18200/v1 \
+  --set serving.trajectory_sharding=per_gpu_tp1 --set serving.tensor_parallel_size=1 \
+  --set 'serving.replica_base_urls=[http://127.0.0.1:18200/v1, http://127.0.0.1:18201/v1]' \
+  --set serving.max_cpu_workers_per_gpu=2 --set serving.gpu_memory_utilization=0.4 \
   --reason 'User authorized TP1 topology conversion preserving completed progress'
 .venvs/runner/bin/dycon run resume RUN_ID --detach
 ```
 
-四个新增选项须一起显式传入，TP 自动设为 1。上例总 CPU 轨迹并发仍为 4；省略四项时保持原设备/端口迁移语义。复用原修订锁、退出/清理验证、before/after、配置与 plan 哈希链和 receipt；任务选择、work-items、evidence 及已接纳结果不变。显式 KV 字节预算会使显存比例无效，因此拒绝这类转换，须先另行审计资源政策。运行中或清理未完成时拒绝修订。共享 GPU 上的各服务仍需自行安排互异端口及可容纳的显存比例。
+所有字段在同一候选配置中一起校验，TP=1 需显式设置。上例总 CPU 轨迹并发为 4。统一接口保留退出/清理检查、before/after、配置与 plan 哈希链和 receipt；任务选择、work-items、evidence 及已接纳结果不变。显式 KV 字节预算仍优先于显存比例；若要改用比例，可在同一修订中设置 `--set serving.kv_cache_memory_bytes=null`。运行中或清理未完成时拒绝应用修订，但可以预览。共享 GPU 上的各服务仍需安排互异端口及可容纳的显存比例。
 
 
 SkillsBench ??????????????? timing receipt ? [SkillsBench ????](SKILLSBENCH-STARTUP-CN.md)?

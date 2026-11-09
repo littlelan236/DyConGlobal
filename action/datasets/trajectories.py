@@ -105,7 +105,7 @@ def select_trajectories(cfg, run_id=None, rollout_ids=(), rollout_list=None):
             requested.append(key)
             source = {"source_run_id": run, "run_id": run, "rollout_id": rid,
                       "trajectory_path": row["trajectory_path"], "trajectory_sha256": row["trajectory_sha256"],
-                      "task_key": row["task_key"], "instance_id": task["instance_id"], "repo": task["repo"],
+                      "task_key": row["task_key"], "instance_id": task["instance_id"], "repo": task.get("repo"),
                       "partition": task["partition"], "model_fingerprint": row["model_fingerprint"],
                       "resolved": row["resolved"], "submission_status": row["submission_status"],
                       "termination_reason": row["termination_reason"], "cohort": binding.get("cohort"),

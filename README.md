@@ -8,6 +8,7 @@ DyConGlobal runs coding-agent benchmarks and manages their rollout, evaluation, 
 |---|---|
 | [Minimum run guide](docs/MINIMUM-RUN-CN.md) | Common setup, run, evaluation, recovery, and analysis workflows |
 | [Entrypoints and contracts](docs/ENTRYPOINTS.md) | CLI families, configuration ownership, evidence, and identity rules |
+| [Configuration revisions](docs/CONFIG-REVISION-CN.md) | Unified frozen configuration revision, preview, replanning and recovery |
 | [Benchmark operations](docs/BENCHMARKS-CN.md) | SWE-bench, SkillsBench, WebArena Verified, and Harbor integration |
 | [SkillsBench verifier audit](docs/SKILLSBENCH-VERIFIER-AUDIT-CN.md) | Evidence-based zero-reward classification |
 | [Capture operations](docs/CAPTURE-CN.md) | Online capture, publication, recovery, and downstream use |
@@ -16,6 +17,7 @@ DyConGlobal runs coding-agent benchmarks and manages their rollout, evaluation, 
 | [Multi-GPU TP=1](docs/MULTI-GPU-TP1-CN.md) | Per-GPU serving and trajectory scheduling |
 | [Steering datasets](docs/STEERING-DATASET-LDA-CN.md) | Immutable branch-hidden datasets and visualizations |
 | [Difficulty feature contract](docs/DIFFICULTY-FEATURE-CONTRACT-CN.md) | Hidden identity, eligibility, task splits, and Ridge input |
+| [Dataset Ridge task holdout](docs/DIFFICULTY-RIDGE-HOLDOUT-CN.md) | Nested task/event split, Ridge search and refit, NMSE/R², full test trajectories, and verified results |
 | [Trajectory comparison](docs/TRAJECTORY-COMPARISON-CN.md) | Resolved repetitions and terminal workload curves |
 | [Action analysis](action/README.md) | Canonical action analysis and shared hidden indexes |
 | [Difficulty estimation](difficulty/README.md) | Data, training, prediction, and evaluation |
@@ -35,6 +37,7 @@ cd /home/wangtianyi/DyConGlobal
 ```
 
 `run create` freezes a plan; `run start` launches the workload and requires the configured model, GPU, container image, and runtime. See the minimum run guide before starting a new benchmark or resuming an existing run.
+Every new run includes `status-summary.json`, a refreshable per-run JSON snapshot of its `active-status` progress summary; see [Entrypoints and contracts](docs/ENTRYPOINTS.md) for its freshness and update behavior.
 
 ## Project model
 

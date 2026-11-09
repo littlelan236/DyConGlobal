@@ -7,13 +7,14 @@ import sys
 
 import pytest
 
-from application.execution.capture_budget_revision import revise_capture_control
+from application.execution.config_revision import revise_config
 from application.execution.failed_retry import request_failed_retry, retry_index, superseded
 from application.execution.run_plan import load_plan
 from core.config import Capture
 from core.io import read_json, sha256, write_json
 from core.processes import identity
 from rollout.runner import run_manifest
+from rollout.sample_token_budget import SampleTokenBudget
 from tests.test_limits_retry import configure, prepare, fake_runtime
 
 
@@ -28,8 +29,9 @@ def test_control_revision_preserves_other_settings_and_archives_old_snapshot(cfg
     run, _ = prepare(cfg)
     old = read_json(run / 'resolved-config.json')
     protected = {p: sha256(run / p) for p in ['tasks.json', 'selection.json', 'rollout/work-items.json']}
-    values = dict(revision_id='control-120', control_seconds=120, receipt_workers=16, reason='Explicit test authorization')
-    receipt = revise_capture_control(cfg['project_root'], run.name, **values)
+    values = dict(revision_id='control-120', updates={'capture.control_seconds': 120,
+                  'capture.receipt_workers': 16}, reason='Explicit test authorization')
+    receipt = revise_config(cfg['project_root'], run.name, **values)
     new = load_plan(cfg['project_root'], run.name)['config']
     normalized = copy.deepcopy(new)
     normalized['capture'] = old['capture']
@@ -39,7 +41,7 @@ def test_control_revision_preserves_other_settings_and_archives_old_snapshot(cfg
     assert new['capture']['receipt_workers'] == 16
     assert all(sha256(run / p) == h for p, h in protected.items())
     assert read_json(run / 'config-revisions/control-120/before/resolved-config.json') == old
-    assert revise_capture_control(cfg['project_root'], run.name, **values) == receipt
+    assert revise_config(cfg['project_root'], run.name, **values) == receipt
 
 
 @pytest.mark.parametrize('value', [0, 129])
@@ -75,6 +77,95 @@ def test_retry_failed_executes_new_attempt_only_for_requested_task(cfg, monkeypa
     calls.clear()
     run_manifest(cfg, run.name, resume=True, factory=factory)
     assert calls == []
+
+
+def test_retry_failed_physical_attempt_gets_fresh_budget_ledger(cfg, monkeypatch):
+    from core.io import hash_json
+    cfg = configure(cfg)
+    cfg['execution']['sample_completion_token_budget'] = 10
+    cfg['config_hash'] = hash_json({k: v for k, v in cfg.items() if k != 'config_hash'})
+    run, _ = prepare(cfg)
+    factory, _, _, _ = fake_runtime(monkeypatch, ['ValueError'])
+    old = next(iter(run_manifest(cfg, run.name, resume=True, factory=factory).values()))
+    first = SampleTokenBudget(cfg, old)
+    assert first.reserve('api-old', 'agent_decision', 10) == 10
+    first.record('api-old', 'agent_decision', {'completion_tokens': 7})
+    old_bytes = first.path.read_bytes()
+
+    request(cfg, run)
+    factory, _, _, _ = fake_runtime(monkeypatch, ['Submitted'])
+    new = next(iter(run_manifest(cfg, run.name, resume=True, factory=factory).values()))
+    assert new['attempt_id'] != old['attempt_id']
+    second = SampleTokenBudget(cfg, new)
+    assert second.reserve('api-new', 'agent_decision', 10) == 10
+    assert second.snapshot()['completion_tokens'] == 0
+    assert first.path.read_bytes() == old_bytes
+
+
+def test_worker_failure_without_physical_attempt_can_be_retried(cfg, monkeypatch):
+    cfg = configure(cfg)
+    run, loaded = prepare(cfg)
+    item = loaded['work_items']['items'][0]
+    work = run / 'rollout/tasks' / item['instance_id'] / 'repetitions' / item['repetition_id']
+    failure = {**item, 'attempt_id': None, 'exit_status': 'WorkerFailure',
+               'disposition': 'failed', 'physical_attempts': 0}
+    write_json(work / 'result.json', failure)
+
+    receipt = request(cfg, run, exit_statuses=['WorkerFailure'],
+                      sample_keys=[item['sample_key']])
+    assert receipt['sample_count'] == 1
+    assert receipt['items'][0]['superseded_attempts'][0]['source_kind'] == 'result_without_physical_attempt'
+    assert superseded(retry_index(run), item['sample_key'], failure)
+
+    factory, calls, _, _ = fake_runtime(monkeypatch, ['Submitted'])
+    outcome = next(iter(run_manifest(cfg, run.name, resume=True, factory=factory).values()))
+    assert len(calls) == 1
+    assert outcome['exit_status'] == 'Submitted'
+    assert outcome['physical_attempts'] == 1
+    assert read_json(work / 'attempts' / outcome['attempt_id'] / 'attempt-started.json')['retry_kind'] == 'operator'
+
+
+def test_progress_only_worker_failure_can_be_requested_again(cfg, monkeypatch):
+    cfg = configure(cfg)
+    run, loaded = prepare(cfg)
+    item = loaded['work_items']['items'][0]
+    failure = {**item, 'attempt_id': None, 'exit_status': 'WorkerFailure',
+               'disposition': 'failed', 'physical_attempts': 0}
+    progress = {'samples': {item['sample_key']: failure}, 'updated_at': 'before'}
+    write_json(run / 'progress.json', progress)
+    args = dict(exit_statuses=['WorkerFailure'], sample_keys=[item['sample_key']])
+    first = request(cfg, run, request_id='first', **args)
+    progress['updated_at'] = 'after-unrelated-progress-update'
+    write_json(run / 'progress.json', progress)
+    second = request(cfg, run, request_id='second', **args)
+    old = first['items'][0]['superseded_attempts'][0]
+    new = second['items'][0]['superseded_attempts'][0]
+    assert old['outcome_sha256'] == new['outcome_sha256']
+    assert old['source_sha256'] != new['source_sha256']
+    assert superseded(retry_index(run), item['sample_key'], failure)
+    factory, calls, _, _ = fake_runtime(monkeypatch, ['Submitted'])
+    outcome = next(iter(run_manifest(cfg, run.name, resume=True, factory=factory).values()))
+    assert len(calls) == 1
+    assert outcome['exit_status'] == 'Submitted'
+    run_manifest(cfg, run.name, resume=True, factory=factory)
+    assert len(calls) == 1
+
+
+def test_physical_retry_source_hash_conflict_still_rejected(cfg, monkeypatch):
+    from core.io import hash_json
+    cfg = configure(cfg)
+    run, _ = prepare(cfg)
+    factory, _, _, _ = fake_runtime(monkeypatch, ['ValueError'])
+    run_manifest(cfg, run.name, resume=True, factory=factory)
+    receipt = request(cfg, run)
+    duplicate = copy.deepcopy(receipt)
+    duplicate['request_id'] = 'conflicting'
+    duplicate['items'][0]['superseded_attempts'][0]['source_sha256'] = 'different'
+    duplicate['request_sha256'] = hash_json({k: v for k, v in duplicate.items()
+                                           if k != 'request_sha256'})
+    write_json(run / 'rollout/operator-retries/conflicting/request.json', duplicate)
+    with pytest.raises(ValueError, match='Conflicting operator retry attempt identity'):
+        retry_index(run)
 
 
 def test_operator_retry_is_once_even_if_new_attempt_fails(cfg, monkeypatch):
@@ -159,8 +250,8 @@ def test_live_execution_rejects_retry_and_control_revision(cfg):
     with pytest.raises(RuntimeError, match='still active'):
         request(cfg, run)
     with pytest.raises(RuntimeError, match='still active'):
-        revise_capture_control(cfg['project_root'], run.name, revision_id='live', control_seconds=120,
-                               receipt_workers=16, reason='Explicit test authorization')
+        revise_config(cfg['project_root'], run.name, revision_id='live', updates={
+            'capture.control_seconds': 120, 'capture.receipt_workers': 16}, reason='Explicit test authorization')
 
 
 def test_unrelated_capture_run_does_not_block_task_retry(cfg, monkeypatch):

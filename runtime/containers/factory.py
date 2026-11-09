@@ -402,34 +402,9 @@ class ContainerFactory:
 
 
 def cleanup_execution_containers(cfg, run_id, execution_attempt_id, client=None):
-    """Cancellation cleanup never prunes images or visits another execution."""
-    from core.cancellation import policy
+    """Reconcile only this execution's containers and empty owned networks."""
     from core.io import identifier
-    run_id, execution_attempt_id = identifier(run_id), identifier(execution_attempt_id)
-    own_client = client is None
-    client = client or docker.DockerClient(base_url=cfg['environment']['docker_host'],
-                                         timeout=min(3, policy(cfg)['cleanup_seconds']))
-    labels = ['dycon.project=' + cfg['project_root'], 'dycon.run=' + run_id,
-              'dycon.execution=' + execution_attempt_id]
-    removed, errors, remaining = [], [], []
-    try:
-        for container in client.containers.list(all=True, filters={'label': labels}):
-            if (container.labels.get('dycon.project') != cfg['project_root'] or
-                    container.labels.get('dycon.run') != run_id or
-                    container.labels.get('dycon.execution') != execution_attempt_id):
-                raise RuntimeError('Docker returned a container outside the requested execution')
-            try:
-                container.remove(force=True)
-                removed.append(container.id)
-            except docker.errors.NotFound:
-                removed.append(container.id)
-            except Exception as exc:
-                errors.append({'container_id': container.id, 'error': repr(exc)})
-        remaining = [c.id for c in client.containers.list(all=True, filters={'label': labels})]
-    except Exception as exc:
-        errors.append({'error': repr(exc)})
-    finally:
-        if own_client:
-            client.close()
-    return {'complete': not errors and not remaining, 'removed': removed,
-            'remaining': remaining, 'errors': errors}
+    from runtime.containers.networks import cleanup_owned_resources
+    return cleanup_owned_resources(cfg, {
+        'project': cfg['project_root'], 'run': identifier(run_id),
+        'execution': identifier(execution_attempt_id)}, client=client)

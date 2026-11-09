@@ -73,17 +73,22 @@ def qualify_profile(root, run_id, profile_id, profile_ref=None):
         if template.get('dependency_snapshot_sha256')!=source.get('dependency_snapshot_sha256'):
             from runtime.agents.dependencies import verify_snapshot
             old=verify_snapshot(source['dependency_snapshot']);new=verify_snapshot(template['dependency_snapshot'])
-            def core_files(manifest):
-                return {r['path']:r['sha256'] for r in manifest['files']
-                    if r['path'].startswith('wheels/') and not r['path'].startswith('wheels/openhands-')}
-            allowed={'benchflow_only_skills_v1','stock_condenser_for_minimal_BenchFlow_settings_v1'}
-            if (old['source_archive_sha256']!=new['source_archive_sha256']
-                    or old['cli_revision']!=new['cli_revision'] or core_files(old)!=core_files(new)
-                    or any(a['policy'] not in allowed for a in new.get('source_adaptations',[]))):
-                raise ValueError('Qualification cannot cross unverified dependency or CLI changes')
-            proof['dependency_compatibility']={'source_receipt':old['receipt_sha256'],
-                'target_receipt':new['receipt_sha256'],'identical_non_cli_wheels_sha256':hash_json(core_files(new)),
-                'declared_cli_adaptations':sorted({a['policy'] for a in new.get('source_adaptations',[])})}
+            if new.get('condenser_parent_receipt_sha256') == old['receipt_sha256']:
+                from runtime.agents.condenser import verify_derivation
+                proof['dependency_compatibility'] = verify_derivation(
+                    source['dependency_snapshot'], template['dependency_snapshot'])
+            else:
+                def core_files(manifest):
+                    return {r['path']:r['sha256'] for r in manifest['files']
+                        if r['path'].startswith('wheels/') and not r['path'].startswith('wheels/openhands-')}
+                allowed={'benchflow_only_skills_v1','stock_condenser_for_minimal_BenchFlow_settings_v1'}
+                if (old['source_archive_sha256']!=new['source_archive_sha256']
+                        or old['cli_revision']!=new['cli_revision'] or core_files(old)!=core_files(new)
+                        or any(a['policy'] not in allowed for a in new.get('source_adaptations',[]))):
+                    raise ValueError('Qualification cannot cross unverified dependency or CLI changes')
+                proof['dependency_compatibility']={'source_receipt':old['receipt_sha256'],
+                    'target_receipt':new['receipt_sha256'],'identical_non_cli_wheels_sha256':hash_json(core_files(new)),
+                    'declared_cli_adaptations':sorted({a['policy'] for a in new.get('source_adaptations',[])})}
             excluded.update({'dependency_snapshot','dependency_snapshot_sha256'})
         if any(template.get(k) != source.get(k) for k in set(template) | set(source) if k not in excluded):
             raise ValueError('Qualification cannot transfer across agent, dependency, skills or tool profiles')

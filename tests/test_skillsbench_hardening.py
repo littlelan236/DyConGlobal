@@ -94,3 +94,101 @@ def test_verifier_uvx_and_env_work_without_a_successful_installer(tmp_path):
     assert 'PINNED_UV:tool run --with pytest==8.4.1 pytest' in result.stdout
     assert (uv.read_bytes(), curl.read_bytes()) == before
     assert (trusted / 'curl').read_bytes() == curl.read_bytes()
+
+
+def test_verifier_wheel_links_expose_requires_python_without_mutating_snapshot(tmp_path):
+    import subprocess
+    import zipfile
+    from html.parser import HTMLParser
+    from runtime.agents.verifier_tools import verifier_wheel_links_command
+
+    source = tmp_path / 'snapshot'
+    (source / 'wheels').mkdir(parents=True)
+    expected = {}
+    for version, requirement in [('9.0.2', '>=3.10'), ('8.3.5', '>=3.8')]:
+        wheel = source / 'wheels' / ('pytest-' + version + '-py3-none-any.whl')
+        with zipfile.ZipFile(wheel, 'w') as archive:
+            archive.writestr('pytest/_vendor/other-1.dist-info/METADATA', 'Name: other\n')
+            archive.writestr('pytest-' + version + '.dist-info/METADATA',
+                'Metadata-Version: 2.1\nName: pytest\nVersion: ' + version + '\nRequires-Python: ' + requirement + '\n\n')
+        expected[wheel.name] = requirement
+    before = {p.name: p.read_bytes() for p in (source / 'wheels').iterdir()}
+    target = tmp_path / 'links'
+    command = verifier_wheel_links_command().replace('/opt/dycon-wheels', str(source)).replace('/opt/dycon-verifier-links', str(target))
+    result = subprocess.run(['/bin/sh', '-c', command], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    links = []
+    class Parser(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            if tag == 'a': links.append(dict(attrs))
+    Parser().feed((target / 'index.html').read_text())
+    assert {link['href'].rsplit('/', 1)[-1]: link['data-requires-python'] for link in links} == expected
+    assert {p.name: p.read_bytes() for p in (source / 'wheels').iterdir()} == before
+
+
+@pytest.mark.parametrize('proxy', [None, 'http://proxy.test:7890'])
+def test_public_verifier_index_is_injected_with_or_without_proxy(tmp_path, proxy):
+    from core.io import read_json
+    from runtime.agents.skillsbench import OwnedPlanes
+    index = 'https://mirrors.aliyun.com/pypi/simple/'
+    verifier = SimpleNamespace(env={'TASK_VARIABLE': 'preserved'}, timeout_sec=10)
+    task = SimpleNamespace(config=SimpleNamespace(verifier=verifier))
+    cfg = {'project_root': str(tmp_path), 'execution_context': {'profile': {
+        'network': 'public', 'verifier_python_index': index,
+        'verifier_timeout_overrides': {'task': 123}}}}
+    if proxy:
+        cfg['skillsbench_network_proxy'] = proxy
+    class Inner:
+        async def harden_before_verify(self, env, task, user, *, workspace):
+            assert task.config.verifier.env['PIP_INDEX_URL'] == index
+            assert task.config.verifier.env['UV_INDEX_URL'] == index
+    class Env:
+        async def exec(self, command, **kwargs):
+            return SimpleNamespace(return_code=0, stdout='ok', stderr='')
+    sample = SimpleNamespace(instance_id='task', sample_key='sample', task_key='key')
+    planes = OwnedPlanes(Inner(), cfg, 'run', sample, 'attempt', {}, tmp_path)
+    async def export():
+        pass
+    planes._export_workspace = export
+    asyncio.run(planes.harden_before_verify(Env(), task, 'agent', workspace='/root'))
+    assert verifier.env['TASK_VARIABLE'] == 'preserved'
+    assert verifier.timeout_sec == 123
+    receipt = read_json(tmp_path / 'verifier-environment.json')
+    assert receipt['verifier_python_index'] == index
+    assert receipt['proxy_mode'] == ('configured' if proxy else 'none')
+    assert receipt['configured'] is True
+    assert receipt['run_id'] == 'run' and receipt['attempt_id'] == 'attempt'
+    assert receipt['phase'] == 'after_hardening_and_tools'
+    assert receipt['effective_variables']['UV_DEFAULT_INDEX'] == index
+
+
+def test_index_policy_preserves_legacy_and_rejects_task_conflicts():
+    from runtime.agents.skillsbench import verifier_environment_policy
+    original = {'PIP_INDEX_URL': 'https://dedicated.test/simple/', 'TASK': 'keep'}
+    assert verifier_environment_policy({'network': 'public'}, original) == (original, {})
+    index = 'https://mirror.test/simple/'
+    with pytest.raises(ValueError, match='dedicated index'):
+        verifier_environment_policy({'network': 'public', 'verifier_python_index': index}, original)
+    with pytest.raises(ValueError, match='offline policy'):
+        verifier_environment_policy({'network': 'public', 'verifier_python_index': index}, {'PIP_NO_INDEX': '1'})
+    effective, _ = verifier_environment_policy({'network': 'none'}, {'TASK': 'keep'})
+    assert effective['TASK'] == 'keep'
+    for key in ('PIP_NO_INDEX', 'UV_NO_INDEX', 'UV_OFFLINE'):
+        assert effective[key] == '1'
+    assert effective['UV_PYTHON_DOWNLOADS'] == 'never'
+    assert effective['HTTP_PROXY'] == ''
+
+
+def test_environment_receipt_does_not_export_credentials():
+    from runtime.agents.skillsbench import _verifier_safe_environment
+    result = _verifier_safe_environment({'HTTP_PROXY': 'http://user:password@proxy.test/',
+                                        'API_KEY': 'secret', 'TASK': 'private'})
+    assert result == {'HTTP_PROXY': 'http://[redacted]@proxy.test/'}
+
+
+def test_simpo_keeps_legacy_explicit_cpu_index_precedence():
+    from runtime.agents.skillsbench import verifier_environment_policy
+    profile = {'network': 'public', 'verifier_python_index': 'https://mirror.test/simple/'}
+    effective, _ = verifier_environment_policy(profile, {}, task_id='simpo-code-reproduction')
+    assert effective['UV_DEFAULT_INDEX'] == ''
+    assert effective['UV_INDEX_URL'] == profile['verifier_python_index']

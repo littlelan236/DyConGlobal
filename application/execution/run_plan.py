@@ -42,6 +42,16 @@ def _selection_from_tasks(catalog: Catalog, task_ids=(), partition=None, cfg=Non
             raise ValueError("Requested WebArena/Harbor tasks are outside the frozen benchmark snapshot")
         selection["tasks"], selection["task_keys"] = selected, sorted(selected)
 
+    if benchmark == 'skillsbench':
+        snapshot_tasks = read_json(Path(cfg['project_root']) / ref)['tasks']
+        selected = {key: copy.deepcopy(snapshot_tasks[key]) for key in selection['task_keys']
+                    if key in snapshot_tasks}
+        if task_ids and {t['instance_id'] for t in selected.values()} != set(task_ids):
+            raise ValueError('Requested SkillsBench tasks are outside the frozen benchmark snapshot')
+        for key, task in selected.items():
+            task['partition'] = selection['tasks'][key]['partition']
+        selection['tasks'], selection['task_keys'] = selected, sorted(selected)
+
     tasks = selection["tasks"]
 
     return {
@@ -337,6 +347,8 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
     else:
 
         write_json(run / "progress.json", {})
+        from application.execution.status import refresh_run_status_summary
+        refresh_run_status_summary(root, run_id)
 
     write_json(run / "artifacts.json", {"schema_version": 1, "run_id": run_id, "artifacts": []})
 
@@ -388,13 +400,23 @@ def _git_identity(root):
 
 
 
-def load_plan(root, run_id):
+def load_plan(root, run_id, *, allow_incomplete_revision=None, allow_incomplete_extension=None):
 
     root = Path(root).resolve()
 
     run_id = identifier(run_id)
 
     run = run_path(root, run_id)
+
+    for journal in (run / 'config-revisions').glob('*/progress.json'):
+        if (read_json(journal).get('phase') in {'prepared', 'committing', 'rolling_back'}
+                and journal.parent.name != allow_incomplete_revision):
+            raise RuntimeError('Incomplete configuration revision ' + journal.parent.name +
+                               '; recover it with run revise-config --recover before execution')
+    for journal in (run / 'repetition-extensions').glob('*/progress.json'):
+        if (read_json(journal).get('phase') in {'prepared', 'committing'}
+                and journal.parent.name != allow_incomplete_extension):
+            raise RuntimeError('Incomplete repetition extension; recover with run add-repetitions --recover')
     plan = read_json(run / "plan.json")
 
     if plan.get("schema_version") != 2 or plan.get("migration_state", "active") != "active":
@@ -462,6 +484,7 @@ def load_plan(root, run_id):
         cfg["selection"], run_id, plan["repeat_count"], cfg["generation"]["seed"],
 
         cfg.get("parallel", {}).get("branch_count", 1),
+        extension=plan.get("sampling_extension"),
 
     )
 
@@ -471,7 +494,7 @@ def load_plan(root, run_id):
 
     from rollout.retry import enabled
 
-    if enabled(cfg) and expected["seed_policy"] != work_items.get("seed_policy"):
+    if (enabled(cfg) or plan.get("sampling_extension")) and expected["seed_policy"] != work_items.get("seed_policy"):
 
         raise ValueError("Run seed policy disagrees with frozen configuration")
 

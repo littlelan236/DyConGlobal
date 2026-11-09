@@ -1,5 +1,12 @@
 # 剩余工作量估计与数据接口
 
+Parallel capture 的 visualization-only publication 可由
+`difficulty-plot-trajectories --rollout-id ... --publication-id ... --attempt-id ...`
+和 `difficulty-plot-parallel --rollout-id ... --publication-id ...` 直接读取。
+不需要训练 dataset，且这些 publication 不具有训练资格；轨迹预测仍需已有兼容
+checkpoint。详细 coverage 和 truth 语义见 `docs/CAPTURE-CN.md` 与
+`docs/TRAJECTORY-COMPARISON-CN.md`。
+
 2026-10-21：difficulty 新产物独立于来源 run，统一使用 `dycon`。一个训练集可通过
 `difficulty-dataset compose NEW_ID --source-dataset A --source-dataset B` 引用多个批次，来源 receipt/hash 递归核验。
 `difficulty-dataset resolved ID --source-run RUN --index-id INDEX` 冻结成功轨迹训练集。
@@ -192,3 +199,74 @@ TensorBoard binds to remote loopback port 6006 by default. On the local PC run `
 For SkillsBench workspace evaluations, `capture-trace RUN PUBLICATION --eligibility positive_reward --session-id SESSION` and `difficulty-dataset resolved DATASET --source-run RUN --index-id INDEX --rollout-list FILE --eligibility positive_reward` explicitly include completed official evaluations whose numeric `rewards.reward` is finite and greater than zero. Defaults remain `resolved_only`. Use the normal `online-index` between these commands; its success-only labels stay null for unresolved trajectories. Positive-reward selection consumes the existing exact finalized suffix labels (`remaining_steps` and `remaining_reasoning_tokens_after`) and preserves resolved=false for partial credit. Targets describe the actual terminal endpoint, not eventual success. Canonical AgentCompleted, complete native capture, exact evaluation subject/report hashes and canonical action alignment are still required. A post-agent export failure can be included only if those preserved artifacts verify. The dataset receipt and loader recheck the positive evaluation report. No original run evidence or success labels are rewritten.
 
 Use the existing `difficulty-split --strategy event_random_v1 --seed 42 --validation-fraction 0.15 --test-fraction 0.15` and schema-2 Ridge training YAML. Validation selects site and alpha; refit train+validation leaves the test set held out.
+
+
+## 自动 capture publication 与 partial 数据
+
+非并行 think_close run 收尾会独立审计并正式发布最终 accepted/submitted canonical sessions。
+Workspace/live-state 类型复用其正式 subject 资格，不要求不适用的 patch submission。
+通过 `dycon capture status RUN_ID` 获取稳定 index_id/publication_id 和 `index_command`，
+再用 `dycon online-index RUN_ID INDEX_ID --publication-id PUBLICATION_ID` 建立 schema-3 index。
+该 index 绑定 publication receipt，并保留 coverage locator/hash、缺 hidden 数量、exact
+alignment、non-action、censored 与 evaluation-ineligible 区分；不合成缺失 hidden。
+
+`difficulty-dataset resolved ... --source-run RUN_ID --index-id INDEX_ID` 仍只吸收完成评测、
+resolved=true、exact think_close、action response 且双标签有效的点。Partial trajectory
+贡献其有效子集；accepted/unresolved 留在 publication 中供显式终点可视化使用，默认不
+进入 resolved-only dataset。缺 native response 的前缀不获得伪造的剩余 token 标签。
+轨迹可视化通过 repair receipt 保留有证据点，预测和 truth 各自缺失处断线，不插值或补零。
+完整与 partial 自动 publication 均使用新 immutable ID；历史 index/dataset 不回写。
+
+
+## Dataset Ridge 外层任务留出评估
+
+完整配置、两层协议、指标口径、失败恢复与 2026-11-09 真实验收记录见[任务留出评估专题](../docs/DIFFICULTY-RIDGE-HOLDOUT-CN.md)。
+
+正式入口（analysis 环境）一次完成来源校验、外层 task train/test、内层 event train/validation、
+每目标独立 layer × alpha 搜索、outer_train 重拟合、全量 outer_test 预测及 NMSE/R²：
+
+```bash
+.venvs/analysis/bin/dycon difficulty-ridge-holdout EVALUATION_ID \
+  --workflow-config difficulty/training/experiments/ridge-holdout.yaml
+.venvs/analysis/bin/dycon artifact verify EVALUATION_ID --scope difficulty-evaluation
+```
+
+编辑该独立 workflow YAML 指定已发布 dataset。`run.mode: dry-run|check-data|fit` 分别对应只检查来源与划分、
+再检查 hidden/cache、实际拟合。`model.ridge.layers: auto` 展开 dataset 契约的全部合法单层；
+默认 13 个严格正 alpha（10^-4 至 10^8），不拼接层。配置、完整网格和特征契约冻结在 evaluation 中。
+外层默认 seed=42、test_fraction=0.2；内层默认 seed=42、validation_fraction=0.2，其分母仅为 outer_train。
+内层同轨迹相关性允许存在；跨任务泛化只看 outer_test。外层 WebArena 当前因 template 泄漏约束明确拒绝。
+
+`outer_split.strategy: task_manifest_v1` 使用 `outer_split.task_partitions: FILE.json`；
+此时不要填写随机 seed/test_fraction。JSON 为 `{"task_assignments":[{"task_key":"DATASET_TASK_KEY",
+"instance_id":"TASK_ID","partition":"train"}]}`，须恰好覆盖所有 dataset task，partition 只允许 train/test。
+task_key 从冻结 rollouts.json 读取，SkillsBench 包含 revision；未知、遗漏、重复和冲突身份均拒绝。
+
+`visualization.enabled: false` 跳过 Ridge 搜索图、轨迹图和 HTML，且不加载 matplotlib；
+预测、指标及 coverage audit 仍完整生成。默认 true，每个 test rollout/repetition、每个 target 均导出 PNG/SVG，
+HTML 自包含并支持筛选。图只读取权威预测，无二次推理；positive_reward 中 resolved=false 的部分成功轨迹也保留。
+fraction 仅使用 dataset 已发布标签，不临时用完整轨迹真值归一化 raw 预测。
+
+产物：`difficulty/evaluations/EVALUATION_ID/` 的 workflow、resolved-config、schema-2 training-config、
+cohort、coverage、metrics、by-task/by-rollout CSV、predictions、report，以及可选 plots/index.html。
+split 属于原 dataset，attempt 仍由统一 training service 管理并独立封存。
+主指标为原单位 pooled NMSE_energy=SSE/sum(y²)、NMSE_variance=SSE/sum((y-mean(y))²)、R²；
+另报拟合空间、分组与等权 macro、outer_train 均值基线。有限配对计数及未定义原因显式记录，
+零能量、零方差、单点、非有限预测和逆变换溢出不冒充零误差。预测不裁负、不平滑、不强制单调。
+
+每次使用新 evaluation ID，含未完成目录也拒绝覆盖。若训练完成后绘图失败，保留诊断且不写 evaluation 成功 receipt；
+使用新 ID 和 `--reuse-attempt-id ATTEMPT_ID` 正式恢复，dataset/split、特征契约、完整有效训练配置与 receipt 必须相同。
+关闭可视化不能用于改变已有 attempt 的有效训练配置。任一 test event 失败则标记 partial、无成功 receipt。
+Python 调用方使用同一 `difficulty.evaluation.holdout.run` service。
+
+Standalone 训练仍为 `dycon difficulty-train --training-config CONFIG.yaml`，attempt ID 写在 YAML 的
+`run.attempt_id`，不是 CLI 位置参数。Standalone `model.ridge.plots_enabled` 默认 true，以保持旧入口行为。
+
+
+### 2026-11-09 真实验收
+
+`skillsbench-positive77-terminal-20261102` 的完整 832 候选已完成，相关回归 91 项通过。
+外层 test 包含 18 条轨迹、每个目标 501 个 events，全部预测完成；36 PNG、36 SVG 与 HTML 通过 artifact verifier。
+原单位 test R² 为 tokens -0.814806、steps 0.135362；内层 validation 分数不能替代跨 task 泛化结果。
+最终页面位于 `difficulty/evaluations/skillsbench77-holdout-full-plots-20261109/index.html`（相对工程根目录）；
+完整实验身份、receipt 与结果解读见上述专题。

@@ -17,7 +17,6 @@ def recover_online(cfg, run_id):
         frozen["capture"]["export"],
         run_id,
         frozen["paths"]["nas_root"],
-        frozen["images"]["reserve_bytes"],
     )
     sessions = {}
     try:

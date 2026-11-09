@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import os
+import re
 import secrets
-import select
+import selectors
 import socket
 import threading
 import time
@@ -40,6 +42,38 @@ class UpstreamModelError(RuntimeError):
         super().__init__(f'Model HTTP {status}: '+str(payload)[:1000])
 
 
+def upstream_error_evidence(payload):
+    evidence = {'upstream_error_payload_sha256': hash_json(payload)}
+    error = payload.get('error') if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return evidence
+    for key in ('type', 'code', 'param'):
+        value = error.get(key)
+        if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', value):
+            evidence['upstream_error_' + key] = value
+    message = error.get('message')
+    if isinstance(message, str):
+        from runtime.agents.openhands_transport import safe_error_message
+        message = safe_error_message(message)
+        if message:
+            evidence['upstream_error_message'] = message
+    return evidence
+
+
+def is_context_window_error(status, payload):
+    """Recognize explicit provider context rejection, not arbitrary HTTP 400s."""
+    error = payload.get('error') if isinstance(payload, dict) else None
+    if status != 400 or not isinstance(error, dict):
+        return False
+    if error.get('code') in ('context_length_exceeded', 'context_window_exceeded'):
+        return True
+    message = error.get('message')
+    return (error.get('param') == 'input_tokens' and isinstance(message, str)
+            and 'maximum context length' in message.lower()
+            and 'tokens' in message.lower()
+            and bool(re.search(r'\b(?:requested|exceed(?:s|ed)?)\b', message.lower())))
+
+
 def buffered_sse(raw):
     """Serialize only a completed winner; no losing candidate delta escapes."""
     choice = raw["choices"][0]
@@ -71,6 +105,7 @@ class OpenHandsBridge:
         self.history = LoopEscapeHistory()
         self.server = self.thread = None
         self.limit_reason = None
+        self.context_window_error = None
         self.loop_hit = None
         self.step_loop = StepLoopDetector(cfg['agent'].get('loop_repeat_limit'), cfg['agent'].get('loop_max_period', 7))
         self.closed = threading.Event()
@@ -97,6 +132,26 @@ class OpenHandsBridge:
             if len(row['events']) >= 32: raise ValueError('SDK diagnostic event bound exceeded')
             row['events'].append({**event, 'observed_at': now()})
             write_json(self.output / 'diagnostics' / ('sdk-transport-' + sdk_id + '.json'), row)
+        with self.lifecycle_lock:
+            active = [state for state in self.handlers.values()
+                      if state.get('sdk_request_id') == sdk_id]
+        for state in active:
+            if event['event'] == 'sdk_http_finished':
+                state['sdk_http_status'] = event.get('http_status')
+                for key in ('http_error_type', 'http_error_code', 'http_error_param',
+                            'http_error_message', 'http_error_body_sha256',
+                            'http_error_body_omitted', 'http_error_body_unavailable'):
+                    if key in event:
+                        state[key] = event[key]
+            elif event['event'] == 'sdk_call_failed':
+                state['sdk_exception_types'] = event.get('exception_types', [])
+                state['sdk_failure_phase'] = event.get('phase', 'unknown')
+            self._event('sdk_transport_event', state=state,
+                        sdk_event=event['event'], http_status=event.get('http_status'),
+                        exception_types=','.join(event.get('exception_types', []))[:256],
+                        phase=event.get('phase'), http_error_type=event.get('http_error_type'),
+                        http_error_code=event.get('http_error_code'),
+                        http_error_message=event.get('http_error_message'))
 
 
     def _state(self):
@@ -147,13 +202,19 @@ class OpenHandsBridge:
                    "binding": self.binding, "sdk_request_id": state.get("sdk_request_id"),
                    **{key: state.get(key) for key in (
                        "phase", "delivery_status", "upstream_terminal", "upstream_active",
-                       "peer_closed", "handler_terminal", "events_dropped")},
+                       "peer_closed", "handler_terminal", "events_dropped", "sdk_http_status",
+                       "sdk_exception_types", "sdk_failure_phase", "http_error_type",
+                       "http_error_code", "http_error_param", "http_error_message",
+                       "http_error_body_sha256", "upstream_error_payload_sha256",
+                       "upstream_error_http_status",
+                       "upstream_error_type", "upstream_error_code",
+                       "upstream_error_param", "upstream_error_message")},
                    "events": list(state["events"])}
         path = self.output / "diagnostics" / ("request-lifecycle-" + state["request_id"] + ".json")
         path.parent.mkdir(parents=True, exist_ok=True)
         write_json(path, row)
 
-    def _peer_lost(self, state, event, error_type=None):
+    def _peer_lost(self, state, event, error_type=None, error_errno=None, error_message=None):
         # Claim and commit under the same request lock as upstream completion.
         # Native cancellation is session-scoped, so an in-flight peer loss
         # explicitly terminates THIS physical attempt; a terminal response never does.
@@ -164,34 +225,59 @@ class OpenHandsBridge:
             if cancel:
                 state["peer_cancel_claimed"] = True
                 self.closed.set()
+        if error_message:
+            from runtime.agents.openhands_transport import safe_error_message
+            error_message = safe_error_message(str(error_message))
         self._event(event, state=state, error_type=error_type,
+                    error_errno=error_errno,
+                    error_message=error_message,
                     cancel_claimed=cancel, policy="terminate_attempt_only_while_upstream_active")
         if cancel:
             self.abort("SDK peer disconnected during active upstream request",
                        origin="peer_disconnect", state=state)
 
     def _watch_peer(self, connection, state):
-        while not state["done"].wait(0.25):
-            with state["lock"]:
-                if state["handler_terminal"] or state["response_write_finished"]:
-                    return
-            try:
-                if state["done"].is_set():
-                    return
-                if connection.fileno() < 0:
+        try:
+            # DefaultSelector uses epoll on Linux, without select()'s FD_SETSIZE bound.
+            with selectors.DefaultSelector() as selector:
+                registered = False
+                while not state["done"].wait(0.25):
+                    with state["lock"]:
+                        if state["handler_terminal"] or state["response_write_finished"]:
+                            return
                     if state["done"].is_set():
                         return
-                    self._peer_lost(state, "peer_socket_closed")
-                    return
-                if select.select([connection], [], [], 0)[0]:
-                    if not connection.recv(1, socket.MSG_PEEK):
-                        self._peer_lost(state, "peer_eof")
+                    if connection.fileno() < 0:
+                        self._peer_lost(state, "peer_socket_closed")
                         return
-            except (OSError, ValueError) as exc:
-                if state["done"].is_set():
-                    return
-                self._peer_lost(state, "peer_socket_error", type(exc).__name__)
+                    if not registered:
+                        selector.register(connection, selectors.EVENT_READ)
+                        registered = True
+                    if selector.select(0):
+                        try:
+                            data = connection.recv(1, socket.MSG_PEEK)
+                        except (BlockingIOError, InterruptedError):
+                            continue
+                        except OSError as exc:
+                            if exc.errno not in {errno.ECONNRESET, errno.ECONNABORTED, errno.ENOTCONN}:
+                                raise
+                            self._peer_lost(state, "peer_socket_error", type(exc).__name__,
+                                            exc.errno, str(exc))
+                            return
+                        if not data:
+                            self._peer_lost(state, "peer_eof")
+                            return
+        except (OSError, ValueError) as exc:
+            if state["done"].is_set():
                 return
+            if connection.fileno() < 0:
+                self._peer_lost(state, "peer_socket_closed")
+                return
+            # A failed monitor is not evidence that the SDK disconnected.
+            from runtime.agents.openhands_transport import safe_error_message
+            self._event("peer_monitor_error", state=state, error_type=type(exc).__name__,
+                        error_errno=getattr(exc, 'errno', None),
+                        error_message=safe_error_message(str(exc)), cancel_claimed=False)
 
     def abort(self, reason, *, origin="attempt_lifecycle", state=None):
         """Idempotently terminate this bridge's session, preserving first cause."""
@@ -392,9 +478,14 @@ class OpenHandsBridge:
                             status="http_response", http_status=response.status_code)
                 if not response.ok:
                     self.token_budget.record_unknown(api_id, role)
-                    call.update(status="failed", http_status=response.status_code, finished_at=now())
+                    call.update(status="failed", http_status=response.status_code,
+                                finished_at=now(), usage_known=False)
                     try:payload=response.json()
                     except ValueError:payload={'error':{'message':'Upstream model request failed','type':'upstream_error'}}
+                    if is_context_window_error(response.status_code, payload):
+                        call['context_window_error'] = {
+                            'api_attempt_id': api_id, 'http_status': response.status_code,
+                            **upstream_error_evidence(payload)}
                     raise UpstreamModelError(response.status_code,payload)
                 try:
                     raw_response = response.json()
@@ -418,7 +509,8 @@ class OpenHandsBridge:
                 if self.token_budget.limit is not None:
                     budget_summary = self.token_budget.snapshot()
                     call['sample_budget'] = {key: budget_summary.get(key) for key in
-                                            ('limit', 'completion_tokens', 'by_role', 'exhausted', 'usage_unknown')}
+                                            ('schema_version', 'scope', 'binding', 'limit',
+                                             'completion_tokens', 'by_role', 'exhausted', 'usage_unknown')}
                     call['sample_budget']['ledger_path'] = str(self.token_budget.path)
                 if self.runtime.get('request_control_enabled'):
                     owner = body['dycon_request_owner']
@@ -485,6 +577,7 @@ class OpenHandsBridge:
             record.update(selected_response=raw, response_sha256=hash_json(raw), finished_at=now(), status="completed")
             self._persist(record)  # Persist before returning a side-effect-capable tool bundle.
             self._terminal(record, "completed")
+            self.context_window_error = None
             self._event("result_ready")
             return raw
         except BaseException as exc:
@@ -499,6 +592,23 @@ class OpenHandsBridge:
                         'reasoning_loop' if payload.get('exit_status') == 'reasoning_loop' else 'generation_limit')
                 if isinstance(exc, OpenHandsProtocolError):
                     self.step_loop.clear()
+                calls = record.get('model_calls', [])
+                # Classify the failed decision only when every candidate was
+                # rejected for context; a recovered or losing branch is not terminal.
+                if (calls and all(call.get('context_window_error') for call in calls)
+                        and not self.closed.is_set()):
+                    self.context_window_error = {
+                        'schema_version': 1, 'binding': self.binding,
+                        'exit_status': 'ContextWindowExceededError',
+                        'cause_source': 'upstream_model_response',
+                        'request_id': record['request_id'], 'role': record['role'],
+                        'model_calls': [call['context_window_error'] for call in calls],
+                        'observed_at': now()}
+                    write_json(self.output / 'diagnostics/context-window-error.json',
+                               self.context_window_error)
+                elif not (isinstance(exc, OpenHandsLimit)
+                          and self.limit_reason == 'sample_token_usage_unknown'):
+                    self.context_window_error = None
                 setattr(exc, 'dycon_request_id', record['request_id'])
                 record.update(error=repr(exc), status=status, finished_at=now())
                 self._persist(record)
@@ -598,6 +708,12 @@ class OpenHandsBridge:
                     data = buffered_sse(response) if stream else json.dumps(response).encode()
                     self._write(state, 200, data, "text/event-stream" if stream else "application/json")
                 except UpstreamModelError as exc:
+                    evidence = upstream_error_evidence(exc.payload)
+                    with state['lock']:
+                        state['upstream_error_http_status'] = exc.status
+                        state.update(evidence)
+                    bridge._event('upstream_model_error', state=state,
+                                  http_status=exc.status, **evidence)
                     self._write(state, exc.status, json.dumps(exc.payload).encode())
                 except Cancelled:
                     bridge._event("request_cancelled", origin=bridge.cancel_origin or "run_or_deadline")

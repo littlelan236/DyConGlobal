@@ -94,7 +94,7 @@ def canonical_point(event, *, sid, run_id, rid, row, task, actions, bound, ident
             'prediction_binding': classification}, None
 
 
-def predict_repaired(cfg, run_id, repair_id, catalog, model, layer, *, cache_id=None, model_path=None, target=None):
+def predict_repaired(cfg, run_id, repair_id, catalog, model, layer, *, cache_id=None, model_path=None, target=None, include_unresolved=False):
     """Score every unambiguous action-close repair point, with no GT filtering."""
     root = Path(cfg['project_root'])
     if cache_id:
@@ -106,7 +106,7 @@ def predict_repaired(cfg, run_id, repair_id, catalog, model, layer, *, cache_id=
                 or receipt['source_files'].get(summary['model']) != sha256(model_path)):
             raise ValueError('Prediction cache run/repair/model/target mismatch')
         actions = {rid: read_actions(root, dict(row, rollout_id=rid))
-                   for rid, row in catalog['rollouts'].items() if row.get('resolved') is True}
+                   for rid, row in catalog['rollouts'].items() if include_unresolved or row.get('resolved') is True}
         predictions = {}
         with (directory / 'curves.csv').open(encoding='utf-8-sig', newline='') as stream:
             for point in csv.DictReader(stream):
@@ -147,7 +147,7 @@ def predict_repaired(cfg, run_id, repair_id, catalog, model, layer, *, cache_id=
     report = read_json(base / 'report.json')
     records = [r for r in report['sessions'] if r.get('published') and r.get('rollout_id')]
     resolved = {rid: row for rid, row in catalog['rollouts'].items()
-                if row.get('resolved') is True and row.get('evaluation_status') == 'completed'
+                if (include_unresolved or (row.get('resolved') is True and row.get('evaluation_status') == 'completed'))
                 and not row.get('provenance', {}).get('quarantined')}
     actions = {rid: read_actions(root, dict(row, rollout_id=rid)) for rid, row in resolved.items()}
     samples, exclusions, seen = [], [], {}
@@ -232,6 +232,61 @@ def predict_repaired(cfg, run_id, repair_id, catalog, model, layer, *, cache_id=
         repair_id=repair_id, repaired_prediction_points=len(predictions),
         binding_counts=dict(Counter(s['prediction_binding'] for s in samples)),
         exclusions=exclusions, exclusion_counts=dict(Counter(e['reason'] for e in exclusions))), actions
+
+
+def predict_visualization(cfg,run_id,view,catalog,model,layer,*,cache_id=None,model_path=None,target=None):
+    """Score only selected native-exact publication points; truth has a separate index."""
+    root=Path(cfg['project_root'])
+    sources={str(view['directory']/'receipt.json'):sha256(view['directory']/'receipt.json'),
+             **view['receipt']['publication_sources']}
+    actions={rid:read_actions(root,dict(row,rollout_id=rid)) for rid,row in catalog['rollouts'].items()}
+    signature={**view['signature'],'receipt_sha256':sha256(view['directory']/'receipt.json'),
+               'model_sha256':sha256(model_path),'target':target,'layer':layer,
+               'rollout_selection_sha256':hash_json({rid:row['trajectory_sha256'] for rid,row in catalog['rollouts'].items()})}
+    if cache_id:
+        directory=artifact_dir(cfg,'difficulty',identifier(cache_id),'evaluations')
+        verify_receipt(root,directory)
+        audit=read_json(directory/'coverage-audit.json')
+        if audit.get('visualization_cache_signature')!=signature:
+            raise ValueError('Visualization prediction cache publication/selection/source/model mismatch')
+        predictions={}
+        with (directory/'curves.csv').open(encoding='utf-8-sig',newline='') as stream:
+            for point in csv.DictReader(stream):
+                if not point['prediction']: continue
+                rid,step=point['rollout_id'],int(point['step_id'])
+                if rid not in actions: continue
+                sample=dict(run_id=run_id,rollout_id=rid,agent_step=step,sample_id=point['sample_id'],
+                    trajectory_sha256=catalog['rollouts'][rid]['trajectory_sha256'],
+                    message_index=actions[rid][step]['message_index'],prediction_binding=point['prediction_binding'],
+                    capture_source='visualization_publication')
+                if (rid,step) in predictions: raise ValueError('Duplicate cached visualization point')
+                predictions[(rid,step)]=(sample,float(point['prediction_transformed']))
+        sources[str(directory/'receipt.json')]=sha256(directory/'receipt.json')
+        return predictions,sources,audit,actions
+    samples=[];seen=set()
+    for point in view['canonical-point-index']:
+        rid=point['rollout_id'];step=point.get('step_id')
+        if rid not in actions or step is None: continue
+        row=catalog['rollouts'][rid]
+        if (point['recovery']['trajectory_sha256']!=row['trajectory_sha256']
+                or point['model_fingerprint']!=row['model_fingerprint']
+                or point['recovery']['binding']!='native_exact' or not point['actual_path']
+                or point['message_index']!=actions[rid][step]['message_index']):
+            raise ValueError('Visualization point canonical/model identity mismatch')
+        if (rid,step) in seen: raise ValueError('Multiple hidden points for one canonical action close')
+        seen.add((rid,step))
+        samples.append({**point,'run_id':run_id,'agent_step':step,'trajectory_sha256':row['trajectory_sha256'],
+            'hidden_path':point.get('path',point.get('tensor')),'hidden_sha256':point['sha256'],
+            'capture_source':'visualization_publication'})
+    predictions={}
+    for i,features in iter_features(samples):
+        sample=samples[i]
+        value=float(np.asarray(predict_model(model,np.asarray(features[layer:layer+1],dtype=float)))[0])
+        if not np.isfinite(value): raise ValueError('Nonfinite visualization prediction')
+        predictions[(sample['rollout_id'],sample['agent_step'])]=(sample,value)
+    return predictions,sources,dict(visualization_cache_signature=signature,
+        publication_id=view['signature']['publication_id'],coverage=view['coverage'],
+        native_exact_prediction_points=len(predictions)),actions
 
 
 def extend_original_publications(cfg, run_id, catalog, predictions, actions, true_map, model, layer, source_files):

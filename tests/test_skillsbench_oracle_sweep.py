@@ -90,6 +90,12 @@ def test_sweep_bounds_concurrency_and_collects_every_selected_task(tmp_path,monk
         run_oracles({'project_root':str(tmp_path)},'run',task_ids=['unknown'])
     with pytest.raises(ValueError,match='between'):
         run_oracles({},'run',workers=0)
+    # The oracle and empty control own the same run-level proxy. Holding
+    # either section's lifecycle lock must reject the other before launch.
+    from core.locking import file_lock
+    with file_lock(tmp_path / 'validation/.oracle-lifecycle.lock'):
+        with pytest.raises(BlockingIOError):
+            run_oracles({'project_root': str(tmp_path)}, 'run', empty_control=True)
 
 
 def test_validation_only_snapshot_is_bound_in_execution_context(tmp_path):
@@ -105,3 +111,55 @@ def test_validation_only_snapshot_is_bound_in_execution_context(tmp_path):
     result = execution_context(cfg,{'k':task})
     assert result['validation_only'] is True
     assert result['context_sha256'] == hash_json({k:v for k,v in result.items() if k!='context_sha256'})
+
+
+def test_published_tools_preserve_task_image_virtualenv_path(tmp_path, monkeypatch):
+    import runtime.agents.dependencies as dependencies
+    monkeypatch.setattr(dependencies, 'verify_snapshot', lambda p: None)
+    wheels = tmp_path / 'wheels'
+    wheels.mkdir()
+    (tmp_path / 'runtime/skillsbench-tools').mkdir(parents=True)
+    env = SimpleNamespace(stop=lambda **kw: None)
+    cfg = {'project_root': str(tmp_path), 'execution_context': {'profile': {'dependency_snapshot': str(wheels)}}}
+    planes = OwnedPlanes(SimpleNamespace(create_environment=lambda: env), cfg, 'run',
+        SimpleNamespace(instance_id='task', sample_key='sample'), 'attempt',
+        {'environment_path': '/opt/venv/bin:/usr/bin:/bin'}, tmp_path / 'out')
+    planes.create_environment()
+    actual = read_json(env._mounts_compose_path)['services']['main']['environment']['PATH']
+    assert actual.endswith('/opt/venv/bin:/usr/bin:/bin')
+    assert actual.index('/opt/dycon-skillsbench-tools') < actual.index('/opt/venv/bin')
+
+
+@pytest.mark.parametrize('oracle', [False, True])
+def test_oracle_dependency_index_survives_compose_proxy_without_changing_agent(tmp_path, oracle):
+    env = SimpleNamespace(stop=lambda **kw: None)
+    cfg = {'project_root': str(tmp_path), 'skillsbench_oracle_validation': oracle,
+        'skillsbench_network_proxy': 'http://proxy:8888',
+        'execution_context': {'context_sha256': 'context', 'profile': {
+            'network': 'public', 'bridge_advertise': '127.0.0.1',
+            'verifier_python_index': 'https://index.example/simple/'}}}
+    out = tmp_path / 'out'
+    planes = OwnedPlanes(SimpleNamespace(create_environment=lambda: env), cfg, 'run',
+        SimpleNamespace(instance_id='task', sample_key='sample'), 'attempt', {}, out)
+    planes.create_environment()
+    actual = read_json(env._mounts_compose_path)['services']['main']['environment']
+    assert actual['HTTPS_PROXY'] == 'http://proxy:8888'
+    if oracle:
+        assert actual['UV_DEFAULT_INDEX'] == 'https://index.example/simple/'
+        assert read_json(out / 'oracle-environment.json')['execution_context_sha256'] == 'context'
+    else:
+        assert 'UV_DEFAULT_INDEX' not in actual
+        assert not (out / 'oracle-environment.json').exists()
+
+
+@pytest.mark.parametrize('text,expected', [
+    ('/verifier/test.sh: line 4: pytest: command not found\n', 'VerifierError'),
+    ('=================== 1 failed, 2 passed in 1.00s ===================\n', 'ValidZero'),
+    ('Nothing was executed\n', 'Review'),
+])
+def test_empty_control_requires_actual_test_execution(tmp_path, text, expected):
+    from runtime.agents.skillsbench import _oracle_zero_audit
+    folder = tmp_path / 'benchflow/job/rollout/verifier'
+    folder.mkdir(parents=True)
+    (folder / 'test-stdout.txt').write_text(text)
+    assert _oracle_zero_audit(tmp_path, {}, {'reward': 0})['classification'] == expected

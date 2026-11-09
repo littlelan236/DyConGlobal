@@ -145,7 +145,7 @@ def local_filesystem(path):
 
 
 class CaptureSpool:
-    def __init__(self, project, options, run_id, nas_root, reserve=0):
+    def __init__(self, project, options, run_id, nas_root):
         self.project, self.options = Path(project), options
         self.base = self.project / options["spool_root"]
         local_filesystem(self.base)
@@ -154,7 +154,7 @@ class CaptureSpool:
             raise ValueError("Capture spool is archived or redirected; restore locally before capture")
         self.root.mkdir(parents=True, exist_ok=True)
         self.nas = Path(nas_root) / options["root"] / run_id
-        self.budget = DiskBudget(project, self.base, options["spool_max_bytes"], reserve)
+        self.budget = DiskBudget(project, self.base, options["spool_max_bytes"])
         self.pool = UploadProcesses(options["upload_workers"])
         self.lock = threading.RLock()
         self.condition = threading.Condition(self.lock)

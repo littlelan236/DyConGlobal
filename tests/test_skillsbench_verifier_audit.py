@@ -24,6 +24,20 @@ def classify(root, **kwargs):
     ('WARNING: Retrying: Failed to fetch https://example.org/a\n', 'Review'),
     ('Failed to download `pytest`\n', 'Review'),
     ('Could not fetch URL https://example.org/simple\n', 'Review'),
+    ('error: Failed to download opencv-python==5.0.0.93\n'
+     '  cause: Request failed after 4 retries\n'
+     '  cause: Failed to fetch https://mirror/simple/opencv-python/\n', 'VerifierError'),
+    ('Initialized project root\n'
+     'error: Request failed after 3 retries\n'
+     '  Caused by: Failed to fetch: https://mirror/simple/openpyxl/\n', 'VerifierError'),
+    ('Looking in indexes: https://mirror/simple\n'
+     'Collecting scipy\n'
+     'ERROR: Exception:\nReadTimeoutError: HTTPSConnectionPool\n', 'VerifierError'),
+    ('Initialized project root\n'
+     'error: Request failed after 3 retries\n'
+     '  Caused by: Failed to fetch: https://mirror/simple/openpyxl/\n'
+     'Resolved 11 packages\nInstalled 1 package\n'
+     'ModuleNotFoundError: No module named \'openpyxl\'\n', 'VerifierError'),
     ('ERROR: No matching distribution found for pytest\n', 'VerifierError'),
     ('ERROR: Could not find a version that satisfies the requirement pytest\n', 'VerifierError'),
     ('ERROR: Could not install packages due to an OSError\n', 'VerifierError'),
@@ -38,7 +52,7 @@ def classify(root, **kwargs):
     ('Successfully installed unrelated\nERROR: No matching distribution found for pytest\n', 'VerifierError'),
     ('Failed to fetch https://example.org\nSuccessfully installed pytest\n=== 2 failed in 1.2s ===\n', 'ValidZero'),
     ('=== 2 passed, 1 failed, 3 warnings in 1.2s ===\n', 'ValidZero'),
-    ('=== 2 errors in 0.5s ===\n', 'ValidZero'),
+    ('=== 2 errors in 0.5s ===\n', 'Review'),
     ('=== 3 skipped in 0.5s ===\n', 'Review'),
     ('=== 0 passed in 0.5s ===\n', 'Review'),
     ('AssertionError: output differs\n', 'Review'),

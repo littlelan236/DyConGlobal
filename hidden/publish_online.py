@@ -8,6 +8,7 @@ from pathlib import Path
 import copy
 
 from application.execution.evidence import RunEvidence
+from application.execution.subject import artifact_kinds
 from core.config import load_snapshot
 from core.io import hash_json, identifier, now, owned_path, read_json, sha256, write_json
 from core.locking import exclusive_run
@@ -23,6 +24,11 @@ def complete_native(coverage):
             and not coverage.get('unbound_responses')
             and not coverage.get('missing_known')
             and not coverage.get('canonical_error'))
+
+
+def has_publication_subject(row):
+    """Workspace/live-state benchmarks bind a subject rather than a patch submission."""
+    return row.get('submission_status') == 'submitted' or 'subject' in artifact_kinds(row)
 
 
 def native_complete_suffix(bound, responses, steps):
@@ -41,6 +47,14 @@ def native_complete_suffix(bound, responses, steps):
 @exclusive_run
 def publish_online(cfg, run_id, *, repair_id, publication_id, resolved_only=False,
                    coverage_policy='complete_native_sessions_v1'):
+    return publish_online_service(cfg, run_id, repair_id=repair_id, publication_id=publication_id,
+                                  resolved_only=resolved_only, coverage_policy=coverage_policy)
+
+
+def publish_online_service(cfg, run_id, *, repair_id, publication_id, resolved_only=False,
+                           coverage_policy='complete_native_sessions_v1', rollout_ids=None,
+                           named_output=False, selection_sha256=None):
+    """Publish under the caller's run lock; automatic finalization freezes its cohort."""
     root = Path(cfg['project_root']).resolve()
     run_id, repair_id, publication_id = map(identifier, (run_id, repair_id, publication_id))
     policies = {'complete_native_sessions_v1', 'available_native_suffix_v1'}
@@ -58,6 +72,29 @@ def publish_online(cfg, run_id, *, repair_id, publication_id, resolved_only=Fals
         raise ValueError('Repair manifest belongs to another run/repair')
     source_files = {str(repaired / 'receipt.json'): sha256(repaired / 'receipt.json'),
                     str(run / 'resolved-config.json'): sha256(run / 'resolved-config.json')}
+    source_capture_status = {}
+    if selection_sha256 is not None:
+        if manifest.get('selection_sha256') != selection_sha256:
+            raise ValueError('Publication/repair selection checksum mismatch')
+        audit_root = run / 'hidden/capture-repairs' / repair_id
+        selection_path = audit_root / 'publication-selection.json'
+        selection = read_json(selection_path)
+        if hash_json(selection['selection']) != selection_sha256 or selection['selection_sha256'] != selection_sha256:
+            raise ValueError('Publication selection checksum mismatch')
+        selected = selection['selection']['rollouts']
+        source_capture_status = {r['rollout_id']: r['capture_status'] for r in selected}
+        if sorted(r['rollout_id'] for r in selected) != sorted(rollout_ids or []):
+            raise ValueError('Publication selected rollout identity mismatch')
+        selection_receipt = audit_root / 'publication-selection-receipt.json'
+        if read_json(selection_receipt)['files'][selection_path.name] != sha256(selection_path):
+            raise ValueError('Publication selection receipt checksum mismatch')
+        for path in (selection_path, selection_receipt):
+            source_files[str(path)] = sha256(path)
+        for row in selected:
+            for path, digest in row['source_files'].items():
+                if sha256(path) != digest:
+                    raise ValueError('Publication selected source checksum mismatch')
+                source_files[path] = digest
     for relative, digest in {**manifest['files'], **manifest['session_receipts']}.items():
         path = owned_path(nas, relative)
         if sha256(path) != digest:
@@ -66,7 +103,9 @@ def publish_online(cfg, run_id, *, repair_id, publication_id, resolved_only=Fals
     signature = {'run_id': run_id, 'repair_id': repair_id, 'publication_id': publication_id,
                  'repair_receipt_sha256': sha256(repaired / 'receipt.json'),
                  'resolved_only': resolved_only, 'policy': coverage_policy}
-    output = publication_directory(root, run_id, publication_id if partial else None)
+    if rollout_ids is not None:
+        signature.update(rollout_ids=sorted(rollout_ids), selection_sha256=selection_sha256)
+    output = publication_directory(root, run_id, publication_id if partial or named_output else None)
     if output.exists():
         receipt = read_json(output / 'receipt.json')
         if receipt.get('publication_signature') != signature:
@@ -94,12 +133,13 @@ def publish_online(cfg, run_id, *, repair_id, publication_id, resolved_only=Fals
     report = read_json(repaired / 'report.json')
     records = {r['rollout_id']: r for r in report['sessions'] if r.get('rollout_id')}
     candidates = [(rid, row) for rid, row in sorted(evidence['rollouts'].items())
+                  if (rollout_ids is None or rid in rollout_ids)
                   if not row.get('provenance', {}).get('quarantined')
                   and (not resolved_only or (row.get('evaluation_status') == 'completed'
                                             and row.get('resolved') is True))]
     for number, (rid, row) in enumerate(candidates, 1):
         record = records.get(rid)
-        if row.get('submission_status') != 'submitted':
+        if not has_publication_subject(row):
             excluded.append({'rollout_id': rid, 'reason': 'not_submitted'})
             continue
         if not record or (not partial and not complete_native(record['coverage'])):
@@ -115,7 +155,11 @@ def publish_online(cfg, run_id, *, repair_id, publication_id, resolved_only=Fals
             continue
         _, _, task, responses = _canonical(root, run_id, sid, [(rid, row)], evidence, proofs)
         trajectory = read_json(owned_path(root, row['trajectory_path']))
-        if trajectory.get('info', {}).get('exit_status') != 'Submitted':
+        terminal = trajectory.get('info', {}).get('exit_status')
+        if terminal != row.get('termination_reason', terminal):
+            raise ValueError('Canonical trajectory terminal identity changed')
+        expected_terminal = 'AgentCompleted' if row.get('evaluation_subject', {}).get('kind') == 'workspace' else 'Submitted'
+        if terminal != expected_terminal and not (rollout_ids is not None and not resolved_only):
             raise ValueError('Resolved canonical trajectory is not Submitted')
         response_indices = {i for i, _, _ in responses}
         steps = [i for i, m in enumerate(trajectory['messages']) if m.get('role') == 'assistant']
@@ -164,6 +208,8 @@ def publish_online(cfg, run_id, *, repair_id, publication_id, resolved_only=Fals
                 continue
             seen.add((original['request_id'], original['absolute_position'], original['anchor']))
             event = copy.deepcopy(original)
+            event['recovery']['eligible_for_training'] = index in steps
+            event['recovery']['publication_id'] = publication_id
             event['message_index'] = index
             locator = event.get('tensor_locator')
             index_path = point_path
@@ -186,14 +232,19 @@ def publish_online(cfg, run_id, *, repair_id, publication_id, resolved_only=Fals
         if not session_events:
             excluded.append({'rollout_id': rid, 'reason': 'no_exact_hidden_in_qualified_suffix'})
             continue
-        if resolved_only:
+        if row.get('selected_evaluation_id'):
             evaluation = evidence['evaluations'][row['selected_evaluation_id']]
             path = owned_path(root, evaluation['report_path'])
             if sha256(path) != evaluation['report_sha256']:
                 raise ValueError('Harness report checksum mismatch')
             outcome = read_json(path)['outcomes'][rid]
-            if outcome.get('resolved') is not True or outcome.get('status') != 'completed' or outcome['patch_sha256'] != row['patch_sha256']:
-                raise ValueError('Harness outcome does not bind the successful exact patch')
+            from application.execution.subject import subject_digest
+            digest_key, digest = subject_digest(row)
+            if (outcome.get('resolved') != row.get('resolved')
+                    or outcome.get('status') != row.get('evaluation_status')
+                    or outcome.get(digest_key) != digest
+                    or (resolved_only and outcome.get('resolved') is not True)):
+                raise ValueError('Harness outcome does not bind the exact canonical subject')
             source_files[str(path)] = evaluation['report_sha256']
         for binding in bound.values():
             req = binding['request']
@@ -218,13 +269,21 @@ def publish_online(cfg, run_id, *, repair_id, publication_id, resolved_only=Fals
         events.extend(session_events)
         accepted.append({'rollout_id': rid, 'session_id': sid, 'points': len(session_events),
                          'source_coverage_status': view['coverage']['status'],
+                         'source_capture_status': source_capture_status.get(rid, view['coverage']['status']),
+                         'expected': view['coverage']['expected_known'],
+                         'observed': view['coverage']['observed_native_exact'],
+                         'missing': len(view['coverage']['missing_known']),
                          'last_unknown_response_index': cutoff,
                          'unknown_response_indices': unknown,
                          'native_requests_in_qualified_suffix': len(bound),
                          'known_missing_hidden_in_suffix': len(expected - seen)})
         print(f'capture publish: qualified {len(accepted)}; inspected {number}/{len(candidates)}', flush=True)
-    if not accepted or len(marker_pairs) != 1:
+    if not accepted:
+        write_json(audit / 'excluded.json', excluded)
+        write_json(audit / 'point-exclusions.json', point_exclusions)
         raise ValueError('Publication needs nonempty qualified sessions with one marker inventory')
+    if len(marker_pairs) != 1:
+        raise ValueError('Conflicting native marker inventories')
     files = {p: sha256(audit / 'payload' / p) for p in finalizations.values()}
     for relative, digest in files.items():
         target = nas / relative
@@ -233,7 +292,9 @@ def publish_online(cfg, run_id, *, repair_id, publication_id, resolved_only=Fals
     publish_files(audit / 'payload', nas, files, frozen['capture']['export']['upload_max_elapsed_seconds'])
     stage = run / 'enrichment' / ('.online-' + publication_id)
     if stage.exists():
-        raise FileExistsError('Incomplete publication stage needs inspection: ' + str(stage))
+        # Preserve interrupted bytes for audit; only the final atomic rename is public.
+        from uuid import uuid4
+        stage.rename(stage.with_name(stage.name + '.interrupted-' + uuid4().hex))
     open_ids, close_ids = next(iter(marker_pairs))
     # The repaired request ledger is now promoted into the immutable online
     # session namespace. finalize_token_events validates these finalizations
@@ -247,8 +308,13 @@ def publish_online(cfg, run_id, *, repair_id, publication_id, resolved_only=Fals
                'published_points': len(events), 'excluded_rollouts': len(excluded),
                'exclusion_reasons': dict(Counter(r['reason'] for r in excluded)),
                'published_partial_rollouts': sum(r['source_coverage_status'] != 'complete' for r in accepted),
+               'source_partial_rollouts': sum(r['source_capture_status'] == 'partial' for r in accepted),
                'point_exclusion_counts': dict(Counter(r['reason'] for r in point_exclusions)),
                'known_missing_hidden_in_qualified_suffixes': sum(r['known_missing_hidden_in_suffix'] for r in accepted),
+               'coverage_status': 'partial' if any(not complete_native(r['coverage']) for r in report['sessions']) else 'complete',
+               'source_coverage': {'expected': sum(r['coverage']['expected_known'] for r in report['sessions']),
+                                   'observed': sum(r['coverage']['observed_native_exact'] for r in report['sessions']),
+                                   'missing': sum(len(r['coverage']['missing_known']) for r in report['sessions'])},
                'sessions': accepted, 'excluded': excluded, 'created_at': now(), 'path': str(output)}
     write_json(stage / 'point-exclusions.json', point_exclusions)
     write_json(stage / 'publication.json', summary)

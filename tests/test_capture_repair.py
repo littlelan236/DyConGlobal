@@ -267,14 +267,19 @@ def test_multi_run_byte_bound_and_watermark(tmp_path):
     assert released.is_set()
 
 
-def test_shared_image_reservation_cannot_overcommit(tmp_path, monkeypatch):
-    import core.disk_budget as disk
+def test_disk_budget_does_not_apply_shared_reserve_to_capture(tmp_path, monkeypatch):
+    import shutil
+    from types import SimpleNamespace
 
-    budget = DiskBudget(tmp_path, tmp_path / "spool", 1000, reserve=100)
-    monkeypatch.setattr(disk.shutil, "disk_usage", lambda _: type("Space", (), {"free": 300})())
+    space = SimpleNamespace(free=300)
+    monkeypatch.setattr(shutil, "disk_usage", lambda _: space)
+    budget = DiskBudget(tmp_path, tmp_path / "spool", 1000)
     budget.acquire("image", 150, kind="image")
-    with pytest.raises(BufferError, match="reserve"):
-        budget.acquire("capture", 60)
+    space.free = 100
+    budget.acquire("capture", 60)
+    assert budget.usage() == 60
+    with pytest.raises(BufferError, match="capture project spool byte limit reached"):
+        budget.acquire("capture-over-limit", 950)
 
 
 def test_format_error_response_join_and_ledger_refs(tmp_path):

@@ -158,11 +158,12 @@ class RidgeProbe(BaseModel):
     expected_tasks: int = Field(default=238, gt=1)
     expected_rollouts: int | None = Field(default=None, gt=1)
     expected_samples: int = Field(default=14384, gt=1)
-    split_strategy: Literal["repo_source_quota_v1", "inherit_task_split_v1", "event_random_v1", "task_random_v1", "task_manifest_v1"] = "event_random_v1"
+    split_strategy: Literal["repo_source_quota_v1", "inherit_task_split_v1", "event_random_v1", "task_random_v1", "task_manifest_v1", "task_holdout_event_v1"] = "event_random_v1"
     parent_experiment_id: str | None = None
     parent_receipt_sha256: str | None = None
     selection_metric: Literal["validation_pooled_r2"] = "validation_pooled_r2"
     refit_train_validation: bool = False
+    plots_enabled: bool = True
     tie_tolerance: float = Field(default=1e-10, ge=0)
     blas_threads: int = Field(default=4, gt=0, le=32)
 

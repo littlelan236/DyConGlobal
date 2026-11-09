@@ -24,6 +24,61 @@ from runtime.images.nas import ImageLeaseManager, NasImageStore
 SKILLSBENCH_AGENT_ENVIRONMENT = OPENHANDS_AGENT_ENVIRONMENT
 
 
+def verifier_environment_policy(profile, task_variables, proxy=None, task_id=None):
+    """Merge only variables owned by the frozen SkillsBench network policy."""
+    variables = {}
+    offline = profile.get('network') == 'none'
+    index = profile.get('verifier_python_index')
+    if offline and index:
+        raise ValueError('Offline profiles cannot configure a verifier Python index')
+    if proxy or offline:
+        variables.update({key: proxy or '' for key in
+            ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy')})
+        variables.update(NO_PROXY='localhost,127.0.0.1', no_proxy='localhost,127.0.0.1')
+    # Preserve historical public profiles without an explicit mirror.
+    if profile.get('dependency_snapshot') and (proxy or offline or index):
+        variables.update(PIP_FIND_LINKS='/opt/dycon-wheels/wheels', UV_FIND_LINKS='/opt/dycon-wheels/wheels')
+    if offline:
+        variables.update(PIP_NO_INDEX='1', UV_NO_INDEX='1', UV_OFFLINE='1', UV_PYTHON_DOWNLOADS='never')
+    elif index:
+        for key in ('PIP_NO_INDEX', 'UV_NO_INDEX', 'UV_OFFLINE'):
+            if str(task_variables.get(key, '')).lower() not in ('', '0', 'false', 'no'):
+                raise ValueError('Task offline policy conflicts with public verifier index: ' + key)
+        for key in ('PIP_INDEX_URL', 'UV_INDEX_URL', 'UV_DEFAULT_INDEX'):
+            current = task_variables.get(key)
+            if current and current != index and 'pypi.org/simple' not in current:
+                raise ValueError('Task dedicated index requires explicit compatibility review: ' + key)
+        variables.update(PIP_INDEX_URL=index, UV_INDEX_URL=index, UV_DEFAULT_INDEX=index,
+                         DYCON_VERIFIER_PYTHON_INDEX=index)
+        if profile.get('dependency_snapshot'):
+            # pip's legacy resolver cannot discard incompatible directory
+            # wheels using Requires-Python before selecting a version.
+            variables['PIP_FIND_LINKS'] = '/opt/dycon-verifier-links/index.html'
+        if task_id == 'simpo-code-reproduction':
+            # uv 0.13.5's newer DEFAULT_INDEX selector overrides legacy CLI
+            # --index-url. An empty value preserves the official CPU index;
+            # only the allowlisted generic extra index is adapted.
+            variables['UV_DEFAULT_INDEX'] = ''
+        if task_id == 'fix-build-agentops':
+            # Modern virtualenv no longer bundles Python 3.7 seed wheels and
+            # can select an incompatible pip from its cache. These bootstrap
+            # tools support the complete unchanged official tox matrix.
+            variables.update(VIRTUALENV_PIP='23.3.2', VIRTUALENV_SETUPTOOLS='67.8.0',
+                             VIRTUALENV_WHEEL='0.42.0')
+    return {**task_variables, **variables}, variables
+
+
+def _verifier_safe_environment(variables):
+    """Allowlist policy variables and strip any URL credentials from receipts."""
+    import re
+    names = {'PIP_INDEX_URL', 'UV_INDEX_URL', 'UV_DEFAULT_INDEX', 'DYCON_VERIFIER_PYTHON_INDEX',
+             'PIP_FIND_LINKS', 'UV_FIND_LINKS', 'PIP_NO_INDEX', 'UV_NO_INDEX', 'UV_OFFLINE',
+             'UV_PYTHON_DOWNLOADS', 'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
+             'NO_PROXY', 'no_proxy', 'VIRTUALENV_PIP', 'VIRTUALENV_SETUPTOOLS', 'VIRTUALENV_WHEEL'}
+    return {key: re.sub(r'(https?://)[^/@\s]+@', r'\1[redacted]@', str(value))
+            for key, value in variables.items() if key in names}
+
+
 async def resolve_submission_outputs(env, task_id, declared, workspace, output, ownership):
     """Resolve the organize task's location-independent five-directory contract.
 
@@ -163,8 +218,11 @@ class SkillsBenchFactory:
                 self.stack.enter_context(self.leases.lease(image) if deep else self.leases.lease(image, deep=False))
                 tag = unit["tag"]
                 self.client.api.tag(image.image_id, tag)
+                image_env = self.client.images.get(image.image_id).attrs.get("Config", {}).get("Env", [])
+                image_path = next((item[5:] for item in image_env if item.startswith("PATH=")), None)
                 self.images[(task_id, unit["service"])] = {
-                    "tag": tag, "reference": ref, "identity": image.identity(), "unit": unit}
+                    "tag": tag, "reference": ref, "identity": image.identity(), "unit": unit,
+                    "environment_path": image_path}
         self.started = True
 
     def cleanup_owned(self, run_id):
@@ -321,9 +379,24 @@ class OwnedPlanes:
             # Use BenchFlow's native no-network overlay for every task.
             env.task_env_config = env.task_env_config.model_copy(update={"allow_internet": False})
         proxy = self.cfg.get("skillsbench_network_proxy")
+        if self.cfg.get("skillsbench_oracle_validation"):
+            _, oracle_variables = verifier_environment_policy(profile, {}, proxy, self.sample.instance_id)
+            # Agent closure wheels are verifier candidates, not oracle inputs.
+            for name in ('PIP_FIND_LINKS', 'UV_FIND_LINKS'):
+                oracle_variables.pop(name, None)
+            # Oracle validation needs the same explicit package source before
+            # hardening too. This branch never changes a model agent's install.
+            service.setdefault("environment", {}).update(oracle_variables)
+            write_json(self.output / "oracle-environment.json", {
+                "schema_version": 1, "ownership": self.ownership,
+                "scope": "oracle validation dependency installation only",
+                "policy": "frozen-verifier-index-for-oracle-validation-v1",
+                "variables": _verifier_safe_environment(oracle_variables),
+                "execution_context_sha256": self.cfg["execution_context"].get("context_sha256"),
+                "configured": True, "installation_source_status": "not_yet_observed"})
         if proxy:
-            service["environment"] = {name: proxy for name in
-                ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")}
+            service.setdefault("environment", {}).update({name: proxy for name in
+                ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")})
             service["environment"].update(NO_PROXY="localhost,127.0.0.1," + profile["bridge_advertise"],
                                          no_proxy="localhost,127.0.0.1," + profile["bridge_advertise"])
         wheelhouse = profile.get("dependency_snapshot")
@@ -345,17 +418,25 @@ class OwnedPlanes:
                 service.setdefault("volumes", []).append({"type": "bind", "source": str(tools.resolve()),
                     "target": "/opt/dycon-skillsbench-tools", "read_only": True})
                 service.setdefault("environment", {})["PATH"] = "/root/.local/bin:/opt/dycon-skillsbench-tools:/opt/dycon-wheels:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                # Image-owned virtual environments are part of the task runtime.
+                # BenchFlow separately sets its trusted verifier PATH at hardening.
+                if self.image.get("environment_path"):
+                    service["environment"]["PATH"] = (
+                        "/root/.local/bin:/opt/dycon-skillsbench-tools:/opt/dycon-wheels:"
+                        + self.image["environment_path"])
         cfs_supported = self.cfg.get("skillsbench_daemon_capabilities", {}).get("cpu_quota_supported", True)
-        if not cfs_supported:
+        memory_override = profile.get("memory_overrides", {}).get(self.sample.instance_id)
+        global_memory = self.cfg.get("sandbox", {}).get("memory_mb")
+        if not cfs_supported or memory_override is not None or global_memory is not None:
             task_key = hash_json({"benchmark": "skillsbench",
                 "revision": self.cfg["execution_context"]["revision"],
                 "instance_id": self.sample.instance_id})
             task_payload = self.cfg["selection"]["tasks"][task_key]
             sandbox = task_payload["instance"]["metadata"].get("sandbox", {})
             memory_mb = profile.get("memory_overrides", {}).get(self.sample.instance_id,
-                sandbox.get("memory_mb"))
+                global_memory if global_memory is not None else sandbox.get("memory_mb"))
             adaptation = resource_override(sandbox.get("cpus", 0), memory_mb,
-                                           cfs_supported=False, policy=profile["cpu_quota"])
+                                           cfs_supported=cfs_supported, policy=profile["cpu_quota"])
             service.setdefault("environment", {}).update(adaptation["compose_override"].get("environment", {}))
             requested_memory = sandbox.get("memory_mb")
             if memory_mb and memory_mb != requested_memory:
@@ -364,7 +445,7 @@ class OwnedPlanes:
                     applied_memory_mb=memory_mb, memory_override=True)
             if adaptation["compose_override"].get("environment", {}).get("CPUS") == "0":
                 env._env_vars.cpus = 0
-            if adaptation["receipt"]["reason"]:
+            if adaptation["receipt"]["reason"] or adaptation["receipt"].get("memory_override"):
                 write_json(self.output / "resource-adaptation.json", {
                     "schema_version": 1, "task_id": self.sample.instance_id,
                     **adaptation["receipt"], "scope": "this BenchFlow compose service only",
@@ -409,6 +490,22 @@ class OwnedPlanes:
                     finally:
                         client.close()
                 await asyncio.to_thread(inspect_images)
+                # Observe the image interpreter before any oracle/model edits.
+                # Installation receipts separately identify private agent Python.
+                import shlex
+                probe_script = (
+                    "import sys,json,importlib.util; "
+                    "print(json.dumps({'executable':sys.executable,'version':sys.version.split()[0],"
+                    "'modules':{n:(getattr(importlib.util.find_spec(n),'origin',None)) "
+                    "for n in ['pip','pytest','pandas','pysrt']}}))")
+                probe = await env.exec("python3 -c " + shlex.quote(probe_script),
+                                       user="root", timeout_sec=15)
+                runtime = {"schema_version": 1, "ownership": self.ownership,
+                    "phase": "before_agent_install_or_oracle", "image": self.image["identity"],
+                    "return_code": probe.return_code, "stdout": probe.stdout,
+                    "stderr": getattr(probe, "stderr", ""), "at": now()}
+                runtime["receipt_sha256"] = hash_json(runtime)
+                write_json(self.output / "diagnostics/task-interpreter.json", runtime)
                 return result
             env.start = start
         original_stop = env.stop
@@ -419,9 +516,17 @@ class OwnedPlanes:
             # ImageLeaseManager owns image reclamation.
             await self._collect_sdk_transport(env)
             await asyncio.to_thread(self._snapshot_process_evidence, "before_cleanup")
-            await original_stop(delete=False)
+            try:
+                await original_stop(delete=False)
+            finally:
+                from runtime.containers.networks import cleanup_owned_resources
+                cleanup = await asyncio.to_thread(cleanup_owned_resources, self.cfg, self.ownership)
+                write_json(self.output / "docker-cleanup.json", cleanup)
+            if not cleanup['complete']:
+                raise RuntimeError('Sandbox container/network cleanup is incomplete')
             write_json(self.output / "sandbox-cleanup.json", {"status": "stopped", "at": now(),
-                "ownership": self.ownership, "image_cleanup_owner": "ImageLeaseManager"})
+                "ownership": self.ownership, "image_cleanup_owner": "ImageLeaseManager",
+                "docker_cleanup": cleanup})
         env.stop = stop
         return env
 
@@ -503,6 +608,21 @@ class OwnedPlanes:
                         "verifier": getattr(result, "__dict__", {}),
                         "verifier_evidence": "diagnostics/verifier-execution.json",
                         "subject_sha256": owner.subject_sha256, "finished_at": now()})
+                    if owner.sample.instance_id == 'fix-build-agentops':
+                        # Read the subprocess output only; tox log headers
+                        # contain environment values that are not evidence.
+                        try:
+                            diagnostic = await owner.env.exec(
+                                "find /home/github/build/passed -path '*/.tox/py37/log/*.log' "
+                                "-type f -exec sed -n '/^standard error:/,$p' {} \\; "
+                                "2>/dev/null | head -c 48000", user='root', timeout_sec=15)
+                            write_json(owner.output / 'diagnostics/agentops-py37.json', {
+                                'schema_version': 1, 'ownership': owner.ownership,
+                                'source': 'official tox py37 stderr after verifier',
+                                'return_code': diagnostic.return_code,
+                                'stdout': _safe_verifier_text(diagnostic.stdout), 'at': now()})
+                        except Exception:
+                            pass  # Optional diagnostics must preserve grading.
                     return result
                 except BaseException as exc:
                     import importlib.metadata
@@ -551,37 +671,61 @@ class OwnedPlanes:
             raise ValueError("Root agent hardening would terminate the sandbox; use the isolated agent user")
         proxy = self.cfg.get("skillsbench_network_proxy")
         profile = self.cfg.get("execution_context", {}).get("profile", {})
-        if proxy or profile.get("network") == "none":
-            variables = {name: proxy or "" for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")}
-            variables.update(NO_PROXY="localhost,127.0.0.1", no_proxy="localhost,127.0.0.1")
-            # Upstream re-pins trusted PATH during hardening. Tool preparation
-            # below uses /usr/local/bin without overriding that invariant.
-            if self.cfg["execution_context"]["profile"].get("dependency_snapshot"):
-                # Public tasks may still need task-specific packages. The
-                # snapshot supplies the pinned base closure; only the none-
-                # network profile is forbidden from resolving extras online.
-                variables.update(UV_FIND_LINKS="/opt/dycon-wheels/wheels",
-                                 PIP_FIND_LINKS="/opt/dycon-wheels/wheels")
-            if profile.get("network") == "none":
-                variables.update(UV_OFFLINE="1", UV_NO_INDEX="1", UV_PYTHON_DOWNLOADS="never",
-                                 PIP_NO_INDEX="1")
-            task.config.verifier.env = {**(task.config.verifier.env or {}), **variables}
-            timeout_override = profile.get("verifier_timeout_overrides", {}).get(self.sample.instance_id)
-            if timeout_override:
-                task.config.verifier.timeout_sec = timeout_override
-            write_json(self.output / "verifier-environment.json", {"variables": variables,
-                "verifier_timeout_override_sec": timeout_override,
-                "policy": ("official-verifier-network-none-offline-python-wheels-v1"
-                           if profile.get("network") == "none" else "official-verifier-public-proxy-offline-python-wheels-v1")})
+        verifier_config = getattr(getattr(task, 'config', None), 'verifier', None)
+        current = dict(getattr(verifier_config, 'env', None) or {})
+        effective, variables = verifier_environment_policy(profile, current, proxy, self.sample.instance_id)
+        if self.cfg.get("skillsbench_validation") and self.sample.instance_id == "glm-lake-mendota":
+            # This official script truncates its own stdout after pip runs.
+            # Keep pip's existing diagnostic log inside the exported verifier logs.
+            effective["PIP_LOG"] = "/logs/verifier/pip-install.log"
+        if verifier_config is not None:
+            verifier_config.env = effective
+        verifier_index = profile.get('verifier_python_index')
+        timeout_override = profile.get("verifier_timeout_overrides", {}).get(self.sample.instance_id)
+        if timeout_override:
+            task.config.verifier.timeout_sec = timeout_override
+        receipt = {
+            "schema_version": 2,
+            "ownership": self.ownership,
+            "run_id": self.run_id,
+            "task_id": self.sample.instance_id,
+            "attempt_id": self.attempt_id,
+            "network": profile.get("network"),
+            "verifier_python_index": verifier_index,
+            "index_source": "frozen_profile" if verifier_index else "existing_task_environment",
+            "proxy_mode": "configured" if proxy else "none",
+            "variables": _verifier_safe_environment(variables),
+            "verifier_timeout_override_sec": timeout_override,
+            "profile_sha256": self.cfg.get("execution_context", {}).get("profile_sha256"),
+            "dependency_snapshot_sha256": profile.get("dependency_snapshot_sha256"),
+            "policy": ("official-verifier-network-none-offline-python-wheels-v2"
+                       if profile.get("network") == "none" else "official-verifier-public-python-index-v2"),
+            "configured": bool(variables or timeout_override),
+            "installation_evidence": "verifier stdout/stderr and execution receipt",
+            "installation_source_status": "not_yet_observed",
+            "known_index_override": self.sample.instance_id in {
+                'fix-build-agentops', 'fix-build-google-auto', 'simpo-code-reproduction'},
+            "index_compatibility": profile.get('verifier_index_compatibility'),
+        }
         await self.inner.harden_before_verify(env, task, sandbox_user, workspace=workspace)
         from runtime.agents.verifier_tools import prepare_verifier_tools
-        tools = await prepare_verifier_tools(env)
+        tools = await prepare_verifier_tools(env, task_id=self.sample.instance_id)
         write_json(self.output / "diagnostics/verifier-tools.json", {
             "schema_version": 2, "ownership": self.ownership,
             "source_paths": ["/opt/dycon-wheels", "/opt/dycon-skillsbench-tools"],
             "destination": "/root/.local/bin", "trusted_curl_path": "/usr/local/bin/curl",
             "policy": "published_uv_bootstrap_after_hardening_v2", "return_code": tools.return_code,
             "stdout": tools.stdout, "stderr": getattr(tools, "stderr", ""), "at": now()})
+        if verifier_config is not None:
+            actual = dict(verifier_config.env or {})
+            if any(actual.get(key) != value for key, value in variables.items()):
+                raise ValueError('Upstream hardening changed the frozen verifier environment policy')
+            receipt['effective_variables'] = _verifier_safe_environment(actual)
+        else:
+            receipt['effective_variables'] = _verifier_safe_environment(effective)
+        receipt['phase'] = 'after_hardening_and_tools'
+        receipt['receipt_sha256'] = hash_json(receipt)
+        write_json(self.output / 'verifier-environment.json', receipt)
         # The official Druid verifier assumes the patched single server is
         # listening after oracle build; start it in the owned sandbox and
         # record readiness before verifier execution.
@@ -660,7 +804,9 @@ def _result_json(result):
         "trajectory_source", "started_at", "finished_at")}
 
 
-def _map_evaluation(result, report, capture_status):
+def _map_evaluation(result, report, capture_status, *, agent_status=None):
+    if result.get('error') and agent_status == 'ContextWindowExceededError':
+        return agent_status, None, 'agent_failed_before_verification'
     if report.get("completed") is not True or result.get("verifier_error"):
         if result.get('error') and not result.get('verifier_error'):
             category=str(result.get('error_category') or '').lower()
@@ -674,6 +820,22 @@ def _map_evaluation(result, report, capture_status):
     # capture excludes training points, but must not erase an observed reward.
     success = all(v == 1 or v == 1.0 for v in rewards.values())
     return ("Submitted" if success else "AgentCompleted"), success, "normalized_all_dimensions_equal_one_v1"
+
+
+def _bridge_agent_status(bridge, default):
+    reason = getattr(bridge, 'limit_reason', None)
+    if (getattr(bridge, 'context_window_error', None)
+            and reason in {None, 'sample_token_usage_unknown'}
+            and default in {None, 'OpenHandsError', 'SampleTokenBudgetUsageUnknown',
+                            'ContextWindowExceededError'}):
+        return 'ContextWindowExceededError'
+    if reason == 'sample_completion_token_budget':
+        return 'SampleTokenBudgetExceeded'
+    if reason == 'sample_token_usage_unknown':
+        return 'SampleTokenBudgetUsageUnknown'
+    if reason:
+        return 'reasoning_loop' if reason == 'reasoning_loop' else 'LimitsExceeded'
+    return default
 
 
 def agent_rollout_config(cfg, task_source, image, planes, output, env, *, attempt_id, session_id, seconds):
@@ -697,8 +859,9 @@ def agent_rollout_config(cfg, task_source, image, planes, output, env, *, attemp
 
 
 def environment_contract(cfg, task):
-    from runtime.agents import dependencies, openhands, sandbox_probe
-    modules = [Path(__file__), Path(dependencies.__file__), Path(sandbox_probe.__file__), Path(openhands.__file__)]
+    from runtime.agents import condenser, dependencies, openhands, sandbox_probe, verifier_index_probe, verifier_tools
+    modules = [Path(__file__), Path(condenser.__file__), Path(dependencies.__file__), Path(sandbox_probe.__file__), Path(openhands.__file__),
+               Path(verifier_index_probe.__file__), Path(verifier_tools.__file__)]
     return {'schema_version': 1, 'policy': 'skillsbench-owned-environment-v1',
         'run_id': cfg['run_id'], 'configuration_sha256': cfg['config_hash'],
         'execution_context_sha256': cfg['execution_context']['context_sha256'],
@@ -717,7 +880,10 @@ def audit_task_environments(cfg, run_id, *, workers=1):
         semaphore = asyncio.Semaphore(workers)
         async def one(key, task):
             async with semaphore:
-                return await _audit_task_environment(cfg, run_id, key, task)
+                row = await _audit_task_environment(cfg, run_id, key, task)
+                print(json.dumps({'environment_task': task['instance_id'], 'verified': row['verified']},
+                                 ensure_ascii=False), flush=True)
+                return row
         rows = await asyncio.gather(*(one(key, task) for key, task in cfg['selection']['tasks'].items()))
         return {'schema_version': 1, 'run_id': run_id, 'task_count': len(rows),
                 'verified': all(r['verified'] for r in rows), 'model_requests': 0,
@@ -736,6 +902,7 @@ def _terminal_evidence(output, *, agent_status, capture_status, evaluation_statu
         'diagnostics/process-supervisor.json', 'capture-drain.json',
         'capture-finalization.json', 'capture-stop-error.json', 'evaluation-raw.json',
         'sample-token-budget.json', 'diagnostics/verifier-zero-audit.json',
+        'diagnostics/context-window-error.json',
     ]
     files = []
     primary_cause, cause_source = None, None
@@ -763,6 +930,8 @@ def _terminal_evidence(output, *, agent_status, capture_status, evaluation_statu
                     ('process_pid', 'process_exit_code', 'diagnosis', 'source', 'cause')})
     supervisor_path = output / 'diagnostics/process-supervisor.json'
     supervisor = read_json(supervisor_path) if supervisor_path.is_file() else None
+    if agent_status == 'ContextWindowExceededError':
+        primary_cause, cause_source = agent_status, 'upstream_model_response'
     if not primary_cause:
         primary_cause = agent_status or (type(error).__name__ if error else 'unknown')
         cause_source = 'agent_status' if agent_status else 'backend_exception' if error else 'unavailable'
@@ -989,6 +1158,14 @@ async def _audit_task_environment(cfg, run_id, key, task):
             if value.get('verified', value.get('return_code') == 0) is not True:
                 raise ValueError('Environment evidence failed: ' + name)
         row['verified'] = True
+        if cfg['execution_context']['profile'].get('verifier_python_index'):
+            await planes.harden_before_verify(rollout._env, rollout._task,
+                cfg['execution_context']['profile']['sandbox_user'], workspace=rollout._agent_cwd)
+            from runtime.agents.verifier_index_probe import probe_verifier_index
+            probe = await probe_verifier_index(rollout._env, rollout._task.config.verifier.env,
+                                                output, planes.ownership)
+            row['verifier_index_probe_verified'] = probe['verified']
+            row['verified'] = row['verified'] and probe['verified']
     except Exception as exc:
         import traceback
         row.update(error=repr(exc), traceback=traceback.format_exc())
@@ -1102,9 +1279,8 @@ def preflight(root, run_id, *, audit_environments=True, workers=1):
         blockers.append("Docker daemon cannot enforce task CPU quotas; select an explicit resource adaptation profile")
     for key, task in tasks.items():
         try:
-            official_root = (Path(cfg["project_root"]) / cfg["skillsbench_images"]["source_root"] / "tasks").resolve()
-            if Path(task["instance"]["task_path"]).resolve().parent != official_root:
-                raise ValueError("Task package escaped the pinned official task root")
+            from catalog.skillsbench_index import task_package_path
+            task_package_path(cfg, task)
             with timed_check(checks, "task_package_sha", enabled=long_checks):
                 capability = verify_package(task, deep=long_checks)
             task_capabilities[task["instance_id"]] = capability
@@ -1240,17 +1416,27 @@ def capture_gpu_smoke(root, run_id):
     return record
 
 
-def run_oracles(root_cfg, run_id, *, offline=False, workers=1, task_ids=None, retry_failed=False):
+def run_oracles(root_cfg, run_id, *, offline=False, workers=1, task_ids=None, retry_failed=False, empty_control=False):
     if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= 16:
         raise ValueError("Oracle workers must be between 1 and 16")
     return asyncio.run(_run_oracles(root_cfg, run_id, offline=offline, workers=workers,
-                                    task_ids=task_ids, retry_failed=retry_failed))
+                                    task_ids=task_ids, retry_failed=retry_failed, empty_control=empty_control))
 
 
 def _oracle_valid(rewards, agent_error, verifier_error, cleanup_confirmed):
     return (bool(rewards) and not agent_error and not verifier_error and cleanup_confirmed
             and all(not isinstance(v, bool) and isinstance(v, (int, float)) and v == 1
                     for v in rewards.values()))
+
+
+def _oracle_zero_audit(output, task, rewards):
+    from runtime.agents.verifier_audit import classify_zero_reward_trajectory, frozen_verifier_contract
+    contract = frozen_verifier_contract(task)
+    classification, reason = classify_zero_reward_trajectory(output, disposition="accepted",
+        reward=(rewards or {}).get("reward"), evaluation_raw={"completed": True, "rewards": rewards},
+        ctrf_expected=contract["ctrf_expected"], task_completion_patterns=contract["task_completion_patterns"])
+    return {"classification": classification, "reason": reason,
+            "policy": "attempt_local_zero_reward_three_state_v1"}
 
 
 def _oracle_attempt(output, key, package_sha256, context_sha256, retry_failed):
@@ -1274,7 +1460,7 @@ def _oracle_attempt(output, key, package_sha256, context_sha256, retry_failed):
     return output, None
 
 
-async def _run_oracles(root_cfg, run_id, *, offline=False, workers=1, task_ids=None, retry_failed=False):
+async def _run_oracles(root_cfg, run_id, *, offline=False, workers=1, task_ids=None, retry_failed=False, empty_control=False):
     from application.execution.run_plan import load_plan
     from core.backends import identity
     from core.locking import file_lock
@@ -1293,16 +1479,20 @@ async def _run_oracles(root_cfg, run_id, *, offline=False, workers=1, task_ids=N
     unknown = selected - {t["instance_id"] for t in tasks.values()}
     if unknown:
         raise ValueError("Oracle tasks absent from frozen selection: " + str(sorted(unknown)))
-    base = run / "validation" / ("offline-oracle" if offline else "oracle")
+    base = run / "validation" / ("empty-control" if empty_control else "offline-oracle" if offline else "oracle")
     base.mkdir(parents=True, exist_ok=True)
-    with file_lock(base / ".sweep.lock", nonblocking=True):
+    # Sections share the run-owned proxy and must never execute concurrently.
+    with file_lock(run / 'validation/.oracle-lifecycle.lock', nonblocking=True), \
+            file_lock(base / ".sweep.lock", nonblocking=True):
         results = []
         semaphore = asyncio.Semaphore(workers)
 
         async def execute(key, task):
             async with semaphore:
-                row = await _run_oracle_task(copy.deepcopy(cfg), run_id, key, task, base,
-                                             offline=offline, retry_failed=retry_failed)
+                options = dict(offline=offline, retry_failed=retry_failed)
+                if empty_control:
+                    options['empty_control'] = True
+                row = await _run_oracle_task(copy.deepcopy(cfg), run_id, key, task, base, **options)
                 results.append(row)
                 summary = {"schema_version": 1, "run_id": run_id, "selected_count": len(selected),
                     "completed_count": len(results), "valid_oracles": sum(bool(r["valid"]) for r in results),
@@ -1331,8 +1521,10 @@ async def _run_oracles(root_cfg, run_id, *, offline=False, workers=1, task_ids=N
         return summary
 
 
-async def _run_oracle_task(cfg, run_id, key, task, base, *, offline=False, retry_failed=False):
+async def _run_oracle_task(cfg, run_id, key, task, base, *, offline=False, retry_failed=False, empty_control=False):
     cfg = copy.deepcopy(cfg)
+    cfg["skillsbench_oracle_validation"] = not empty_control
+    cfg["skillsbench_validation"] = True
     from benchflow.rollout_planes import DefaultRolloutPlanes
 
     from catalog.skillsbench import verify_package
@@ -1345,11 +1537,12 @@ async def _run_oracle_task(cfg, run_id, key, task, base, *, offline=False, retry
     if previous is not None:
         return previous
     oracle_id = "oracle-" + hash_json({"run": run_id, "task_key": key,
+                                       "section": base.name,
                                        "attempt": str(output.relative_to(base))})[:20]
     row = {"schema_version": 1, "run_id": run_id, "task_key": key,
         "task_id": task["instance_id"], "benchmark_revision": task["revision"],
         "task_package_sha256": task["instance"]["package_sha256"],
-        "execution_context_sha256": context_sha256, "agent": "oracle", "verifier": "BenchFlow-0.6.3",
+        "execution_context_sha256": context_sha256, "agent": "empty-control" if empty_control else "oracle", "verifier": "BenchFlow-0.6.3",
         "rewards": {}, "verifier_error": None, "agent_error": None, "valid": False,
         "re_evaluation": False, "created_at": now(), "cleanup_confirmed": False,
         "attempt_id": oracle_id, "evidence_path": str(output)}
@@ -1369,7 +1562,8 @@ async def _run_oracle_task(cfg, run_id, key, task, base, *, offline=False, retry
         cfg["skillsbench_service_images"] = {service: value["tag"]
             for (iid, service), value in factory.images.items()}
         cfg["skillsbench_daemon_capabilities"] = {"cpu_quota_supported": factory.cpu_quota_supported}
-        task_source = Path(task["instance"]["task_path"])
+        from catalog.skillsbench_index import task_package_path
+        task_source = task_package_path(cfg, task)
         manifest = EnvironmentManifest(name=task["instance_id"], image=image["tag"],
             keep_alive=True, isolation="per_task", owns_lifecycle=True)
         sample = type("OracleSample", (), {"instance_id": task["instance_id"],
@@ -1379,6 +1573,15 @@ async def _run_oracle_task(cfg, run_id, key, task, base, *, offline=False, retry
         mode = cfg["execution_context"]["profile"]["skill_mode"]
         skills_dir = task_source / "environment/skills" if mode == "with-skill" else None
         hooks = []
+        if not empty_control and not offline:
+            async def prepare_oracle_runtime(env):
+                from runtime.agents.verifier_tools import prepare_verifier_tools
+                prepared = await prepare_verifier_tools(env)
+                write_json(output / 'diagnostics/oracle-tools.json', {
+                    'schema_version': 1, 'ownership': planes.ownership,
+                    'return_code': prepared.return_code, 'stdout': prepared.stdout,
+                    'policy': 'published_tools_before_official_oracle', 'at': now()})
+            hooks.append(prepare_oracle_runtime)
         if offline:
             from runtime.agents.offline import install_probe
             async def check_offline(env):
@@ -1392,7 +1595,14 @@ async def _run_oracle_task(cfg, run_id, key, task, base, *, offline=False, retry
             environment_manifest=manifest, pre_agent_hooks=hooks,
             usage_tracking=UsageTrackingConfig(mode="off"), planes=planes)
         rollout = await Rollout.create(config)
-        result = await rollout.run()
+        if empty_control:
+            await rollout.setup()
+            await rollout.start()
+            await rollout.install_agent()
+            await rollout.verify()
+            result = rollout.result
+        else:
+            result = await rollout.run()
         row.update(rewards=result.rewards, verifier_error=result.verifier_error, agent_error=result.error)
     except Exception as exc:
         import traceback
@@ -1420,6 +1630,13 @@ async def _run_oracle_task(cfg, run_id, key, task, base, *, offline=False, retry
                 row["cleanup_confirmed"] = False
     row["valid"] = _oracle_valid(row["rewards"], row["agent_error"], row["verifier_error"],
                                   row["cleanup_confirmed"])
+    if empty_control:
+        row['control'] = 'fresh-unsolved-task-no-oracle-no-agent'
+        row['verifier_zero_audit'] = _oracle_zero_audit(output, task, row['rewards'])
+        row['valid'] = (not row['agent_error'] and not row['verifier_error']
+                        and row['cleanup_confirmed'] and bool(row['rewards'])
+                        and row['verifier_zero_audit']['classification'] == 'ValidZero'
+                        and all(type(v) in (int, float) and v == 0 for v in row['rewards'].values()))
     if offline:
         probe_path = output / "offline-install.json"
         probe = read_json(probe_path) if probe_path.exists() else {}
@@ -1436,22 +1653,33 @@ def execute_attempt(cfg, run_id, task, runtime, sample, context, output, factory
     return asyncio.run(_execute_attempt(cfg, run_id, task, runtime, sample, context, output, factory))
 
 
-def drain_capture(cfg, output, capture_client, session_id):
+def drain_capture(cfg, output, capture_client, session_id, diagnostic_errors=None):
     """One producer barrier and native/hidden drain for every terminal path."""
     import time
 
     import requests
+    from uuid import uuid4
+    from runtime.serving.diagnostics import safe_response_summary, response_error_type
 
     endpoint = cfg['serving']['base_url'].removesuffix('/v1').rstrip('/')
     started_at, started = now(), time.monotonic()
     receipt = {'schema_version': 1, 'session_id': session_id, 'started_at': started_at,
                'phase': 'native_flush'}
+    response = None
+    correlation_id = uuid4().hex
     try:
         flush_started = time.monotonic()
         response = requests.post(endpoint + '/dycon/capture/engine/flush', json={'session_id': session_id},
-            timeout=cfg['capture'].get('flush_timeout_seconds') or cfg['capture']['finalize_seconds'])
+            timeout=cfg['capture'].get('flush_timeout_seconds') or cfg['capture']['finalize_seconds'],
+            headers={'X-DyCon-Correlation-ID': correlation_id})
         response.raise_for_status()
         value = response.json()
+        try:
+            if value.get('stage_diagnostics'):
+                capture_client.report_diagnostics(session_id, value['stage_diagnostics'])
+        except Exception as diagnostic_exc:
+            if diagnostic_errors is not None and getattr(diagnostic_exc, 'capture_diagnostic', None):
+                diagnostic_errors.append(diagnostic_exc.capture_diagnostic)
         receipt['native_flush_seconds'] = time.monotonic() - flush_started
         if value.get('failures'):
             raise RuntimeError('Native capture drain failed: ' + str(value['failures']))
@@ -1476,6 +1704,21 @@ def drain_capture(cfg, output, capture_client, session_id):
             elapsed_seconds=time.monotonic() - started, phase='complete', finished_at=now())
         write_json(Path(output) / 'capture-drain.json', receipt)
     except Exception as exc:
+        diagnostic = getattr(exc, 'capture_diagnostic', None)
+        if diagnostic is None:
+            summary = safe_response_summary(response.content[:512], 512) if response is not None else ''
+            diagnostic = {
+                'schema_version': 1, 'stage': receipt['phase'], 'error_type': type(exc).__name__,
+                'method': 'POST', 'path': '/dycon/capture/engine/flush',
+                'status_code': getattr(response, 'status_code', None),
+                'correlation_id': (response.headers.get('X-DyCon-Correlation-ID', correlation_id)
+                                   if response is not None else correlation_id),
+                'duration_seconds': time.monotonic() - started,
+                'server_error_type': response_error_type(summary), 'response_summary': summary,
+            }
+        if diagnostic_errors is not None:
+            diagnostic_errors.append(diagnostic)
+        receipt['capture_diagnostic'] = diagnostic
         receipt.update(failed=True, error_type=type(exc).__name__, error=_safe_verifier_text(str(exc))[:512],
             elapsed_seconds=time.monotonic() - started, finished_at=now())
         write_json(Path(output) / 'capture-drain.json', receipt)
@@ -1486,10 +1729,9 @@ def backend_failure_result(sample, context, output, started, error, *, bridge=No
                            capture_session=None, agent_status=None, persist=True):
     """Retain independent agent/verifier/usage facts if finalization fails."""
     output = Path(output)
-    if getattr(bridge, 'limit_reason', None) == 'sample_completion_token_budget':
-        agent_status = 'SampleTokenBudgetExceeded'
-    elif getattr(bridge, 'limit_reason', None) == 'sample_token_usage_unknown':
-        agent_status = 'SampleTokenBudgetUsageUnknown'
+    if agent_status is None and 'acp' in (type(error).__name__ + ' ' + str(error)).lower():
+        agent_status = 'OpenHandsError'
+    agent_status = _bridge_agent_status(bridge, agent_status)
     calls = [call for record in getattr(bridge, 'records', []) for call in record.get('model_calls', [])]
     known = [call.get('usage') or {} for call in calls if call.get('usage_known')]
     dependency = read_json(output / 'dependency-failure.json') if (output / 'dependency-failure.json').exists() else None
@@ -1505,7 +1747,8 @@ def backend_failure_result(sample, context, output, started, error, *, bridge=No
                           'LimitsExceeded', 'reasoning_loop',
                           'EnvironmentSetupFailed', 'TimeoutError', 'VerifierError'}:
         status = agent_status
-    elif agent_status in {'SampleTokenBudgetExceeded', 'SampleTokenBudgetUsageUnknown'}:
+    elif agent_status in {'SampleTokenBudgetExceeded', 'SampleTokenBudgetUsageUnknown',
+                          'ContextWindowExceededError'}:
         status = agent_status
     elif isinstance(error, TimeoutError):
         status = 'TimeoutError'
@@ -1546,6 +1789,8 @@ def backend_failure_result(sample, context, output, started, error, *, bridge=No
         result['dependency_failure'] = dependency
     if official:
         result['raw_evaluation_sha256'] = sha256(output / 'evaluation-raw.json')
+    if getattr(bridge, 'token_budget', None) is not None:
+        result['sample_token_budget'] = bridge.token_budget.snapshot()
     if persist:
         write_json(output / 'attempt.json', result)
     return result
@@ -1578,11 +1823,8 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
     capability = verify_package(task)
     if not capability["supported"]:
         raise ValueError("Unsupported SkillsBench task: " + "; ".join(capability["reasons"]))
-    official_root = (Path(cfg["project_root"]) / cfg["skillsbench_images"]["source_root"]
-                     / "tasks").resolve()
-    task_source = Path(source_task["task_path"]).resolve()
-    if not task_source.is_relative_to(official_root) or task_source.parent != official_root:
-        raise ValueError("Task package escaped the pinned official task root")
+    from catalog.skillsbench_index import task_package_path
+    task_source = task_package_path(cfg, task)
     unit = next(u for u in source_task["images"] if u["service"] == "main")
     image = factory.images[(task["instance_id"], "main")]
     # Resolve the leased NAS tag explicitly in the prebuilt compose overlay.
@@ -1600,12 +1842,13 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
 
     from rollout import sample_token_budget as budget_module
     from rollout.adapters import openhands_bridge as bridge_module
+    from runtime.agents import condenser as condenser_module
     from runtime.agents import dependencies as dependency_module
     from runtime.agents import openhands as driver_module
     from runtime.agents import verifier_audit as verifier_audit_module
     from runtime.agents import verifier_tools as verifier_tools_module
     source_modules = [Path(__file__), Path(driver_module.__file__),
-                      Path(dependency_module.__file__), Path(bridge_module.__file__),
+                      Path(dependency_module.__file__), Path(condenser_module.__file__), Path(bridge_module.__file__),
                       Path(budget_module.__file__), Path(verifier_tools_module.__file__),
                       Path(verifier_audit_module.__file__)]
     dependency_ref = cfg['execution_context']['profile'].get('dependency_snapshot')
@@ -1623,6 +1866,11 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
     capture, capture_client, capture_session, capture_status = None, None, None, "disabled"
     capture_errors = []
     started = now()
+    capture_diagnostic_errors = []
+    capture_diagnostic_identity = {
+        'run_id': run_id, 'execution_attempt_id': os.environ.get('DYCON_EXECUTION_ATTEMPT'),
+        'sample_key': sample.sample_key, 'attempt_id': context['attempt_id'],
+    }
     try:
         if cfg.get("capture", {}).get("enabled"):
             inventory = runtime["capture_token_inventory"]
@@ -1633,7 +1881,8 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
                 newline_policy=cfg["capture"]["newline_policy"], capture_select=inventory["capture_select"])
             capture_session = capture["session_id"]
             capture_client = CaptureClient(runtime["capture_control_url"], timeout=cfg["capture"]["control_seconds"])
-            capture_client.start(capture, graph_mode="FULL", prefix_cache_policy="safe_boundary")
+            capture_client.start(capture, graph_mode="FULL", prefix_cache_policy="safe_boundary",
+                                 diagnostic_identity=capture_diagnostic_identity)
             capture_status = "collecting"
             write_json(output / "capture-session.json", {"session_id": capture_session, "metadata": capture})
 
@@ -1711,13 +1960,8 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
             "events": _json_events(result.trajectory), "trajectory_source": result.trajectory_source})
         termination = ("AgentCompleted" if not result.error else
             "AgentTimeout" if "timeout" in str(result.error_category).lower() else "OpenHandsError")
-        if result.error and bridge.limit_reason:
-            if bridge.limit_reason == 'sample_completion_token_budget':
-                termination = 'SampleTokenBudgetExceeded'
-            elif bridge.limit_reason == 'sample_token_usage_unknown':
-                termination = 'SampleTokenBudgetUsageUnknown'
-            else:
-                termination = 'reasoning_loop' if bridge.limit_reason == 'reasoning_loop' else 'LimitsExceeded'
+        if result.error:
+            termination = _bridge_agent_status(bridge, termination)
         dependency_failure = read_json(output / 'dependency-failure.json') if (output / 'dependency-failure.json').exists() else None
         if dependency_failure:
             termination = 'EnvironmentSetupFailed'
@@ -1736,7 +1980,7 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
         raw_path = output / "openhands/canonical.traj.json"
         write_json(raw_path, canonical)
         if capture_client is not None and capture_session:
-            drain_capture(cfg, output, capture_client, capture_session)
+            drain_capture(cfg, output, capture_client, capture_session, capture_diagnostic_errors)
             prepared = capture_client.prepare(capture_session, raw_path)
             write_json(output / "capture-prepared.json", prepared)
         trajectory_sha = sha256(raw_path)
@@ -1753,10 +1997,12 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
                 trajectory_sha256=trajectory_sha, request_count=len(bridge.records))
         journal(output, "subject_bound", binding, subject_sha256=subject_sha,
                 subject_path=str(subject_path))
-        result_status, resolved, policy = _map_evaluation(result_row, report, capture_status)
+        result_status, resolved, policy = _map_evaluation(result_row, report, capture_status,
+                                                        agent_status=termination)
         if result.error and termination in {'LimitsExceeded', 'reasoning_loop', 'EnvironmentSetupFailed'}:
             result_status = termination
-        if termination in {'SampleTokenBudgetExceeded', 'SampleTokenBudgetUsageUnknown'}:
+        if termination in {'SampleTokenBudgetExceeded', 'SampleTokenBudgetUsageUnknown',
+                           'ContextWindowExceededError'}:
             result_status = termination
         result_status, resolved, policy, verifier_audit = verifier_audit_module.audit_zero_evaluation(
             output, task, result_status, resolved, policy, report)
@@ -1819,7 +2065,8 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
         result = {**sample.as_dict(), **context, "instance_id": sample.instance_id,
             "attempt_id": context["attempt_id"], "rollout_id": rid, "exit_status": result_status,
             "agent_exit_status": termination,
-            "disposition": "accepted" if result_status in {"Submitted", "AgentCompleted", "AgentTimeout"} else "failed",
+            "disposition": "accepted" if result_status in {"Submitted", "AgentCompleted", "AgentTimeout",
+                                                              "ContextWindowExceededError"} else "failed",
             "raw_reward": report.get("rewards"), "resolved": resolved,
             "evaluation_status": outcome["status"] if report_path.exists() else "not_run",
             "evaluation_id": evaluation_id if report_path.exists() else None,
@@ -1867,9 +2114,11 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
         write_json(output / "attempt.json", result)
         return result
     except Cancelled as exc:
+        if getattr(exc, 'capture_diagnostic', None):
+            capture_diagnostic_errors.append(exc.capture_diagnostic)
         if capture_client is not None and capture_session:
             try:
-                drain_capture(cfg, output, capture_client, capture_session)
+                drain_capture(cfg, output, capture_client, capture_session, capture_diagnostic_errors)
             except Exception as cleanup_error:
                 write_json(output / "capture-stop-error.json", {"error": repr(cleanup_error)})
         partial = backend_failure_result(sample, context, output, started, exc,
@@ -1882,9 +2131,11 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
         write_json(output / "attempt.json", interrupted)
         return interrupted
     except BaseException as exc:
+        if getattr(exc, 'capture_diagnostic', None):
+            capture_diagnostic_errors.append(exc.capture_diagnostic)
         if capture_client is not None and capture_session:
             try:
-                drain_capture(cfg, output, capture_client, capture_session)
+                drain_capture(cfg, output, capture_client, capture_session, capture_diagnostic_errors)
             except Exception as cleanup_error:
                 write_json(output / "capture-stop-error.json", {"error": repr(cleanup_error)})
         write_json(output / "backend-error.json", {"error_type": type(exc).__name__,
@@ -1894,3 +2145,18 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
         return backend_failure_result(sample, context, output, started, exc,
             bridge=locals().get('bridge'), capture_session=capture_session,
             agent_status=locals().get('termination'))
+
+    finally:
+        if capture_session:
+            from runtime.serving.diagnostics import write_attempt_diagnostics
+            write_attempt_diagnostics(
+                output, {**capture_diagnostic_identity, 'session_id': capture_session},
+                finalized=locals().get('finalized'), errors=capture_diagnostic_errors,
+            )
+        # Rollout creation, cancellation and exceptions can bypass env.stop().
+        if 'planes' in locals():
+            from runtime.containers.networks import cleanup_owned_resources
+            cleanup = await asyncio.to_thread(cleanup_owned_resources, cfg, planes.ownership)
+            write_json(output / 'docker-final-cleanup.json', cleanup)
+            if not cleanup['complete']:
+                raise RuntimeError('Attempt container/network cleanup is incomplete')

@@ -4,19 +4,42 @@ from pathlib import Path
 
 
 def plot_trajectory(rows, output, *, title="remaining workload", ylabel="remaining workload",
-                    comparison=False, xlim=None, ylim=None, logylim=None, note="", truth_label="True remaining"):
+                    comparison=False, xlim=None, ylim=None, logylim=None, note="", truth_label="True remaining",
+                    compression_steps=(), figsize=None, bottom_margin=None):
     """Plot explicit predictions and truth; None creates gaps, never a zero label.
 
     comparison=True adds native log1p scores and log1p truth in a second panel.
     It also renders an explicit unavailable panel when no qualified rows exist.
     Existing evaluation callers retain their single-panel behavior.
     """
-    if not rows:
-        raise ValueError("No trajectory rows")
     import math
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
     from matplotlib.ticker import MaxNLocator
+
+    if not rows:
+        fig = Figure(figsize=figsize or (8, 6.5 if comparison else 4))
+        FigureCanvasAgg(fig)
+        axes = fig.subplots(2 if comparison else 1, 1, squeeze=False).ravel()
+        labels = [ylabel + ' (raw units)']
+        if comparison:
+            labels.append('log1p(' + ylabel + ')')
+        for index, ax in enumerate(axes):
+            ax.set(xlabel='Canonical assistant step (0-based)', ylabel=labels[index])
+            ax.set_title(title if index == 0 else '')
+            ax.set_yticks([])
+            ax.set_xticks([])
+            ax.grid(alpha=.18)
+            ax.text(.5, .5, 'No canonical assistant steps', transform=ax.transAxes,
+                    ha='center', va='center', color='#9a3412')
+            if xlim is not None:
+                ax.set_xlim(xlim)
+        if note:
+            fig.text(.08, .015, note, fontsize=8, color='#9a3412')
+        fig.tight_layout(rect=(0, bottom_margin if bottom_margin is not None else .035 if note else 0, 1, 1))
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output, dpi=160)
+        return
 
     def value(row, key):
         v = row.get(key)
@@ -33,9 +56,10 @@ def plot_trajectory(rows, output, *, title="remaining workload", ylabel="remaini
     indexed = {r['step_id']: r for r in rows}
     x = list(range(x[0], x[-1] + 1))
     rows = [indexed.get(step, {'step_id': step}) for step in x]
+    compression_steps = sorted({step for step in compression_steps if type(step) is int and step in x})
     true = [value(r, 'target') for r in rows]
     pred = [value(r, 'prediction') for r in rows]
-    fig = Figure(figsize=(8, 6.5 if comparison else 4))
+    fig = Figure(figsize=figsize or (8, 6.5 if comparison else 4))
     FigureCanvasAgg(fig)
     axes = fig.subplots(2 if comparison else 1, 1, squeeze=False).ravel()
     def panel(ax, y, p, label):
@@ -51,6 +75,12 @@ def plot_trajectory(rows, output, *, title="remaining workload", ylabel="remaini
                     ha='center', va='center', color='#9a3412')
         ax.legend(fontsize=8)
     panel(axes[0], true, pred, ylabel + ' (raw units)')
+    for index, step in enumerate(compression_steps):
+        for ax in axes:
+            ax.axvline(step, color='#dc2626', linewidth=1.1, linestyle='--', alpha=.8,
+                       label='Condenser triggered' if index == 0 else None)
+    if compression_steps:
+        axes[0].legend(fontsize=8)
     axes[0].set_title(title, fontsize=10)
     if ylim is not None:
         low, high = ylim
@@ -66,7 +96,7 @@ def plot_trajectory(rows, output, *, title="remaining workload", ylabel="remaini
             axes[1].set_ylim(low-pad, high+pad)
     if note:
         fig.text(.08, .015, note, fontsize=8, color='#9a3412')
-    fig.tight_layout(rect=(0, .035 if note else 0, 1, 1))
+    fig.tight_layout(rect=(0, bottom_margin if bottom_margin is not None else .035 if note else 0, 1, 1))
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=160)
 
@@ -91,6 +121,18 @@ def plot_parallel_scores(steps, branches, output, *, target, title, subtitle):
     if other:
         ax.scatter([r["step_id"] for r in other], [r["score"] for r in other],
                    color=orange, alpha=.8, marker="x", s=34, label="Scored ineligible / unscored-valid branches", zorder=3)
+    missing_hidden = [r for r in branches if r.get('hidden_available') is False and r['score'] is not None
+                      and r.get('close_reason') not in {'no_close_generated','truncated_before_close','reasoning_loop_aborted'}]
+    if missing_hidden:
+        ax.scatter([r['step_id'] for r in missing_hidden], [r['score'] for r in missing_hidden],
+                   facecolors='none', edgecolors='#b42318', marker='D', s=70,
+                   label='Score available; close hidden unavailable', zorder=5)
+    no_close = [r for r in branches if r.get('close_reason') in
+                {'no_close_generated','truncated_before_close','reasoning_loop_aborted'}]
+    if no_close:
+        ax.scatter([r['step_id'] for r in no_close], [.105] * len(no_close),
+                   transform=ax.get_xaxis_transform(), color='#047857', marker='^', s=28,
+                   label='No close generated', zorder=5)
     ax.plot([r["step_id"] for r in steps],
             [r["selected_score"] if r["selected_score"] is not None else float("nan") for r in steps],
             color=blue, linewidth=1.6, marker="o", markersize=3.4,

@@ -51,6 +51,11 @@ class DyConCapturePlugin:
         self.tp_size = 1
         self.failures = []
         self.rows_published = 0
+        self.stage_diagnostics = {}
+        self.stage_diagnostics_points = {}
+        self.stage_diagnostics_point_map = {}
+        self.stage_diagnostics_truncated = {}
+        self.selector_observer_errors = 0
         self.worker_statuses = []
         self.drain_lock = asyncio.Lock()
         self.stream_options = {}
@@ -101,7 +106,6 @@ class DyConCapturePlugin:
                 project,
                 Path(project) / self.export_options["spool_root"],
                 self.export_options["spool_max_bytes"],
-                int(os.environ.get("DYCON_CAPTURE_RESERVE_BYTES", "0")),
             )
 
     def _check_cancelled(self, metadata):
@@ -274,17 +278,43 @@ class DyConCapturePlugin:
             body = await request.body()
             value = json.loads(body) if body else {}
             sid = value.get("session_id")
-            pending = [key for key, state in self.native_requests.items()
-                       if sid is None or state['metadata'].get('session_id') == sid]
-            if pending:
-                from starlette.responses import JSONResponse
-                return JSONResponse({'error': 'native_generation_still_in_flight', 'pending_native_ids': pending}, status_code=409)
-            await self.drain_once()
-            failures = [f for f in self.failures if sid is None or
-                        (isinstance(f, dict) and f.get("session_id") == sid)]
-            unscoped = [f for f in self.failures if not isinstance(f, dict) or f.get('session_id') is None]
-            return {"rows_published": self.rows_published, "failures": failures,
-                    'unscoped_failures': unscoped, 'session_id': sid}
+            from runtime.serving.diagnostics import safe_stack, sanitize_error_text, bounded_records
+            from core.io import write_json
+            from starlette.responses import JSONResponse
+            supplied = request.headers.get("X-DyCon-Correlation-ID", "")
+            correlation = supplied if 1 <= len(supplied) <= 64 and all(c.isascii() and (c.isalnum() or c in "_-") for c in supplied) else uuid4().hex
+            started = time.monotonic()
+            try:
+                pending = [key for key, state in self.native_requests.items()
+                           if sid is None or state['metadata'].get('session_id') == sid]
+                if pending:
+                    from starlette.responses import JSONResponse
+                    return JSONResponse({'error': 'native_generation_still_in_flight', 'pending_native_ids': pending}, status_code=409)
+                await self.drain_once()
+                try:
+                    diagnostic = self._session_stage_diagnostics(sid) if sid else {"schema_version": 1, "requests": {}, "truncated_count": 0}
+                except Exception:
+                    diagnostic = {"schema_version": 1, "requests": {}, "reason_code": "diagnostic_summary_unavailable"}
+                failures = [f for f in self.failures if sid is None or
+                            (isinstance(f, dict) and f.get("session_id") == sid)]
+                unscoped = [f for f in self.failures if not isinstance(f, dict) or f.get('session_id') is None]
+                return {"rows_published": self.rows_published, "failures": failures,
+                        'unscoped_failures': unscoped, 'session_id': sid,
+                        'stage_diagnostics': diagnostic}
+            except Exception as exc:
+                evidence = {"schema_version": 1, "stage": "engine_flush", "session_id": sid,
+                            "run_id": self.owner_run, "execution_attempt_id": self.owner_attempt,
+                            "correlation_id": correlation, "error_type": type(exc).__name__,
+                            "reason_code": "engine_flush_failed", "error_summary": sanitize_error_text(exc),
+                            "duration_seconds": time.monotonic() - started, "stack": safe_stack(exc)}
+                try:
+                    project = os.environ["DYCON_CAPTURE_PROJECT"]
+                    if bounded_records(project, self.owner_run, self.owner_attempt, [evidence], kind="control"):
+                        write_json(self.staging.parent / "control-errors" / (correlation + ".json"), evidence)
+                except Exception:
+                    pass
+                return JSONResponse({k: evidence[k] for k in ("error_type", "reason_code", "stage", "correlation_id")},
+                                    status_code=500, headers={"X-DyCon-Correlation-ID": correlation})
 
         @app.post("/dycon/capture/engine/mode")
         async def mode(request: Request):
@@ -743,7 +773,22 @@ class DyConCapturePlugin:
         async with self.drain_lock:
             raw = await self.engine.collective_rpc("fetch_captured", args=(STREAM,), kwargs={"clear": True})
             executions = await self.engine.collective_rpc("fetch_capture_execution")
-            for worker in executions:
+            for rank, worker in enumerate(executions):
+                selector = worker.pop("__capture_diagnostics__", {})
+                if rank == 0:
+                    self.selector_observer_errors += selector.get("observer_errors", 0)
+                    for request_id, report in selector.get("requests", {}).items():
+                        entry = self.stage_diagnostics.setdefault(request_id, {})
+                        entry["selector_observed"] = True
+                        entry["observer_errors"] = entry.get("observer_errors", 0) + report.get("observer_errors", 0)
+                        for position in report.get("positions", []):
+                            self._count_diagnostic(request_id, "selector_seen", "think_close", position)
+                        remainder = max(0, report.get("count", 0) - len(report.get("positions", [])))
+                        if remainder:
+                            counts = entry.setdefault("selector_seen", {})
+                            counts["think_close"] = counts.get("think_close", 0) + remainder
+                            sid = self.request_metadata.get(request_id, {}).get("session_id")
+                            self.stage_diagnostics_truncated[sid] = self.stage_diagnostics_truncated.get(sid, 0) + remainder
                 for request_id, rows in worker.items():
                     self.execution_intervals.setdefault(request_id, []).extend(rows)
             self.worker_statuses = await self.engine.collective_rpc("capture_status", args=(STREAM,))
@@ -761,6 +806,51 @@ class DyConCapturePlugin:
                 LOG.exception("DyCon capture drain failed")
             await asyncio.sleep(self.flush_seconds)
 
+    def _count_diagnostic(self, request_id, stage, anchor, position=None):
+        try:
+            self._record_diagnostic_count(request_id, stage, anchor, position)
+        except Exception:
+            pass  # Observability cannot change publish/submit behavior.
+
+    def _record_diagnostic_count(self, request_id, stage, anchor, position=None):
+        metadata = self.request_metadata.get(request_id, {})
+        session_id = metadata.get("session_id")
+        if not session_id:
+            return
+        entry = self.stage_diagnostics.setdefault(request_id, {
+            "selector_seen": {}, "capture_row": {}, "submit_accepted": {}, "submit_failed": {}})
+        counts = entry.setdefault(stage, {})
+        counts[anchor] = counts.get(anchor, 0) + 1
+        if anchor == "think_close" and position is not None:
+            point_map = self.stage_diagnostics_point_map.setdefault(session_id, {})
+            key = (request_id, int(position))
+            point = point_map.get(key)
+            if point is None:
+                if sum(len(points) for points in self.stage_diagnostics_point_map.values()) >= 256:
+                    self.stage_diagnostics_truncated[session_id] = self.stage_diagnostics_truncated.get(session_id, 0) + 1
+                    return
+                point = {"request_id": request_id, "position": int(position), "stages": []}
+                point_map[key] = point
+            if stage not in point["stages"]:
+                point["stages"].append(stage)
+            if stage == "submit_accepted":
+                # The controller's existing sample receipt proves successful
+                # points. Keep coordinate metadata only for unresolved points.
+                point_map.pop(key, None)
+
+    def _session_stage_diagnostics(self, session_id):
+        requests = {}
+        for request_id, metadata in self.request_metadata.items():
+            if metadata.get("session_id") != session_id or request_id not in self.stage_diagnostics:
+                continue
+            requests[request_id] = {k: v for k, v in self.stage_diagnostics[request_id].items() if k != "think_close_points"}
+        for point in self.stage_diagnostics_point_map.get(session_id, {}).values():
+            requests.setdefault(point["request_id"], {}).setdefault("think_close_points", []).append({
+                "position": point["position"], "stages": list(point["stages"])})
+        return {"schema_version": 1, "requests": requests,
+                "selector_observer_errors": sum(r.get("observer_errors", 0) for r in requests.values()),
+                "truncated_count": self.stage_diagnostics_truncated.get(session_id, 0)}
+
     def _publish(self, raw):
         from vllm.model_hooks.capture.serialization import assemble_captured
 
@@ -771,7 +861,6 @@ class DyConCapturePlugin:
             return
         first_layer = next(iter(metadata))
         labels = metadata[first_layer]
-        LOG.info("DyCon capture assembled %d rows across %d layers", len(labels), len(tensors))
         events = list(zip(labels.req_ids, labels.positions.tolist(), labels.token_ids.tolist(), range(len(labels.req_ids)), strict=True))
         # Native streams can be fetched in batches.  Sort only the small event
         # metadata here; tensor rows remain indexed by the original row number.
@@ -793,6 +882,7 @@ class DyConCapturePlugin:
                 f"layer_{layer}": tensor[row_number].detach().cpu().numpy()
                 for layer, tensor in tensors.items()
             }
+            self._count_diagnostic(request_id, "capture_row", anchor, position)
             if anchor == "think_close" and self.scoring is not None:
                 self.scoring.submit(self.request_metadata.get(request_id, {}), request_id,
                                     int(position), int(token_id), sample)
@@ -808,6 +898,10 @@ class DyConCapturePlugin:
             path = Path(name)
             reservation = "retained-handoff:" + str(path)
             confirmed = False
+            submit_recorded = False
+            response = None
+            correlation_id = uuid4().hex
+            request_started = time.monotonic()
             try:
                 if self.budget:
                     self.budget.acquire(reservation, sum(v.nbytes + 4096 for v in sample.values()) + 4096)
@@ -828,23 +922,37 @@ class DyConCapturePlugin:
                         **execution,
                     },
                     timeout=self.control_seconds,
+                    headers={"X-DyCon-Correlation-ID": correlation_id},
                 )
                 if not response.ok:
-                    LOG.error("DyCon capture control rejected staged row: %s", response.text[:500])
+                    from runtime.serving.diagnostics import safe_response_summary
+                    LOG.error("DyCon capture control rejected staged row: %s",
+                              safe_response_summary(response.content[:512], 512))
                 response.raise_for_status()
                 acknowledgment = response.json()
                 if isinstance(acknowledgment, dict) and acknowledgment.get('status') == 'failed':
+                    self._count_diagnostic(request_id, "submit_failed", anchor, position)
+                    submit_recorded = True
                     raise RuntimeError('Capture controller did not accept the staged sample')
-                LOG.info(
-                    "DyCon capture staged anchor=%s request=%s position=%s", anchor, request_id, position
-                )
+                self._count_diagnostic(request_id, "submit_accepted", anchor, position)
+                submit_recorded = True
                 confirmed = True
                 self.rows_published += 1
             except Exception as exc:
+                if not submit_recorded:
+                    self._count_diagnostic(request_id, "submit_failed", anchor, position)
+                from runtime.serving.diagnostics import safe_response_summary, sanitize_error_text
                 failure = {
-                    "request_id": request_id,
-                    "reason": repr(exc),
+                    "request_id": request_id, "stage": "submit",
+                    "reason": sanitize_error_text(exc, 512),
                     "session_id": self.request_metadata.get(request_id, {}).get("session_id"),
+                    "correlation_id": (response.headers.get("X-DyCon-Correlation-ID", correlation_id)
+                                       if response is not None else correlation_id),
+                    "status_code": getattr(response, "status_code", None),
+                    "duration_seconds": round(time.monotonic() - request_started, 6),
+                    "error_type": type(exc).__name__,
+                    "response_summary": safe_response_summary(response.content[:512], 512)
+                                       if response is not None else "",
                     "retained_staging_path": str(path), "reservation_key": reservation,
                 }
                 self.failures.append(failure)

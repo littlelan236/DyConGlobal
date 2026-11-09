@@ -191,6 +191,7 @@ desktop.ini
 # Generated benchmark snapshots and host-qualified runtime publications
 /catalog/snapshots/
 /catalog/qualifications/
+/catalog/task-variants/
 /runtime/agent-profiles/
 /runtime/dependency-snapshots/
 /runtime/wheelhouse/

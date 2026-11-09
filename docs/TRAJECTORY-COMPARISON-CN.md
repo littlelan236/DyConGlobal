@@ -1,5 +1,18 @@
 # Trajectory 成功次数与剩余工作量
 
+Parallel run 的自动 visualization publication 可直接传给现有命令，无需创建
+训练 dataset：
+
+```bash
+.venvs/analysis/bin/dycon difficulty-plot-trajectories RUN_ID PLOT_ID --rollout-id ROLLOUT_ID --publication-id PUBLICATION_ID --attempt-id EXISTING_FIT_ATTEMPT --target submission_remaining_reasoning_tokens_log1p
+.venvs/analysis/bin/dycon difficulty-plot-parallel RUN_ID BRANCH_PLOT_ID --rollout-id ROLLOUT_ID --publication-id PUBLICATION_ID
+```
+
+轨迹预测仅使用经过 winner 和 native/tensor 校验的 actual-path hidden，truth
+独立按 native suffix 计算。缺失值为 null 并断线，未评测或 unresolved 轨迹的
+终点是实际 agent 终点。分支图展示 receipt 绑定的原始 scores，不重新评分，也不
+将 score 当作 native truth；无兼容 checkpoint 时仍可单独生成分支图。
+
 `difficulty-plot-trajectories` 将 run 中每个 task 的 resolved repetition 数量与指定 Ridge checkpoint 的逐步预测/实际剩余量并列展示。它不估计成功概率。
 
 ## 选择输入
@@ -26,6 +39,10 @@
 - log1p checkpoint 预测先用 `expm1` 还原到目标原单位，再与原单位真值比较。图按轨迹展示，不跨轨迹平均或归一化长度。
 
 曲线带有训练 split 与 `used_in_fit` 身份。如果同一 task 或轨迹样本参与 checkpoint 拟合，图只能解释为拟合诊断，不能当作 task holdout 泛化结果。
+
+## 压缩事件标注
+
+每条 canonical trajectory 的 ACP 事件流会检查明确的 condenser/compression 触发事件。图中以红色竖虚线标出对应 assistant step，HTML 同 task 的各 repetition 仍在同一行；`trajectories.csv` 保留事件索引、事件类型和 step。未记录触发事件时显示“未记录”，不会根据轨迹长度或配置阈值推测压缩发生。
 
 ## 产物和校验
 

@@ -18,8 +18,11 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping
+import traceback
+import uuid
 
 import numpy as np
+from runtime.serving.diagnostics import safe_stack, sanitize_error_text
 
 from core.io import hash_json, now, owned_path, read_json, sha256, write_json
 from core.locking import file_lock
@@ -239,6 +242,7 @@ class AsyncExportQueue:
         self._closed = False
         self._failed: list[dict[str, Any]] = []
         self._written = 0
+        self._session_metrics: dict[str, dict[str, int]] = {}
         self._active_writers = 0
         self._submitted = 0
         self._spilled = 0
@@ -250,6 +254,11 @@ class AsyncExportQueue:
         self._worker.start()
         self._spill_worker.start()
         self._recover_spills()
+
+    def _bump_session(self, session_id, key):
+        # Callers already hold the queue's existing bookkeeping lock.
+        values = self._session_metrics.setdefault(str(session_id), {})
+        values[key] = values.get(key, 0) + 1
 
     def _recover_spills(self):
         """Queue committed spill records after a controller restart."""
@@ -294,6 +303,8 @@ class AsyncExportQueue:
                     self.spool.budget.release(item.reservation)
                 self._spill_queue.put(spill)
                 with self._lock:
+                    self._bump_session(sid, "submit_accepted")
+                    self._bump_session(sid, "spilled")
                     self._submitted += 1
                     self._spilled += 1
                     self._spill_high_water = max(self._spill_high_water, self._spill_queue.qsize())
@@ -305,11 +316,13 @@ class AsyncExportQueue:
                     self._pending_sessions[sid] -= 1
                     self._pending_condition.notify_all()
                 with self._lock:
+                    self._bump_session(sid, "submit_rejected")
                     self._failed.append({"sample_id": item.sample_id, "session_id": sid, "error": repr(exc)})
                 return False
         with self.journal.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"sample_id": item.sample_id, "status": "queued", "at": now()}) + "\n")
         with self._lock:
+            self._bump_session(sid, "submit_accepted")
             self._submitted += 1
             self._queue_high_water = max(self._queue_high_water, self.queue.qsize())
         return True
@@ -362,9 +375,11 @@ class AsyncExportQueue:
             try:
                 self._persist(item)
                 with self._lock:
+                    self._bump_session(item.metadata["session_id"], "persisted")
                     self._written += 1
             except Exception as exc:  # record and continue is the default policy
                 with self._lock:
+                    self._bump_session(item.metadata["session_id"], "persist_failed")
                     self._failed.append(
                         {
                             "sample_id": item.sample_id,
@@ -402,9 +417,11 @@ class AsyncExportQueue:
                 if item.reservation and self.spool:
                     self.spool.budget.release(item.reservation)
                 with self._lock:
+                    self._bump_session(item.session_id, "persisted")
                     self._written += 1
             except Exception as exc:
                 with self._lock:
+                    self._bump_session(item.session_id, "persist_failed")
                     self._failed.append({"sample_id": item.sample_id, "session_id": item.session_id, "error": repr(exc)})
             finally:
                 with self._pending_condition:
@@ -489,24 +506,30 @@ class AsyncExportQueue:
         finally:
             temp.unlink(missing_ok=True)
 
-    def status(self):
+    def status(self, session_id=None):
         with self._lock:
-            return {
+            pending = dict(self._pending_sessions) if session_id is None else {
+                str(session_id): int(self._pending_sessions.get(str(session_id), 0))}
+            failures = list(self._failed) if session_id is None else [
+                row for row in self._failed if row.get("session_id") == session_id]
+            metrics = dict(self._session_metrics.get(str(session_id), {})) if session_id is not None else None
+            result = {
                 "queued": self.queue.qsize(),
-                "persisted": self._written,
-                "failed": list(self._failed),
-                "failed_count": len(self._failed),
-                "spill_pending": self._spill_queue.qsize(),
-                "spill_files": len(list(self.spill.glob("*.json"))),
-                "pending_by_session": dict(self._pending_sessions),
-                "pending_total": sum(self._pending_sessions.values()),
+                "persisted": self._written if session_id is None else (metrics or {}).get("persisted", 0),
+                "failed": failures,
+                "failed_count": len(self._failed) if session_id is None else len(failures),
+                "spill_pending": self._spill_queue.qsize() if session_id is None else pending.get(str(session_id), 0),
+                "spill_files": len(list(self.spill.glob("*.json"))) if session_id is None else None,
+                "pending_by_session": pending, "pending_total": sum(pending.values()),
                 "active_writers": self._active_writers,
-                "submitted": self._submitted,
-                "spilled_total": self._spilled,
-                "queue_high_water": self._queue_high_water,
-                "spill_high_water": self._spill_high_water,
+                "submitted": self._submitted if session_id is None else (metrics or {}).get("submit_accepted", 0),
+                "spilled_total": self._spilled if session_id is None else (metrics or {}).get("spilled", 0),
+                "queue_high_water": self._queue_high_water, "spill_high_water": self._spill_high_water,
                 "closed": self._closed,
             }
+            if metrics is not None:
+                result["session_metrics"] = metrics
+            return result
 
     def close(self, *, drain: bool = True, timeout: float = 30):
         with self._lock:
@@ -537,6 +560,9 @@ class _Session:
     samples: list[dict[str, Any]] = field(default_factory=list)
     sample_ids: dict[str, dict] = field(default_factory=dict)
     finalization: dict[str, Any] | None = None
+    diagnostic_identity: dict[str, Any] = field(default_factory=dict)
+    stage_diagnostics: dict[str, Any] = field(default_factory=dict)
+    stage_diagnostics_truncated_count: int = 0
     metrics: dict[str, int] = field(
         default_factory=lambda: {
             "graph_replays": 0,
@@ -545,6 +571,121 @@ class _Session:
             "cache_hit_tokens": 0,
         }
     )
+
+
+def _capture_stage_summary(session, expected, observed, queue_status, export_root, *, indexed_available=True):
+    """Compare bounded hook/submit/persist evidence with exact close targets."""
+    expected = {point for point in expected if len(point) >= 3 and point[2] == "think_close"}
+    stages = ("expected", "selector_seen", "capture_row", "submit", "persist", "indexed")
+    totals = {key: 0 for key in stages}
+    by_anchor = {}
+    request_totals = {}
+    rows = {}
+    for sample in session.samples:
+        key = (sample.get("request_id"), sample.get("absolute_position", sample.get("anchor_position")),
+               sample.get("anchor"))
+        rows[key] = sample
+    point_stages = {}
+    for request_id, report in session.stage_diagnostics.items():
+        for point in report.get("think_close_points", []):
+            if isinstance(point, Mapping) and type(point.get("position")) is int:
+                point_stages[(request_id, point["position"])] = set(point.get("stages", []))
+    missing, missing_by_anchor = [], {}
+    for request_id, position, anchor in sorted(expected):
+        counts = by_anchor.setdefault(anchor, {key: 0 for key in stages})
+        req = request_totals.setdefault(request_id, {key: 0 for key in stages})
+        counts["expected"] += 1; req["expected"] += 1; totals["expected"] += 1
+        point = (request_id, position, anchor)
+        report_stages = point_stages.get((request_id, position), set())
+        sample = rows.get(point)
+        persisted = False
+        selector_seen = "selector_seen" in report_stages or sample is not None
+        if selector_seen:
+            counts["selector_seen"] += 1; req["selector_seen"] += 1; totals["selector_seen"] += 1
+        instrumented = session.stage_diagnostics.get(request_id, {}).get("selector_observed")
+        stage, reason, confidence = "selector_seen", "selector_not_seen", "exact"
+        if not selector_seen and (not instrumented or session.stage_diagnostics.get(request_id, {}).get("observer_errors", 0)):
+            reason, confidence = "selector_evidence_unavailable", "unavailable"
+        if selector_seen:
+            if "capture_row" in report_stages or sample is not None:
+                counts["capture_row"] += 1; req["capture_row"] += 1; totals["capture_row"] += 1
+                if sample is not None and sample.get("status") != "failed":
+                    counts["submit"] += 1; req["submit"] += 1; totals["submit"] += 1
+                    sidecar = Path(export_root) / "index" / (str(sample.get("sample_id")) + ".json")
+                    persisted = False
+                    if sidecar.exists():
+                        try:
+                            value = read_json(sidecar)
+                            persisted = value.get("status") == "persisted" and bool(value.get("sha256"))
+                        except Exception:
+                            persisted = False
+                    if persisted:
+                        counts["persist"] += 1; req["persist"] += 1; totals["persist"] += 1
+                    if indexed_available and persisted and point in observed:
+                        counts["indexed"] += 1; req["indexed"] += 1; totals["indexed"] += 1
+                    elif persisted:
+                        stage, reason = "indexed", "finalizer_join_missing" if indexed_available else "finalizer_not_run"
+                    else:
+                        stage = "persist"
+                        reason = "persist_pending" if queue_status.get("pending_total", 0) else "persist_failed"
+                elif "submit_failed" in report_stages or (sample is not None and sample.get("status") == "failed"):
+                    stage, reason = "submit", "submit_rejected"
+                else:
+                    stage, reason = "submit", "submit_not_observed"
+            else:
+                stage, reason = "capture_row", "capture_row_missing"
+        elif (request_id, position) not in point_stages and session.stage_diagnostics_truncated_count:
+            stage, reason, confidence = "selector_seen", "stage_detail_truncated", "bounded_count"
+        if not persisted or (indexed_available and point not in observed):
+            missing_by_anchor[anchor] = missing_by_anchor.get(anchor, 0) + 1
+            if len(missing) < 256:
+                missing.append({
+                    "run_id": session.default_request.run_id,
+                    "execution_attempt_id": session.diagnostic_identity.get("execution_attempt_id"),
+                    "sample_key": session.diagnostic_identity.get("sample_key"),
+                    "attempt_id": session.diagnostic_identity.get("attempt_id"),
+                    "session_id": session.session_id, "request_id": request_id,
+                    "anchor": anchor, "absolute_position": position,
+                    "stage": stage, "reason_code": reason,
+                    "correlation_confidence": confidence,
+                })
+    # Preserve full counters independently of the bounded coordinate cache.
+    for rid, report in session.stage_diagnostics.items():
+        req = request_totals.get(rid)
+        if req is None:
+            continue
+        for stage, source in (("selector_seen", "selector_seen"), ("capture_row", "capture_row"), ("submit", "submit_accepted")):
+            value = report.get(source, {}).get("think_close")
+            if isinstance(value, int) and value > req[stage]:
+                delta = value - req[stage]
+                req[stage] = value
+                totals[stage] += delta
+                by_anchor["think_close"][stage] += delta
+    if not indexed_available:
+        totals["indexed"] = None
+        for counts in [*by_anchor.values(), *request_totals.values()]:
+            counts["indexed"] = None
+    divergent = [(rid, counts) for rid, counts in request_totals.items()
+                 if any(counts.get(stage, 0) != counts["expected"] for stage in stages)]
+    return {
+        "schema_version": 1, "session_id": session.session_id,
+        "run_id": session.default_request.run_id,
+        "execution_attempt_id": session.diagnostic_identity.get("execution_attempt_id"),
+        "sample_key": session.diagnostic_identity.get("sample_key"),
+        "attempt_id": session.diagnostic_identity.get("attempt_id"),
+        "stages": totals, "by_anchor": by_anchor,
+        "by_request": {rid: counts for rid, counts in divergent[:256]},
+        "request_truncated_count": max(0, len(divergent) - 256),
+        "queue": {key: queue_status.get(key) for key in
+                  ("session_metrics", "pending_total", "failed_count", "spilled_total")},
+        "missing": missing, "missing_count": sum(missing_by_anchor.values()),
+        "indexed_scope": "accepted_online_index" if indexed_available else "pending_online_finalizer",
+        "missing_by_anchor": missing_by_anchor,
+        "position_truncated_count": session.stage_diagnostics_truncated_count,
+        "truncated_count": max(0, sum(missing_by_anchor.values()) - len(missing)),
+    }
+
+
 
 
 class OnlineCaptureController:
@@ -565,7 +706,6 @@ class OnlineCaptureController:
                 export,
                 config.get("run_id", "standalone"),
                 config["nas_root"],
-                config.get("reserve_bytes", 0),
             )
         self.export_root = self.spool.root if self.spool else self.root / export.get("root", "hidden/online")
         if not self.export_enabled:
@@ -635,7 +775,6 @@ class OnlineCaptureController:
             return {"spool_enabled": False}
         export = self.config["export"]
         return {"spool_enabled": True, "spool_max_bytes": self.spool.budget.limit,
-                "reserve_bytes": self.spool.budget.reserve,
                 "spool_high_watermark": export["spool_high_watermark"],
                 "spool_low_watermark": export["spool_low_watermark"],
                 "project_capture_reserved_bytes": self.spool.budget.usage(),
@@ -742,7 +881,10 @@ class OnlineCaptureController:
             merged = {**self.config, **options}
             if str(merged.get("graph_mode", "FULL")).upper() != "FULL":
                 raise ValueError("online capture requires graph_mode=FULL")
-            self.sessions[request.session_id] = _Session(request.session_id, merged, request)
+            self.sessions[request.session_id] = _Session(
+                request.session_id, merged, request,
+                diagnostic_identity=dict(options.get("diagnostic_identity") or {}),
+            )
             session_dir = self.export_root / "sessions" / request.session_id
             session_dir.mkdir(parents=True, exist_ok=True)
             self._write(
@@ -761,6 +903,86 @@ class OnlineCaptureController:
                 },
             )
             return self.status(request.session_id)
+
+    def record_stage_diagnostics(self, session_id, diagnostics):
+        if not isinstance(diagnostics, Mapping) or diagnostics.get("schema_version") != 1:
+            raise ValueError("Invalid capture stage diagnostic schema")
+        requests = diagnostics.get("requests", {})
+        if not isinstance(requests, Mapping):
+            raise ValueError("Invalid capture stage diagnostic requests")
+        with self._lock:
+            session = self.sessions.get(session_id)
+            if session is None:
+                raise KeyError(session_id)
+            bounded, total_points = {}, 0
+            for request_id, record in requests.items():
+                if request_id not in session.requests or not isinstance(record, Mapping):
+                    continue
+                previous = session.stage_diagnostics.get(str(request_id), {})
+                entry = {"selector_observed": previous.get("selector_observed", False) or record.get("selector_observed") is True,
+                         "observer_errors": max(previous.get("observer_errors", 0), int(record.get("observer_errors", 0)),
+                                                int(diagnostics.get("selector_observer_errors", 0)))}
+                for stage in ("selector_seen", "capture_row", "submit_accepted", "submit_failed"):
+                    values = record.get(stage, {})
+                    if isinstance(values, Mapping):
+                        entry[stage] = {
+                            str(anchor): max(previous.get(stage, {}).get(anchor, 0), int(count))
+                            for anchor, count in values.items()
+                            if anchor in {"think_open", "reasoning_newline", "think_close"}
+                            and type(count) is int and count >= 0
+                        }
+                points = record.get("think_close_points", [])
+                if isinstance(points, list):
+                    kept = []
+                    for point in points:
+                        if not isinstance(point, Mapping) or type(point.get("position")) is not int:
+                            continue
+                        if total_points >= 256:
+                            break
+                        stages = [stage for stage in point.get("stages", [])
+                                  if stage in {"selector_seen", "capture_row", "submit_accepted", "submit_failed"}]
+                        kept.append({"position": point["position"], "stages": stages})
+                        total_points += 1
+                    entry["think_close_points"] = kept
+                bounded[str(request_id)] = entry
+            session.stage_diagnostics.update(bounded)
+            session.stage_diagnostics_truncated_count = max(0, int(diagnostics.get("truncated_count", 0)))
+            return {"recorded": True, "request_count": len(bounded)}
+
+    def _diagnostic_queue_status(self, session_id):
+        try:
+            from runtime.serving.diagnostics import queue_summary
+            return queue_summary(self.queue.status(session_id))
+        except Exception:
+            return {"reason_code": "queue_diagnostic_unavailable"}
+
+    def record_control_failure(self, path, correlation_id, exc, elapsed, queue_before=None):
+        parts = [part for part in str(path).split("/") if part]
+        sid = parts[3] if len(parts) > 3 and parts[:3] == ["dycon", "capture", "session"] else None
+        session = self.sessions.get(sid) if sid else None
+        queue = self._diagnostic_queue_status(sid) if sid else {}
+        def summary(snapshot):
+            return {k: (snapshot or {}).get(k) for k in ("queued","persisted","failed_count","spill_pending",
+                    "pending_total","submitted","spilled_total","session_metrics")}
+        q = {"before": summary(queue_before), "after": summary(queue)}
+        value = {
+            "schema_version": 1, "correlation_id": correlation_id, "session_id": sid,
+            "run_id": session.default_request.run_id if session else None,
+            "execution_attempt_id": session.diagnostic_identity.get("execution_attempt_id") if session else None,
+            "sample_key": session.diagnostic_identity.get("sample_key") if session else None,
+            "attempt_id": session.diagnostic_identity.get("attempt_id") if session else None,
+            "stage": "control_" + (parts[-1] if parts else "unknown"),
+            "method": "POST", "path": "/" + "/".join(parts),
+            "error_type": type(exc).__name__, "reason_code": "control_request_failed",
+            "error_summary": sanitize_error_text(exc, 512), "duration_seconds": round(float(elapsed),6),
+            "queue": q, "stack": safe_stack(exc),
+        }
+        rel=f"sessions/{sid}/control-errors/{correlation_id}.json" if sid else f"control-errors/{correlation_id}.json"
+        from runtime.serving.diagnostics import bounded_records
+        if bounded_records(self.root, value.get("run_id") or self.config.get("run_id", "standalone"),
+                           value.get("execution_attempt_id"), [value], kind="control"):
+            self._write_failure_artifact(rel,value)
+        return value
 
     def bind(self, request_id: str, metadata: Mapping[str, Any]):
         request = CaptureRequest.from_mapping(metadata)
@@ -1411,6 +1633,13 @@ class OnlineCaptureController:
             "observed": len(expected & observed),
             "missing": sorted(expected - observed),
         }
+        queue_status = self._diagnostic_queue_status(session_id)
+        try:
+            from runtime.serving.diagnostics import cap_stage_summary
+            stage_summary = _capture_stage_summary(session, expected, observed, queue_status, self.export_root, indexed_available=False)
+            cap_stage_summary(self.root, stage_summary)
+        except Exception:
+            stage_summary = {"schema_version": 1, "reason_code": "diagnostic_summary_unavailable"}
         self._write(f"sessions/{session_id}/coverage.json", coverage)
         if self.spool and self.parallel_decisions:
             self.spool.seal(session_id)
@@ -1457,11 +1686,16 @@ class OnlineCaptureController:
             reasons.append('capture_publication_pending')
         diagnostics = {'schema_version': 1, 'session_id': session_id, 'rollout_id': rollout_id,
             'old_status': old_status, 'new_status': session.status, 'reason_codes': reasons,
-            'coverage': coverage, 'branch_coverage': branch_coverage,
-            'failed_sample_ids': failed_samples, 'export_failures': queue_failures,
-            'session_failures': session.options.get('failures', []),
-            'accepted_native_request_ids': native_ids, 'observed_at': now()}
-        self._write(f'sessions/{session_id}/finalization-diagnostics.json', diagnostics)
+            'coverage': {k: v for k, v in coverage.items() if k != 'missing'},
+            'branch_coverage': {k: v for k, v in (branch_coverage or {}).items() if not isinstance(v, (list, dict))},
+            'stages': stage_summary,
+            'failed_sample_count': len(failed_samples), 'export_failure_count': len(queue_failures),
+            'session_failure_count': len(session.options.get('failures', [])),
+            'accepted_native_request_count': len(native_ids), 'observed_at': now()}
+        try:
+            self._write(f'sessions/{session_id}/finalization-diagnostics.json', diagnostics)
+        except Exception:
+            pass
         value['capture_diagnostics'] = diagnostics
         session.finalization = value
         self._record_manifests(session_id, session.default_request.to_dict(), session_status=session.status)
@@ -1555,7 +1789,7 @@ class OnlineCaptureController:
     def stop(self, session_id: str):
         started = time.monotonic()
         stop_evidence = {"session_id": session_id, "started_at": now(),
-                         "queue_before": self.queue.status()}
+                         "queue_before": self._diagnostic_queue_status(session_id)}
         native_started = time.monotonic()
         with self._output_condition:
             session = self.sessions.get(session_id)
@@ -1583,7 +1817,7 @@ class OnlineCaptureController:
         except Exception as exc:
             stop_evidence.update(phase="export_queue_drain", native_output_drain_seconds=native_elapsed,
                 export_queue_drain_seconds=time.monotonic() - export_started,
-                queue_at_failure=self.queue.status(), controller_requests=self.control_status(),
+                queue_at_failure=self._diagnostic_queue_status(session_id), controller_requests=self.control_status(),
                 error_type=type(exc).__name__, failed=True, finished_at=now())
             self._write_failure_artifact(f"sessions/{session_id}/stop-diagnostics.json", stop_evidence)
             raise
@@ -1602,14 +1836,17 @@ class OnlineCaptureController:
                 'samples':len(session.samples),'metrics':dict(session.metrics)}
         stop_evidence.update(phase="completed", native_output_drain_seconds=native_elapsed,
             export_queue_drain_seconds=export_elapsed, total_seconds=time.monotonic() - started,
-            queue_after=self.queue.status(), controller_requests=self.control_status(),
+            queue_after=self._diagnostic_queue_status(session_id), controller_requests=self.control_status(),
             failed=False, finished_at=now())
         value["stop_diagnostics"] = stop_evidence
-        self._write(f"sessions/{session_id}/stop-diagnostics.json", stop_evidence)
+        try:
+            self._write(f"sessions/{session_id}/stop-diagnostics.json", stop_evidence)
+        except Exception:
+            pass
         # Global manifest locks, journal hashing and fsync must not block bind/output.
         if metadata is not None:
             self._record_manifests(session_id, metadata, session_status='stopped')
-        value.update(export=self.queue.status(), files={
+        value.update(export=self.queue.status(session_id), files={
             'queue.jsonl':sha256(self.queue.journal) if self.queue.journal.exists() else None})
         self._write(f'sessions/{session_id}/receipt.json', value)
         status = self.status(session_id)
@@ -1690,6 +1927,9 @@ class CaptureControlServer:
                 self._dycon_status_code = status
                 body = json.dumps(value, ensure_ascii=False).encode()
                 self.send_response(status)
+                correlation_id = getattr(self, "_dycon_correlation_id", None)
+                if correlation_id:
+                    self.send_header("X-DyCon-Correlation-ID", correlation_id)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -1716,8 +1956,20 @@ class CaptureControlServer:
                     return self._json(404, {"error": str(exc)})
 
             def do_POST(self):
+                supplied_id = self.headers.get("X-DyCon-Correlation-ID", "")
+                self._dycon_correlation_id = supplied_id if (
+                    1 <= len(supplied_id) <= 64 and all(c.isascii() and (c.isalnum() or c in "_-") for c in supplied_id)
+                ) else uuid.uuid4().hex
                 started = controller_ref.control_request_started()
                 self._dycon_status_code = 500
+                self._dycon_started = started
+                self._dycon_queue_before = None
+                if self.path.endswith(("/stop", "/prepare", "/finalize")):
+                    sid = self.path.split("/")[-2]
+                    try:
+                        self._dycon_queue_before = controller_ref.queue.status(sid)
+                    except Exception:
+                        pass
                 try:
                     return self._dispatch_post()
                 finally:
@@ -1728,6 +1980,8 @@ class CaptureControlServer:
                     value = self._read()
                     if self.path == "/dycon/capture/session/start":
                         return self._json(200, controller_ref.start(value.pop("metadata", value), **value))
+                    if self.path.startswith("/dycon/capture/session/") and self.path.endswith("/diagnostics"):
+                        return self._json(200, controller_ref.record_stage_diagnostics(self.path.split("/")[-2], value.get("diagnostics", {})))
                     if self.path == "/dycon/capture/request/output":
                         return self._json(200, controller_ref.record_output(value))
                     if self.path == "/dycon/capture/failure":
@@ -1766,9 +2020,16 @@ class CaptureControlServer:
                         return self._json(200, controller_ref.stop(self.path.split("/")[-2]))
                     return self._json(404, {"error": "not_found"})
                 except (KeyError, ValueError, AnchorError) as exc:
-                    return self._json(400, {"error": str(exc)})
+                    return self._json(400, {"error": str(exc), "error_type": type(exc).__name__, "correlation_id": self._dycon_correlation_id})
                 except Exception as exc:
-                    return self._json(500, {"error": repr(exc)})
+                    elapsed = time.monotonic() - getattr(self, "_dycon_started", time.monotonic())
+                    try:
+                        controller_ref.record_control_failure(
+                            self.path, self._dycon_correlation_id, exc, elapsed,
+                            queue_before=getattr(self, "_dycon_queue_before", None))
+                    except Exception:
+                        pass
+                    return self._json(500, {"error": repr(exc), "error_type": type(exc).__name__, "correlation_id": self._dycon_correlation_id})
 
         class ControlHTTPServer(ThreadingHTTPServer):
             # Native bind/output callbacks arrive together for up to 32 branches.

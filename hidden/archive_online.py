@@ -81,7 +81,7 @@ def release_reservations(root, source, options):
 
 
 @exclusive_run
-def archive_online(cfg, run_id, *, archive_id, size_only_cleanup=False):
+def archive_online(cfg, run_id, *, archive_id, size_only_cleanup=False, destination=None):
     root = Path(cfg['project_root']).resolve()
     run_id, archive_id = map(identifier, (run_id, archive_id))
     frozen = load_snapshot(root, run_id)
@@ -91,8 +91,9 @@ def archive_online(cfg, run_id, *, archive_id, size_only_cleanup=False):
     if not source.is_relative_to(root) or source == root:
         raise ValueError('Capture source must belong to this project')
     assert_inactive(run_id, source)
-    nas = Path(frozen['paths']['nas_root']).resolve()
-    target = nas / 'archives/capture-spool' / run_id / archive_id
+    archive_root = (Path(destination).resolve() if destination is not None else
+                    Path(frozen['paths']['nas_root']).resolve() / 'archives/capture-spool')
+    target = archive_root / run_id / archive_id
     payload = target / 'spool'
     if target.is_relative_to(source) or source.is_relative_to(target):
         raise ValueError('Capture archive overlaps source')
@@ -104,7 +105,7 @@ def archive_online(cfg, run_id, *, archive_id, size_only_cleanup=False):
     if selection.exists() and read_json(selection) != signature:
         raise ValueError('Archive ID already binds different source/destination')
     write_json(selection, signature)
-    retired = source.parent.parent / 'capture-archive-retired' / (run_id + '--' + archive_id)
+    retired = source.parent.resolve().parent / 'capture-archive-retired' / (run_id + '--' + archive_id)
     if source.is_symlink():
         if source.resolve() != payload.resolve():
             raise ValueError('Source pointer belongs to another archive')

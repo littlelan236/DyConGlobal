@@ -17,6 +17,8 @@ def _check_models(directory, attempt, receipt):
     if attempt.get('model_contract', {}).get('model_kind') != 'ridge':
         raise ValueError('Unknown difficulty checkpoint model kind')
     from difficulty.models.ridge_grid import load_model
+    from core.io import hash_json
+    split = read_json(directory.parents[1] / 'datasets' / attempt['dataset_id'] / 'splits' / attempt['split_id'] / 'split.json')
 
     for name in receipt["files"]:
         if not name.endswith('.npz') or not name.startswith('models/'):
@@ -34,6 +36,13 @@ def _check_models(directory, attempt, receipt):
             }
             if any(key not in archive or archive[key].item() != value for key, value in expected.items()):
                 raise ValueError(f"Checkpoint identity disagrees with attempt: {name}")
+            if split['strategy'] == 'task_holdout_event_v1':
+                scope = archive['fit_scope'].item()
+                if scope not in {'train', 'train_validation'}:
+                    raise ValueError('Nested checkpoint has invalid fit scope')
+                ids = split['sample_ids']['train'] + (split['sample_ids']['validation'] if scope == 'train_validation' else [])
+                if archive['train_sample_ids_sha256'].item() != hash_json(ids):
+                    raise ValueError('Nested checkpoint training cohort hash mismatch')
             spec = json.loads(archive['input_spec_json'].item())
             if (spec['width'] != len(model['coef']) or spec['public_sites'] != [int(archive['layer'])]
                     or int(archive['input_width']) != spec['width']):
@@ -72,6 +81,9 @@ def verify(root, scope, artifact_id, *, dataset_id=None):
         split_dir = dataset / "splits" / split_id
         _, parent_checked = verify_receipt(root, split_dir, expected_sha256=attempt['split_receipt_sha256'])
         checked += parent_checked
+        from difficulty.training.splits import load_split
+        samples = [json.loads(line) for line in (dataset / 'samples.jsonl').read_text().splitlines() if line]
+        load_split(root, dataset_id, split_id, attempt['dataset_receipt_sha256'], samples)
         if sha256(split_dir / 'split.json') != attempt['split_sha256']:
             raise ValueError('Attempt split assignment changed')
         for key in ['dataset_id', 'split_id', 'dataset_receipt_sha256', 'split_receipt_sha256', 'split_sha256', 'mode']:
@@ -84,6 +96,9 @@ def verify(root, scope, artifact_id, *, dataset_id=None):
         category = "predictions" if scope == "difficulty-prediction" else "evaluations"
         directory = root / "difficulty" / category / artifact_id
         receipt, checked = verify_receipt(root, directory)
+        if scope == 'difficulty-evaluation' and receipt.get('kind') == 'ridge-task-holdout-v1':
+            from difficulty.evaluation.holdout_verify import verify_evaluation
+            verify_evaluation(root, directory, receipt)
     else:
         raise ValueError(f"Unknown difficulty artifact scope: {scope}")
     return {"scope": scope, "artifact_id": artifact_id, "path": str(directory),

@@ -1,0 +1,30 @@
+# Use a fresh evaluation ID for every invocation; no rollout/hidden replay.
+schema_version: 1
+run:
+  mode: fit
+data:
+  dataset_id: skillsbench-positive77-terminal-20261102
+  expected_receipt_sha256: null
+  targets:
+    - submission_remaining_reasoning_tokens_log1p
+    - submission_remaining_steps_linear
+outer_split:
+  strategy: task_random_v1
+  seed: 42
+  test_fraction: 0.20
+inner_split:
+  strategy: event_random_v1
+  seed: 42
+  validation_fraction: 0.20
+model:
+  kind: ridge
+  ridge:
+    layers: auto
+    alphas: [0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0, 100000000.0]
+    standardize: true
+    blas_threads: 4
+evaluation:
+  nmse_normalization: target_energy
+visualization:
+  enabled: true
+  export_formats: [png, svg]

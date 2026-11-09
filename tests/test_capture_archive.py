@@ -42,6 +42,23 @@ def test_archive_preserves_evidence_and_releases_only_selected_run(tmp_path, mon
     assert budget.usage() == 333
 
 
+def test_archive_custom_destination_with_symlinked_spool(tmp_path, monkeypatch):
+    cfg, source, budget = fixture(tmp_path, monkeypatch)
+    physical = tmp_path / 'other-device' / 'spool'
+    physical.parent.mkdir()
+    source.parent.rename(physical)
+    (tmp_path / 'spool').symlink_to(physical, target_is_directory=True)
+    destination = tmp_path / 'archive-destination'
+    expected = sha256(source / 'requests/native.json')
+    result = archive_online(cfg, 'run', archive_id='archive', destination=destination)
+    assert source.is_symlink()
+    assert source.resolve().is_relative_to(destination)
+    assert sha256(source / 'requests/native.json') == expected
+    assert result['reservation_release']['bytes'] == 300
+    assert budget.usage() == 333
+    assert archive_online(cfg, 'run', archive_id='archive', destination=destination)['status'] == 'complete'
+
+
 def test_bad_nas_copy_never_removes_local_bytes_or_reservations(tmp_path, monkeypatch):
     import hidden.archive_online as archive
     cfg, source, budget = fixture(tmp_path, monkeypatch)

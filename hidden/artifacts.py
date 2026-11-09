@@ -108,17 +108,18 @@ def response_records(trajectory):
 def matching_request_receipts(session_id, message, response, receipts):
     """Shared exact native identity join for live preparation and offline repair."""
     metadata = (message.get("extra", {}).get("request") or {}).get("dycon_capture", {})
+    native_id = response.get('dycon_native_request_id')
     return [
         row for row in receipts
         if row["session_id"] == session_id
+        and (native_id is None or row['request_id'] == native_id)
         and (not metadata.get("decision_id") or (
             row.get("decision_id") == metadata["decision_id"]
             and row.get("branch_id") == metadata["branch_id"]))
         and (row.get("query_id") == metadata["query_id"] if metadata.get("query_id")
              else row["step_id"] == metadata.get("step_id"))
         and (not metadata.get("api_attempt_id") or row.get("api_attempt_id") == metadata["api_attempt_id"])
-        and ((metadata.get("decision_id") and row.get("decision_id") == metadata["decision_id"])
-             or not response.get("id") or row["request_id"] == response["id"]
+        and (native_id is not None or not response.get("id") or row["request_id"] == response["id"]
              or row["request_id"].startswith(response["id"] + "-"))
     ]
 
@@ -152,6 +153,71 @@ def read_branch_index(root, session_id):
         states = {(r["decision_id"], r["branch_id"]): r["close_capture"] for r in revision["branches"]}
         rows = [{**row, "close_capture": states[(row["decision_id"], row["branch_id"])]} for row in rows]
     return {"samples": rows, "coverage": coverage, "receipt": receipt}
+
+
+def read_parallel_proof(root, session_id, *, rollout_id, trajectory_sha256):
+    """Validate the original winner and candidate inventory against its receipt."""
+    from core.io import identifier
+
+    root = Path(root).resolve()
+    base = root / "sessions" / identifier(session_id) / "parallel"
+    view = read_branch_index(root, session_id)
+    receipt = view["receipt"]
+    if (receipt.get("rollout_id") != rollout_id
+            or receipt.get("trajectory_sha256") != trajectory_sha256):
+        raise ValueError("Branch receipt does not bind the canonical trajectory")
+    files = receipt["files"]
+    for name in ("branch-index.json", "branch-coverage.json"):
+        if (base / name).relative_to(root).as_posix() not in files:
+            raise ValueError("Branch receipt omits " + name)
+    indexed = {}
+    for row in view["samples"]:
+        key = (row.get("decision_id"), row.get("branch_id"))
+        if key[0] is None or key[1] is None or key in indexed:
+            raise ValueError("Missing or duplicate branch identity")
+        if row.get("rollout_id") != rollout_id or row.get("trajectory_sha256") != trajectory_sha256:
+            raise ValueError("Branch index does not bind the canonical trajectory")
+        indexed[key] = row
+    decisions = []
+    for relative in sorted(files):
+        path = owned_path(root, relative)
+        if path.parent != base / "decisions" or path.suffix != ".json":
+            continue
+        decision = read_json(path)
+        if decision.get("session_id") != session_id:
+            raise ValueError("Decision belongs to another session")
+        decisions.append(decision)
+    decision_ids, requests, checked = set(), set(), set()
+    for decision in decisions:
+        did = decision.get("decision_id")
+        if not did or did in decision_ids:
+            raise ValueError("Missing or duplicate decision identity")
+        decision_ids.add(did)
+        candidates = decision.get("candidates")
+        if not isinstance(candidates, list) or len(candidates) != decision.get("branch_count"):
+            raise ValueError("Incomplete decision candidate inventory")
+        ids = [candidate.get("branch_id") for candidate in candidates]
+        if any(bid is None for bid in ids) or len(set(ids)) != len(ids):
+            raise ValueError("Missing or duplicate decision candidate")
+        winner = decision.get("selected_branch_id")
+        if winner is not None and winner not in ids:
+            raise ValueError("Selected branch is absent from candidates")
+        for candidate in candidates:
+            key = (did, candidate["branch_id"])
+            row = indexed.get(key)
+            if (row is None or row.get("native_request_id") != candidate.get("native_request_id")
+                    or row.get("score") != candidate.get("score")
+                    or row.get("selected") != (candidate["branch_id"] == winner)):
+                raise ValueError("Decision disagrees with its published branch index")
+            request = candidate.get("native_request_id")
+            if request:
+                if request in requests:
+                    raise ValueError("Native request is bound to multiple candidates")
+                requests.add(request)
+            checked.add(key)
+    if checked != set(indexed):
+        raise ValueError("Branch index contains unbound candidates")
+    return {**view, "decisions": decisions}
 
 
 def iter_arrays_grouped(samples):

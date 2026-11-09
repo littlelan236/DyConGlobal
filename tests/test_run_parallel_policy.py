@@ -162,23 +162,39 @@ def test_run_policy_tampering_is_rejected(parallel_cfg, which):
 
 
 def test_new_run_policy_is_compatible_with_offline_resource_revisions(parallel_cfg):
-    from application.execution.capture_budget_revision import revise_concurrency, revise_serving_memory
+    from application.execution.config_revision import revise_config
 
     cfg = parallel_cfg
     run = create_run(cfg, "revisable-policy", operation="rollout", task_ids=["policy-task"],
                      parallel_config=policy_file(cfg))
     old = load_plan(cfg["project_root"], run.name)["config"]
     sidecar_hash = sha256(run / "parallel-config.yaml")
-    revise_serving_memory(cfg["project_root"], run.name, revision_id="memory",
-                         gpu_memory_utilization=.35, reason="CPU fixture resource revision")
-    revise_concurrency(cfg["project_root"], run.name, revision_id="capacity",
-                       reason="CPU fixture resource revision")
+    revise_config(cfg["project_root"], run.name, revision_id="memory",
+                  updates={'serving.gpu_memory_utilization': .35}, reason="CPU fixture resource revision")
+    revise_config(cfg["project_root"], run.name, revision_id="capacity", updates={
+                  'parallel.control_request_seconds': 600, 'parallel.decision_ttl_seconds': 64800},
+                  reason="CPU fixture resource revision")
     revised = load_plan(cfg["project_root"], run.name)["config"]
     assert revised["parallel_policy"] == old["parallel_policy"]
     assert revised["parallel"]["control_request_seconds"] == 600
     assert revised["parallel"]["decision_ttl_seconds"] == 64800
     assert revised["parallel"]["consensus"]["representative_policy"] == "min_step_tokens"
     assert sha256(run / "parallel-config.yaml") == sidecar_hash
+
+
+def test_policy_fields_use_the_unified_revision_interface(parallel_cfg):
+    from application.execution.config_revision import revise_config
+    cfg = parallel_cfg
+    run = create_run(cfg, "revised-policy-fields", operation="rollout", task_ids=["policy-task"],
+                     parallel_config=policy_file(cfg))
+    source_hash = sha256(run / 'parallel-config.yaml')
+    revise_config(cfg['project_root'], run.name, revision_id='policy', updates={
+        'parallel.consensus.representative_policy': 'estimator_score',
+        'parallel.entropy.retention_rule': 'effective_count_v1'}, reason='fixture policy change')
+    loaded = load_plan(cfg['project_root'], run.name)
+    assert loaded['config']['parallel']['consensus']['representative_policy'] == 'estimator_score'
+    assert loaded['config']['parallel_policy']['effective']['entropy']['retention_rule'] == 'effective_count_v1'
+    assert sha256(run / 'parallel-config.yaml') == source_hash
 
 
 @pytest.mark.parametrize("tamper", [None, "binding", "rule"])

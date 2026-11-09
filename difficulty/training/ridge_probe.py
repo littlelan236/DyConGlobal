@@ -19,27 +19,12 @@ from difficulty.probe_config import LABELS, RidgeProbe, target_transform
 from difficulty.datasets.identity import task_key
 from difficulty.training.artifacts import finish_attempt
 from difficulty.training.splits import create_split, load_split
+from difficulty.training.split import training_partition_ids
 
 
 def report(y, prediction):
-    y, prediction = np.asarray(y, float), np.asarray(prediction, float)
-    if y.ndim != 1 or prediction.shape != y.shape:
-        raise ValueError("Metric arrays must be matching vectors")
-    result = {"count": len(y), "r2": None, "mae": None, "rmse": None}
-    if len(y) == 0 or not np.isfinite(y).all() or not np.isfinite(prediction).all():
-        result["reason"] = "empty_or_nonfinite"
-        return result
-    with np.errstate(over="ignore", invalid="ignore"):
-        error = y - prediction
-        mse = np.mean(error**2)
-        variance = np.sum((y - y.mean())**2)
-        r2 = 1 - np.sum(error**2) / variance if len(y) >= 2 and variance > 0 else None
-        mae, rmse = float(np.mean(np.abs(error))), float(np.sqrt(mse))
-    result.update(r2=float(r2) if r2 is not None and np.isfinite(r2) else None,
-                  mae=mae if np.isfinite(mae) else None, rmse=rmse if np.isfinite(rmse) else None)
-    if result["r2"] is None:
-        result["reason"] = "insufficient_count_zero_variance_or_overflow"
-    return result
+    from difficulty.evaluation.metrics import paired_regression_metrics
+    return paired_regression_metrics(y, prediction)
 
 
 def select_best(trials, tolerance):
@@ -96,7 +81,11 @@ def code_evidence(root):
              "difficulty/training/splits.py", "difficulty/datasets/compose.py",
              "difficulty/receipts.py", "difficulty/datasets/paths.py",
              "difficulty/models/estimators.py", "difficulty/models/ridge_grid.py",
-             "difficulty/training/ridge_probe.py", "difficulty/training/artifacts.py"]
+             "difficulty/training/ridge_probe.py", "difficulty/training/artifacts.py",
+             "difficulty/evaluation/metrics.py", "difficulty/evaluation/holdout.py",
+             "difficulty/evaluation/holdout_config.py", "difficulty/evaluation/holdout_results.py",
+             "difficulty/evaluation/holdout_verify.py",
+             "difficulty/evaluation/visualize.py"]
     names += ['difficulty/training/config.py', 'difficulty/training/entrypoint.py', 'difficulty/training/visualization.py']
     return {name: sha256(root / name) for name in names if (root / name).exists()}
 
@@ -194,7 +183,7 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
     output = artifact_dir(cfg, "difficulty", experiment_id, "checkpoints")
     if output.exists():
         raise FileExistsError(f"Experiment ID already exists (including partial): {output}")
-    if mode == "fit":
+    if mode == "fit" and settings.plots_enabled:
         import importlib.util
         if importlib.util.find_spec("matplotlib") is None:
             raise ValueError("Ridge fit/report requires the analysis environment (matplotlib missing)")
@@ -219,11 +208,12 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
     settings = settings.model_copy(update={
         "split_strategy": split["strategy"], "split_seed": split["seed"],
         "validation_fraction": split.get("validation_fraction", settings.validation_fraction),
-        "test_fraction": split.get("test_fraction", settings.test_fraction),
+        "test_fraction": split.get("test_fraction") or settings.test_fraction,
     })
-    threeway = {"train", "validation", "test"} <= set(split["sample_ids"])
+    partition_ids = training_partition_ids(split)
+    threeway = {"train", "validation", "test"} <= set(partition_ids)
     external_refit = settings.refit_train_validation and not threeway
-    roles = {sample_id: role for role, ids in split["sample_ids"].items() for sample_id in ids}
+    roles = {sample_id: role for role, ids in partition_ids.items() for sample_id in ids}
 
     def role_for(sample):
         return roles[sample["sample_id"]]
@@ -291,7 +281,7 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
                 trial = {"target": target, "layer": layer, "alpha": alpha,
                          "train": report(yt[:, i], pt[:, i]), "validation": report(yv[:, i], pv[:, i]),
                          "status": "complete", "fit_scope": "train"}
-                if not np.isfinite(coef[:, i]).all() or not np.isfinite(intercept[i]) or any(
+                if not np.isfinite(pt[:, i]).all() or not np.isfinite(pv[:, i]).all() or not np.isfinite(coef[:, i]).all() or not np.isfinite(intercept[i]) or any(
                     trial[role][metric] is None for role in ("train", "validation") for metric in ("mae", "rmse")
                 ):
                     trial.update(status="nonfinite_failure")
@@ -400,13 +390,20 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
                     "task_group": sample["task_group"], "target": target, "split": "validation",
                     "target_raw": float(raw[indices["validation"][j], i]), "target_transformed": float(yv[j, i]),
                     "prediction_transformed": float(pval[j]), "layer": winner["layer"], "alpha": winner["alpha"]})
+            refit_digest = sha256(output / refit_relative)
             for j, sample_idx in enumerate(indices["test"]):
                 sample = samples[int(sample_idx)]
                 test_predictions.append({"sample_id": sample["sample_id"], "rollout_id": sample["rollout_id"],
                     "task_group": sample["task_group"], "target": target, "split": "test",
                     "target_raw": float(raw[sample_idx, i]), "target_transformed": float(y[sample_idx, i]),
                     "prediction_raw": float(test_raw_pred[j]) if np.isfinite(test_raw_pred[j]) else None,
-                    "prediction_transformed": float(ptest[j]), "layer": winner["layer"], "alpha": winner["alpha"]})
+                    "prediction_transformed": float(ptest[j]) if np.isfinite(ptest[j]) else None,
+                    "status": "complete" if np.isfinite(ptest[j]) and np.isfinite(test_raw_pred[j]) else "failed",
+                    "reason": None if np.isfinite(ptest[j]) and np.isfinite(test_raw_pred[j]) else
+                              ("inverse_transform_overflow" if np.isfinite(ptest[j]) else "nonfinite_prediction"),
+                    "model": refit_relative, "model_sha256": refit_digest,
+                    "native_site": native_sites[winner['layer']], "width": width,
+                    "layer": winner["layer"], "alpha": winner["alpha"]})
             champions[target] = validation, yv[:, i], pval
         else:
             model = load_model(output / winner["model"])
@@ -421,9 +418,12 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
     if test_predictions:
         write_jsonl(output / "test-predictions.jsonl", test_predictions)
     write_json(output / "metrics.json", metrics)
-    draw_plots(output, settings, trials, champions)
+    if settings.plots_enabled:
+        draw_plots(output, settings, trials, champions)
     if threeway:
-        split_note = ("Tasks are disjoint across all partitions." if settings.split_strategy == "task_random_v1"
+        split_note = ("Outer train/test tasks are disjoint; inner train/validation events may share tasks and trajectories."
+                      if settings.split_strategy == 'task_holdout_event_v1' else
+                      "Tasks are disjoint across all partitions." if settings.split_strategy == 'task_random_v1'
                       else "Tasks overlap across event partitions by design.")
         report_lines = ["# Submission remainder Ridge three-way grid", "",
                         "Validation selects layer/alpha; test is untouched until after train+validation refit.", "",
@@ -442,8 +442,13 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
     (output / "report.md").write_text("\n".join(report_lines) + "\n", encoding="utf-8")
     if visualization is not None:
         visualization.close_writers()
-    finish(output, experiment, root, before_code)
-    return {"path": str(output), "mode": mode, "models": expected, "selected": winners}
+    complete = all(row.get('status') == 'complete' for row in test_predictions)
+    if complete:
+        finish(output, experiment, root, before_code)
+    else:
+        write_json(output / 'failure.json', {'state': 'partial', 'reason': 'test prediction failures'})
+    return {"path": str(output), "mode": mode, "models": expected, "selected": winners,
+            "status": "complete" if complete else "partial"}
 
 
 def finish(output, experiment, root, before_code):

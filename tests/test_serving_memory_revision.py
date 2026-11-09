@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from application.execution.capture_budget_revision import revise_serving_memory
+from application.execution.config_revision import revise_config
 from application.execution.run_plan import load_plan
 from core.io import read_json, sha256, write_json
 from core.processes import identity
@@ -14,7 +14,8 @@ def revise(cfg, **kwargs):
     params = dict(revision_id='gpu035', gpu_memory_utilization=.35,
                   reason='User authorized GPU0/1 TP2 restart at .35')
     params.update(kwargs)
-    return revise_serving_memory(cfg['project_root'], 'budget-test', **params)
+    return revise_config(cfg['project_root'], 'budget-test',
+                         updates={'serving.gpu_memory_utilization': params.pop('gpu_memory_utilization')}, **params)
 
 
 def test_only_memory_fraction_changes_and_revision_is_idempotent(cfg):
@@ -32,7 +33,7 @@ def test_only_memory_fraction_changes_and_revision_is_idempotent(cfg):
     assert result['changed_config_fields'] == ['serving.gpu_memory_utilization']
     assert all(sha256(run / name) == digest for name, digest in stable.items())
     assert read_json(run / 'config-revisions/gpu035/before/resolved-config.json') == old
-    assert read_json(run / 'events/config-revision-gpu035.json')['event'] == 'run.serving_memory_revised'
+    assert read_json(run / 'events/config-revision-gpu035.json')['event'] == 'run.config_revised'
     assert revise(cfg) == result
 
 

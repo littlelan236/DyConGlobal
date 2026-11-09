@@ -177,6 +177,121 @@ def make_event_split(samples, validation_fraction=0.2, test_fraction=0.2, seed=4
             "role_by_sample": role_by_sample}
 
 
+def make_event_twoway_split(samples, validation_fraction=0.2, seed=42):
+    """Source-stratified two-way events; singleton strata stay in train."""
+    import numpy as np
+    if not samples or not math.isfinite(validation_fraction) or not 0 < validation_fraction < 1:
+        raise ValueError('Two-way event split requires rows and validation_fraction in (0,1)')
+    strata = defaultdict(list)
+    for row in samples:
+        strata[row.get('source_kind', 'unknown')].append(row['sample_id'])
+    rng = np.random.default_rng(seed)
+    validation, allocations = set(), {}
+    for source, ids in sorted(strata.items()):
+        values = np.array(sorted(ids), dtype=object)
+        rng.shuffle(values)
+        count = min(len(ids)-1, max(1, round(len(ids)*validation_fraction))) if len(ids) > 1 else 0
+        validation.update(values[:count])
+        allocations[source] = {'train': len(ids)-count, 'validation': count}
+    ids = {role: [s['sample_id'] for s in samples if (s['sample_id'] in validation) == (role == 'validation')]
+           for role in ('train', 'validation')}
+    if not all(ids.values()) or sum(map(len, ids.values())) != len({s['sample_id'] for s in samples}):
+        raise ValueError('Two-way event split has duplicate IDs or empty train/validation')
+    return {'strategy': 'event_random_v1', 'seed': seed, 'validation_fraction': validation_fraction,
+            'sample_ids': ids, 'source_allocations': allocations,
+            'small_stratum_rule': 'singleton -> train; otherwise clamp(round(n*f),1,n-1)',
+            'sample_order_sha256': hash_json([s['sample_id'] for s in samples])}
+
+
+def make_task_holdout_split(rollouts, samples, test_fraction=0.2, seed=42,
+                            validation_fraction=0.2, inner_seed=42, manifest=None):
+    """Outer task holdout with a genuinely two-way inner event assignment."""
+    import numpy as np
+    if any(r.get('benchmark') == 'webarena_verified' for r in rollouts):
+        raise ValueError('WebArena task_holdout_event_v1 unsupported: existing template leakage constraint requires task_random_v1')
+    groups = defaultdict(list)
+    for row in rollouts:
+        groups[task_group(row)].append(row)
+    if len(groups) < 2:
+        raise ValueError('Outer holdout requires at least two task groups')
+    for rows in groups.values():
+        validate_same_task(rows)
+    if manifest is None:
+        if not math.isfinite(test_fraction) or not 0 < test_fraction < 1:
+            raise ValueError('Outer test_fraction must be in (0,1)')
+        ordered = np.array(sorted(groups), dtype=object)
+        np.random.default_rng(seed).shuffle(ordered)
+        count = min(len(groups)-1, max(1, round(len(groups)*test_fraction)))
+        tests = set(ordered[:count])
+        assignments = {group: 'test' if group in tests else 'train' for group in groups}
+        strategy = 'task_random_v1'
+    else:
+        entries = manifest.get('task_assignments', [])
+        by_key = {r.get('task_key'): r for r in entries}
+        expected = {r['task_key'] for r in rollouts}
+        if not entries or len(entries) != len(by_key) or set(by_key) != expected:
+            raise ValueError('Outer manifest must cover every task exactly once; unknown/duplicate/missing task')
+        assignments = {}
+        for group, rows in groups.items():
+            roles = set()
+            for row in rows:
+                entry = by_key[row['task_key']]
+                if entry.get('instance_id') != row['instance_id'] or entry.get('partition') not in {'train', 'test'}:
+                    raise ValueError('Outer manifest identity/partition mismatch')
+                roles.add(entry['partition'])
+            if len(roles) != 1:
+                raise ValueError('Outer manifest conflicts within logical task')
+            assignments[group] = roles.pop()
+        strategy = 'task_manifest_v1'
+    by_rollout = {r['rollout_id']: r for r in rollouts}
+    if len(by_rollout) != len(rollouts):
+        raise ValueError('Duplicate rollout ID')
+    trajectory_roles = {}
+    for row in rollouts:
+        role = assignments[task_group(row)]
+        if trajectory_roles.setdefault(row['trajectory_sha256'], role) != role:
+            raise ValueError('Identical trajectory crosses outer train/test')
+    outer = {'train': [], 'test': []}
+    for sample in samples:
+        row = by_rollout[sample['rollout_id']]
+        if sample['task_group'] != task_group(row):
+            raise ValueError('Sample/task identity mismatch')
+        outer[assignments[sample['task_group']]].append(sample['sample_id'])
+    if not all(outer.values()) or sum(map(len, outer.values())) != len({s['sample_id'] for s in samples}):
+        raise ValueError('Empty outer role or duplicate sample ID')
+    train_ids = set(outer['train'])
+    inner = make_event_twoway_split([s for s in samples if s['sample_id'] in train_ids], validation_fraction, inner_seed)
+    return {'schema_version': 5, 'strategy': 'task_holdout_event_v1', 'seed': seed,
+            'validation_fraction': validation_fraction, 'test_fraction': test_fraction if manifest is None else None,
+            'outer': {'strategy': strategy, 'seed': seed, 'test_fraction': test_fraction if manifest is None else None,
+                      'rounding_rule': 'min(G-1,max(1,round(G*f))); Python ties-to-even',
+                      'task_assignments': assignments, 'sample_ids': outer,
+                      'task_counts': dict(Counter(assignments.values())),
+                      'sample_counts': {k: len(v) for k, v in outer.items()},
+                      'actual_task_test_fraction': sum(r == 'test' for r in assignments.values())/len(assignments),
+                      'actual_event_test_fraction': len(outer['test'])/len(samples),
+                      'sample_order_hashes': {k: hash_json(v) for k, v in outer.items()},
+                      'manifest': manifest},
+            'inner': inner, 'sample_ids': inner['sample_ids'], 'outer_test_sample_ids': outer['test'],
+            'tasks': [{**task_descriptor(rows[0]), 'task_key': rows[0].get('task_key'), 'split': assignments[group]}
+                      for group, rows in sorted(groups.items())],
+            'rollouts': [{'rollout_id': row['rollout_id'], 'task_group': task_group(row),
+                          'trajectory_sha256': row['trajectory_sha256'], 'split': assignments[task_group(row)]}
+                         for row in sorted(rollouts, key=lambda r: r['rollout_id'])],
+            'task_counts': dict(Counter(assignments.values())),
+            'sample_counts': {k: len(v) for k, v in inner['sample_ids'].items()},
+            'actual_inner_validation_fraction': len(inner['sample_ids']['validation'])/len(outer['train']),
+            'sample_order_sha256': hash_json([s['sample_id'] for s in samples])}
+
+
+def training_partition_ids(split):
+    """Adapter for estimators; outer test remains separate in the frozen protocol."""
+    ids = dict(split['sample_ids'])
+    if split['strategy'] == 'task_holdout_event_v1':
+        ids['test'] = split['outer_test_sample_ids']
+    return ids
+
+
 def make_task_threeway_split(rollouts, samples, validation_fraction=0.2, test_fraction=0.2, seed=42):
     """Source-stratified three-way split with entire logical tasks as units.
 

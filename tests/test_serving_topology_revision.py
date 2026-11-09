@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from application.execution.capture_budget_revision import revise_serving_placement
+from application.execution.config_revision import revise_config
 from application.execution.run_plan import load_plan
 from core.io import hash_json, read_json, sha256, write_json
 from core.processes import identity
@@ -24,7 +24,11 @@ def revise(cfg, **overrides):
                 max_cpu_workers_per_gpu=2, gpu_memory_utilization=.4,
                 reason='User authorized topology conversion preserving progress')
     args.update(overrides)
-    return revise_serving_placement(cfg['project_root'], 'budget-test', **args)
+    reason, revision_id = args.pop('reason'), args.pop('revision_id')
+    updates = {'serving.' + key: value for key, value in args.items()}
+    updates['serving.tensor_parallel_size'] = 1
+    return revise_config(cfg['project_root'], 'budget-test', revision_id=revision_id,
+                         updates=updates, reason=reason)
 
 
 def test_conversion_preserves_samples_algorithm_and_audits_before_after(cfg):
@@ -87,12 +91,11 @@ def test_conversion_requires_stopped_and_clean_execution(cfg, active):
     assert sha256(run / 'resolved-config.json') == before
 
 
-def test_explicit_kv_bytes_rejects_ineffective_fraction(cfg):
+def test_explicit_kv_bytes_remains_explicit_when_fraction_changes(cfg):
     cfg = copy.deepcopy(cfg)
     cfg['serving']['kv_cache_memory_bytes'] = 1024
     cfg['config_hash'] = hash_json({k:v for k,v in cfg.items() if k != 'config_hash'})
     run = make_run(cfg)
-    before = sha256(run / 'resolved-config.json')
-    with pytest.raises(ValueError, match='Explicit KV'):
-        revise(cfg)
-    assert sha256(run / 'resolved-config.json') == before
+    revise(cfg)
+    current = load_plan(cfg['project_root'], run.name)['config']
+    assert current['serving']['kv_cache_memory_bytes'] == 1024

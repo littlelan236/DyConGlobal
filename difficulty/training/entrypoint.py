@@ -17,6 +17,13 @@ def run(cfg, training_config='difficulty/training/config.yaml'):
     if config is None:
         from difficulty.training.mlp_probe import run_probe
         return run_probe(cfg, 'mlp-' + uuid.uuid4().hex[:16], training_config_path=path)
+    return run_config(cfg, config, raw=raw, path=path)
+
+
+def run_config(cfg, config, *, raw, path):
+    """The same training service for file-based CLI and typed workflow callers."""
+    assert_frozen(cfg)
+    root = Path(cfg['project_root'])
     attempt_id = config.run.attempt_id
     if attempt_id == 'auto':
         attempt_id = (config.model.kind.replace('_', '-') + '-' +

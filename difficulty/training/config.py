@@ -104,6 +104,7 @@ class MLP(Strict):
 
 class Ridge(Strict):
     refit_train_validation: bool = False
+    plots_enabled: bool = True
     layers: list[int] | None = None
     alphas: list[float] = Field(default_factory=lambda: [1.0])
     standardize: Literal[True] = True

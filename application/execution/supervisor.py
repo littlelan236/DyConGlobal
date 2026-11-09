@@ -11,11 +11,34 @@ from pathlib import Path
 from uuid import uuid4
 
 from core.cancellation import policy, request_for
-from core.io import identifier, now, read_json, update_status, write_json
+from core.io import identifier, now, read_json, write_json
 from core.locking import directory_changes, file_lock
 from core.processes import enable_subreaper, identity, matches, members, signal_group
 
 from .run_plan import load_plan
+from .status import update_run_status
+
+
+def _apply_open_file_limit(cfg):
+    """Raise the supervisor soft FD limit and report effective bounds."""
+    import resource
+
+    configured = int(cfg.get('execution', {}).get('supervisor_max_open_files', 1024))
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if configured > hard:
+        raise RuntimeError(
+            f'execution.supervisor_max_open_files={configured} exceeds hard RLIMIT_NOFILE={hard}'
+        )
+    original_soft = soft
+    if configured > soft:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (configured, hard))
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    return {
+        'configured_max_open_files': configured,
+        'soft_limit': soft,
+        'hard_limit': hard,
+        'raised': soft > original_soft,
+    }
 
 
 def launch(root, run_id, *, resume=False, detach=False, check_only=False, task_ids=()):
@@ -149,7 +172,7 @@ def monitor_child(child, run, attempt, cfg):
                     started = time.monotonic() - max(0, time.time() - observed_unix)
                     if not prior:
                         write_json(ack, {**request, 'observed_unix': observed_unix, 'acknowledged_at': now()})
-                    update_status(run / 'status.json', 'cancelling', request_id=request.get('request_id'))
+                    update_run_status(run, 'cancelling', request_id=request.get('request_id'))
                 code = child.poll()
                 resources = _resources(run, attempt, started is not None or code is not None)
                 pending_spawns = [p.stem for p in (attempt / 'spawn-intents').glob('*.json')
@@ -199,14 +222,14 @@ def monitor_child(child, run, attempt, cfg):
     if code is not None:
         child.wait()
     remaining = [item for group in known.values() for item in group if matches(item) and identity(item['pid'])['state'] != 'Z']
-    cleanup = _cleanup_bounded(cfg, run, attempt) if request is not None or remaining else {'complete': True, 'not_required': True}
+    cleanup = _cleanup_bounded(cfg, run, attempt)
     termination = {'request_id': (request or {}).get('request_id'), 'signals': events, 'pending_spawns': pending_spawns,
                    'remaining_processes': remaining, 'processes_stopped': code is not None and not remaining,
                    'container_cleanup': cleanup, 'cleanup_complete': code is not None and not remaining and not pending_spawns and cleanup.get('complete', False),
                    'finished_at': now()}
     write_json(attempt / 'termination.json', termination)
     if request is not None:
-        update_status(run / 'status.json', 'cancelled' if termination['processes_stopped'] else 'cancelling',
+        update_run_status(run, 'cancelled' if termination['processes_stopped'] else 'cancelling',
                       cleanup_status='complete' if termination['cleanup_complete'] else 'failed',
                       cleanup_complete=termination['cleanup_complete'], request_id=request.get('request_id'))
     return code, termination
@@ -281,24 +304,32 @@ def supervise(root, run_id, attempt_id):
     run, cfg = loaded['run'], loaded['config']
     attempt = run / 'execution/attempts' / identifier(attempt_id)
     from .run_plan import _git_identity
-    write_json(attempt / 'code-identity.json', {'git': _git_identity(Path(root)), 'started_at': now(),
-                                             'frozen_config_hash': cfg['config_hash']})
-    options = read_json(attempt / 'options.json')
-    command = [sys.executable, '-m', 'core.cli', '--config', str(Path(root) / 'config.yaml'), 'rollout', run_id]
-    # Every supervisor owns an already-frozen run, including `run start`.
-    command.append('--resume')
-    if options['check_only']:
-        command.append('--check-only')
-    for task_id in options['task_ids']:
-        command.extend(('--task-id', task_id))
-    token = uuid4().hex
-    write_json(attempt / 'control.json', {'token': token})
-    (attempt / 'control.json').chmod(0o600)
-    env = {**os.environ, 'DYCON_SUPERVISED': '1', 'DYCON_EXECUTION_ATTEMPT': attempt.name,
-           'DYCON_EXECUTION_RUN': str(run), 'DYCON_CANCEL_TOKEN': token}
     code, error = None, None
     child = None
     try:
+        for name in ['resolved-config.json', 'plan.json', 'selection.json', 'tasks.json',
+                     'config.yaml', 'rollout/work-items.json', 'parallel-config.yaml']:
+            source = run / name
+            target = attempt / 'configuration' / name
+            if source.exists() and not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+        write_json(attempt / 'supervisor-limits.json', _apply_open_file_limit(cfg))
+        write_json(attempt / 'code-identity.json', {'git': _git_identity(Path(root)), 'started_at': now(),
+                                                 'frozen_config_hash': cfg['config_hash']})
+        options = read_json(attempt / 'options.json')
+        command = [sys.executable, '-m', 'core.cli', '--config', str(Path(root) / 'config.yaml'), 'rollout', run_id]
+        # Every supervisor owns an already-frozen run, including `run start`.
+        command.append('--resume')
+        if options['check_only']:
+            command.append('--check-only')
+        for task_id in options['task_ids']:
+            command.extend(('--task-id', task_id))
+        token = uuid4().hex
+        write_json(attempt / 'control.json', {'token': token})
+        (attempt / 'control.json').chmod(0o600)
+        env = {**os.environ, 'DYCON_SUPERVISED': '1', 'DYCON_EXECUTION_ATTEMPT': attempt.name,
+               'DYCON_EXECUTION_RUN': str(run), 'DYCON_CANCEL_TOKEN': token}
         with file_lock(run / 'execution/active-supervisor.lock', nonblocking=True):
             child = subprocess.Popen(command, cwd=root, env=env, start_new_session=True)
             code, _ = monitor_child(child, run, attempt, cfg)
@@ -310,8 +341,9 @@ def supervise(root, run_id, attempt_id):
                 code = child.wait(timeout=1)
             except Exception as stop_error:
                 error += '; child stop: ' + repr(stop_error)
+        cleanup = _cleanup_bounded(cfg, run, attempt)
         write_json(attempt / 'termination.json', {'cleanup_complete': False,
-                   'error': error, 'finished_at': now()})
+                   'container_cleanup': cleanup, 'error': error, 'finished_at': now()})
     finally:
         write_json(attempt / 'exit.json', {'exit_code': code, 'error': error, 'finished_at': now()})
     return code if code is not None else 1

@@ -43,6 +43,11 @@ class Environment(Strict):
     requirements_cache: str
 
 
+class Sandbox(Strict):
+    """Optional global task-container resource defaults."""
+    memory_mb: int | None = Field(default=None, gt=0)
+
+
 class Model(Strict):
     path: str | None
     fingerprint: str | None
@@ -157,9 +162,26 @@ def validate_generation_contract(cfg):
         raise ValueError("Frozen execution_context.generation differs from effective generation")
 
 
+def condenser_token_threshold(cfg):
+    """Resolve an explicit root token threshold; absent keys keep profile policy."""
+    options = cfg.get("agent", {})
+    if "condenser_max_tokens" not in options:
+        return None
+    threshold = options["condenser_max_tokens"]
+    if threshold is None:
+        threshold = cfg["serving"]["max_model_len"] - cfg["generation"]["max_tokens"] - 1
+    if type(threshold) is not int or threshold < 1024:
+        raise ValueError("agent.condenser_max_tokens must resolve to at least 1024 tokens; "
+                         "automatic threshold is serving.max_model_len - generation.max_tokens - 1")
+    return threshold
+
+
 class Agent(Strict):
     backend: Literal["minisweagent", "openhands"] = "minisweagent"
     profile_ref: str | None = None
+    condenser_max_tokens: int | None = Field(default=None, ge=1024)
+    condenser_max_size: int = Field(default=80, gt=0)
+    condenser_keep_first: int = Field(default=4, ge=0)
     step_limit: int = Field(gt=0)
     cost_limit: float = Field(ge=0)
     max_consecutive_format_errors: int = Field(gt=0)
@@ -169,6 +191,13 @@ class Agent(Strict):
     instance_template: str
     observation_template: str
     format_error_template: str
+
+    @model_validator(mode="after")
+    def validate_condenser(self):
+        if self.condenser_max_size // 2 - self.condenser_keep_first - 1 <= 0:
+            raise ValueError("agent.condenser_keep_first must be less than "
+                             "agent.condenser_max_size // 2 - 1")
+        return self
 
 
 class Images(Strict):
@@ -209,6 +238,8 @@ class Preflight(Strict):
 
 class Execution(Strict):
     sample_completion_token_budget: int | None = Field(default=None, gt=0)
+    # Soft RLIMIT_NOFILE for the run supervisor and its managed descendants.
+    supervisor_max_open_files: int = Field(default=262144, ge=1024)
     preflight: Preflight = Field(default_factory=Preflight)
     cancellation: Cancellation = Field(default_factory=Cancellation)
     limits_retry: LimitsRetry = Field(default_factory=LimitsRetry)
@@ -291,7 +322,7 @@ class CaptureExport(Strict):
     spool_high_watermark: float = Field(default=0.8, gt=0, lt=1)
     spool_low_watermark: float = Field(default=0.6, gt=0, lt=1)
     shard_max_bytes: int = Field(default=134217728, gt=0)
-    upload_workers: int = Field(default=2, gt=0, le=4)
+    upload_workers: int = Field(default=2, gt=0, le=24)
     upload_max_elapsed_seconds: int = Field(default=600, gt=0)
 
     @model_validator(mode="after")
@@ -336,6 +367,7 @@ class Capture(Strict):
     finalize_request_seconds: int | None = Field(default=None, gt=0)
     admission_seconds: int | None = Field(default=None, gt=0)
     finalize_seconds: int = Field(default=120, gt=0)
+    publication_seconds: int = Field(default=3600, gt=0)
     export: CaptureExport = Field(default_factory=CaptureExport)
 
 
@@ -498,6 +530,7 @@ class Config(Strict):
     schema_version: Literal[1]
     paths: Paths
     benchmark: Benchmark
+    sandbox: Sandbox = Field(default_factory=Sandbox)
     model: Model
     serving: Serving
     generation: Generation
@@ -537,6 +570,8 @@ class Config(Strict):
     def cross_fields(self):
         from core.backends import capabilities
         capabilities(self.model_dump())
+        if self.agent.backend == 'openhands' and 'condenser_max_tokens' in self.agent.model_fields_set:
+            condenser_token_threshold(self.model_dump())
         if self.execution.sample_completion_token_budget is not None and (
                 self.benchmark.backend != 'skillsbench' or self.agent.backend != 'openhands'):
             raise ValueError('sample_completion_token_budget currently requires SkillsBench/OpenHands')
@@ -628,17 +663,41 @@ def resolve(path, overrides=()):
         for key in keys[:-1]:
             target = target[key]
         allowed_identity_fields = {"benchmark.backend", "benchmark.snapshot_ref",
-                                   "agent.backend", "agent.profile_ref", "serving.allow_mig_sharing",
+                                   "agent.backend", "agent.profile_ref", "agent.condenser_max_size",
+                                   "agent.condenser_keep_first", "agent.condenser_max_tokens", "serving.allow_mig_sharing",
                                    "model.verify_identity"}
         if keys[-1] not in target and dotted not in allowed_identity_fields:
             raise ValueError(f"Unknown config field: {dotted}")
         target[keys[-1]] = yaml.safe_load(value)
-    cfg = Config.model_validate(raw).model_dump()
+    return resolve_values(raw, path, overrides=overrides)
+
+
+def resolve_values(raw, path, *, overrides=(), run_policy=False, source_sha256=None):
+    """Resolve validated in-memory input using the same rules as root YAML."""
+    path = Path(path).resolve()
+    if run_policy:
+        from core.parallel_policy import RunConfig
+        schema = RunConfig
+    else:
+        schema = Config
+    cfg = schema.model_validate(raw).model_dump()
+    if run_policy:
+        # Preserve absent optional policy members when revising legacy inputs.
+        # Explicit nulls remain distinct from missing values in revision diffs.
+        def prune_implicit_nulls(value, source):
+            if not isinstance(value, dict) or not isinstance(source, dict):
+                return
+            for key in list(value):
+                if key not in source and value[key] is None:
+                    del value[key]
+                elif key in source:
+                    prune_implicit_nulls(value[key], source[key])
+        prune_implicit_nulls(cfg.get('parallel', {}), raw.get('parallel', {}))
     # New serving modes must not change hashes of existing YAML configurations.
     for field in ("trajectory_sharding", "replica_base_urls", "max_cpu_workers_per_gpu", "startup_mode"):
         if field not in raw["serving"]:
             cfg["serving"].pop(field, None)
-    for section, fields in (("agent", ("backend", "profile_ref")),
+    for section, fields in (("agent", ("backend", "profile_ref", "condenser_max_size", "condenser_keep_first", "condenser_max_tokens")),
                             ("benchmark", ("backend", "snapshot_ref"))):
         for field in fields:
             if field not in raw[section] and not any(item.startswith(section + "." + field + "=")
@@ -665,6 +724,8 @@ def resolve(path, overrides=()):
         cfg['execution'].pop('startup_failure_limit', None)
     if 'sample_completion_token_budget' not in raw['execution']:
         cfg['execution'].pop('sample_completion_token_budget', None)
+    if 'supervisor_max_open_files' not in raw['execution']:
+        cfg['execution'].pop('supervisor_max_open_files', None)
     # Adding host storage configuration must not alter legacy config identities.
     if "docker_data_root" not in raw["environment"]:
         cfg["environment"].pop("docker_data_root", None)
@@ -712,7 +773,7 @@ def resolve(path, overrides=()):
     cfg.update(project_root=str(root), config_source=str(path), overrides=list(overrides))
     if cfg["steering"]["enabled"]:
         cfg["steering"]["payload_sha256"] = sha256(cfg["steering"]["payload"])
-    cfg["config_source_sha256"] = sha256(path)
+    cfg["config_source_sha256"] = source_sha256 if source_sha256 is not None else sha256(path)
     cfg["config_hash"] = hash_json(cfg)
     return cfg
 

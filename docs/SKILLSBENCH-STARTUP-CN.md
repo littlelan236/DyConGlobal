@@ -1,5 +1,8 @@
 # SkillsBench 启动预检与多卡服务启动
 
+Verifier 国内包索引、新 profile/任务兼容变体与验证入口见
+[SkillsBench verifier 包索引策略](SKILLSBENCH-VERIFIER-INDEX-CN.md)。
+
 在根 `config.yaml` 中配置，并通过正式 `dycon run create` 创建新 run：
 
 ```yaml
@@ -84,3 +87,71 @@ export-queue drain 两段 `capture.finalize_seconds`，另加 30 秒响应余量
 `serving/worker-pool.json` 和每个 worker 的 `launch.json` 记录 startup mode；各 worker 的 `startup-timing.json` 及 pool receipt 记录准备、进程创建、API 就绪和清理时间。`model_load_and_api_seconds` 是进程创建到 `/models` 就绪的总间隔，包含模型加载、engine 初始化和 API 启动，不能当作纯权重读取时间。
 
 可使用 `dycon run start RUN_ID --check-only` 做正式启动验收。用同一模型、同一组空闲 GPU、同一 NAS 存储分别创建 serial/parallel run，比较 worker timing 和整体墙钟时间。GPU 竞争、文件系统/page cache 和编译缓存状态会影响实测值；默认仍为 serial。
+
+
+## OpenHands 压缩器的根配置
+
+在根 `config.yaml` 的 `agent` 节设置 token 阈值、事件数量阈值和保留开头事件数：
+
+```yaml
+agent:
+  condenser_max_size: 80
+  condenser_keep_first: 4
+  condenser_max_tokens: null
+```
+
+这两个值分别传给原生 `LLMSummarizingCondenser.max_size` 和 `keep_first`。
+`max_size` 统计事件，不是 token 或 assistant step；事件数量超过阈值时触发压缩。
+默认值是 `80/4`。`condenser_keep_first` 可以为 0，必须满足
+`condenser_keep_first < condenser_max_size // 2 - 1`，给原生压缩器留出摘要和最近事件的位置。
+根配置通过严格类型校验拒绝负值、浮点值和不合法组合。
+`agent.condenser_max_tokens: null`（YAML 空值）表示自动使用
+`serving.max_model_len - generation.max_tokens - 1` 作为 token 压缩阈值。
+例如 `262144 - 98304 - 1 = 163839`。显式整数直接作为阈值，优先于 profile 中的值；
+省略该字段则沿用不可变 profile 的 `condenser_max_tokens`，保持旧配置的行为。
+显式或自动计算的阈值必须至少为 1024，自动值不满足时配置校验直接报错。
+不要写字符串 `none`；应写 `null` 或 `~`。token 与事件数量阈值可以同时启用。
+该设置适用于共用 OpenHands driver 的 SkillsBench 和 SWE-bench，要求现有已验证的依赖发布物；
+不会修改 profile 内容、profile 哈希或资格证据，也不需要重新发布 profile。
+
+新 run 会将事件设置和最终 token 阈值冻结到 `execution_context.condenser`；其中 `max_tokens`
+记录最终值，`max_tokens_source` 记录自动计算或根配置来源。运行时通过已有
+`OPENHANDS_CONDENSER_MAX_TOKENS` 环境变量传给原生压缩器，执行和恢复只读冻结设置。
+创建 run 后再改根配置不会影响该 run；旧 run 不会被补写新字段或改变 context hash。
+旧依赖快照可以继续使用原有 `80/4`；非默认设置必须绑定包含
+`configurable_condenser_events_v1` 适配记录的新依赖发布物，否则创建 run 时直接报错，避免静默忽略。
+
+现有统一发布入口支持从已验证的依赖快照离线派生新发布物，只更改 CLI 的压缩器设置适配及对应 wheel/lock 哈希：
+
+```bash
+.venvs/runner/bin/dycon skillsbench dependencies-build NEW_SNAPSHOT_ID \
+  --from-snapshot runtime/dependency-snapshots/EXISTING_SNAPSHOT_ID
+.venvs/runner/bin/dycon skillsbench profile NEW_TEMPLATE_ID \
+  --from-profile runtime/agent-profiles/EXISTING_PROFILE_ID/manifest.json \
+  --dependency-snapshot runtime/dependency-snapshots/NEW_SNAPSHOT_ID
+.venvs/runner/bin/dycon skillsbench qualify EXISTING_TOOL_PROBE_RUN NEW_QUALIFIED_ID \
+  --profile-ref runtime/agent-profiles/NEW_TEMPLATE_ID/manifest.json
+```
+
+资格迁移会完整校验父子发布物，只接受已知的压缩器源码差异、wheel RECORD 和锁定 hash 更新；
+SDK、tools、解释器或其他 CLI 改动不符合迁移条件。随后将根配置的 `agent.profile_ref`
+指向新 qualified profile，再通过标准 `run create/start` 创建和启动新 run。
+不要修改旧 run 快照或旧依赖发布物，也不要修改已安装的 site-packages。
+# 任务内存覆盖
+
+`dycon skillsbench profile NEW_PROFILE --from-profile PROFILE.json --memory TASK_ID:65536`
+以 MiB 为单位为指定任务设置 64 GiB 容器上限；`--memory` 可重复。新 profile 保持不可变，
+内存覆盖在支持或不支持 CPU quota 的 daemon 上均生效，并记录 resource-adaptation 回执。
+
+已有 run 必须先正式 cancel/wait 并确认 cleanup_complete，然后使用：
+
+```bash
+dycon run revise-config RUN_ID --revision-id memory64g --set sandbox.memory_mb=65536 --reason 'User requested 64 GiB'
+dycon run resume RUN_ID --detach
+```
+
+`sandbox.memory_mb` 是全局默认值，单位为 MiB，16 GiB 应填写 16384。既有 profile 的任务专属覆盖优先于全局默认值。
+统一接口同时支持其他配置字段，复用离线修订锁、前后快照和哈希审计；普通内存修订保留 selection、样本 seed 和历史结果。
+接口不宣称完成新 GPU 验证，详见[配置修订](CONFIG-REVISION-CN.md)。
+既有终态失败不会由 resume 自动重试，需先显式 `run retry-failed`。
+内存上限不是预分配，所有容器实际用量仍受主机内存容量约束。

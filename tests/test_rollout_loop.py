@@ -301,6 +301,9 @@ def test_runner_persists_loop_and_resumes_without_retry(cfg, monkeypatch, captur
         def __init__(self, *args, **kwargs):
             pass
 
+        def _request(self, *args, **kwargs):
+            return {}  # The capture flush now uses the shared control client.
+
         def start(self, *args, **kwargs):
             calls.append("start")
 

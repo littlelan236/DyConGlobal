@@ -8,8 +8,8 @@ from pathlib import Path
 from core.io import hash_json, sha256
 
 PYTEST_SUMMARY = re.compile(
-    r"(?m)^\s*=+\s*(?=[^\n]*\b[1-9]\d*\s+(?:passed|failed|errors?|xfailed|xpassed)\b)"
-    r"[^\n]*\b(?:passed|failed|errors?|xfailed|xpassed)\b[^\n]*=+\s*$", re.I)
+    r"(?m)^\s*=+\s*(?=[^\n]*\b[1-9]\d*\s+(?:passed|failed|xfailed|xpassed)\b)"
+    r"[^\n]*\b(?:passed|failed|xfailed|xpassed)\b[^\n]*=+\s*$", re.I)
 TERMINAL_DEPENDENCY = re.compile(
     r"(?m)^.*(?:ERROR:\s*(?:Could not install packages|No matching distribution found|"
     r"Could not find a version that satisfies|THESE PACKAGES DO NOT MATCH THE HASHES)|"
@@ -23,6 +23,84 @@ ABORT_CAUSE = re.compile(r"Caused by:|Failed to download after \d+ retr(?:y|ies)
                          r"Request failed after \d+ retr(?:y|ies)", re.I)
 RECOVERY = re.compile(r"Successfully installed|Installed \d+ packages?|"
                       r"\bcollected [1-9]\d* items?\b|={2,}\s*test session starts", re.I)
+
+DOWNLOAD_ABORT = re.compile(
+    r'(?im)^\s*error:\s*(?:Failed to download\s+[\x60]?([A-Za-z0-9_.-]+)'
+    r"|Request failed after\s+\d+\s+retr(?:y|ies))\b")
+DOWNLOAD_FETCH = re.compile(
+    r'(?im)^\s*Caused by:\s*Failed to fetch:?\s*[\x60]?'
+    r'https?://[^/\s]+/(?:[^/\s]+/)*simple/([A-Za-z0-9_.-]+)/?')
+INSTALL_CONTEXT = re.compile(
+    r"(?im)^\s*(?:Looking in indexes:|Collecting\s+[A-Za-z0-9_.-]+|"
+    r"Downloading\s+|Using CPython |Initialized project\s+|Resolved\s+\d+\s+packages?)")
+DOWNLOAD_TIMEOUT = re.compile(
+    r"(?im)(?:ReadTimeoutError|ConnectTimeoutError|WriteTimeoutError|PoolTimeout)")
+MISSING_IMPORT = re.compile(
+    r'(?im)No module named\s+([A-Za-z0-9_.-]+)')
+
+
+def _package_name(name):
+    return re.sub(r"[-_.]+", "-", (name or "").strip().lower())
+
+
+def _missing_for_package(log, package, start):
+    aliases = {
+        "opencv-python": {"cv2"},
+        "opencv-python-headless": {"cv2"},
+        "pillow": {"pil"},
+        "pyyaml": {"yaml"},
+        "beautifulsoup4": {"bs4"},
+        "pytest-json-ctrf": {"pytest_json_ctrf"},
+        "scikit-learn": {"sklearn"},
+        "python-dateutil": {"dateutil"},
+    }
+    expected = aliases.get(_package_name(package), {_package_name(package).replace("-", "_")})
+    return any(match.group(1).strip(" '\"").lower() in expected
+               for match in MISSING_IMPORT.finditer(log, start))
+
+
+def _same_package_recovered(log, package, start):
+    package = _package_name(package)
+    tail = log[start:]
+    for match in re.finditer(r"(?im)^\s*Successfully installed\s+([^\n]+)", tail):
+        installed = {_package_name(item.split("==", 1)[0]) for item in match.group(1).split()}
+        if package in installed:
+            return True
+    return bool(re.search(rf"(?im)^\s*\+\s+{re.escape(package)}==", tail))
+
+
+def _download_failure(log):
+    if not (INSTALL_CONTEXT.search(log) or DOWNLOAD_ABORT.search(log)
+            or re.search(r"(?im)^\s*error:\s*Request failed after\s+\d+\s+retr(?:y|ies)", log)):
+        return None
+    match = DOWNLOAD_ABORT.search(log)
+    if match:
+        package = match.group(1)
+        fetch = DOWNLOAD_FETCH.search(log, match.end())
+        if package and (ABORT_CAUSE.search(log, match.end()) or fetch):
+            if _same_package_recovered(log, package, match.end()):
+                return None
+            return package, _missing_for_package(log, package, match.end())
+        if fetch:
+            package = fetch.group(1)
+            if not _same_package_recovered(log, package, match.end()):
+                return package, _missing_for_package(log, package, match.end())
+    request = re.search(
+        r"(?im)^\s*error:\s*Request failed after\s+\d+\s+retr(?:y|ies)", log)
+    if request:
+        fetch = DOWNLOAD_FETCH.search(log, request.end())
+        if fetch:
+            package = fetch.group(1)
+            if not _same_package_recovered(log, package, request.end()):
+                return package, _missing_for_package(log, package, request.end())
+    if re.search(r"(?im)^\s*ERROR:\s*Exception:", log) and DOWNLOAD_TIMEOUT.search(log):
+        packages = list(re.finditer(r"(?im)^\s*Collecting\s+([A-Za-z0-9_.-]+)", log))
+        if packages:
+            package = packages[-1].group(1)
+            if not _same_package_recovered(log, package, packages[-1].end()):
+                return package, _missing_for_package(log, package, packages[-1].end())
+    return None
+
 
 
 def _read_json(path):
@@ -107,11 +185,14 @@ def inspect_ctrf(attempt_dir):
 
 
 def classify_verifier_logs(logs, *, ctrf_executed=False, task_completion_patterns=(), unreadable=False):
-    """Shared evidence policy, including the legacy bootstrap guard.
-
-    stdout/stderr have no shared chronology: recovery in a different stream
-    prevents automatic dependency reclassification. Retry text alone is Review.
-    """
+    """Shared evidence policy with conservative terminal download detection."""
+    if not unreadable:
+        for log in logs:
+            failure = _download_failure(log)
+            if failure is not None and failure[1]:
+                package, _ = failure
+                return 'VerifierError', (
+                    f'Verifier download failed for {package}; package remained missing at test collection')
     if ctrf_executed or any(PYTEST_SUMMARY.search(log) for log in logs):
         return 'ValidZero', 'Executed tests or pytest result summary found'
     if any(re.search(pattern, log, re.I) for pattern in task_completion_patterns for log in logs):
@@ -129,8 +210,12 @@ def classify_verifier_logs(logs, *, ctrf_executed=False, task_completion_pattern
             if failure.re is TERMINAL_DEPENDENCY:
                 return 'VerifierError', 'Verifier dependency/test launch failed: ' + failure.group(0).strip()[:180]
             return 'VerifierError', 'Verifier installer aborted after download/fetch failure'
+        for log in logs:
+            failure = _download_failure(log)
+            if failure is not None:
+                package, _ = failure
+                return 'VerifierError', f'Verifier download failed for {package} before test execution'
     return 'Review', 'Insufficient evidence of completed tests or final verifier failure'
-
 
 def classify_zero_reward_trajectory(attempt_dir, *, disposition, reward,
         evaluation_raw=None, evaluation_report=None, ctrf_expected=None,

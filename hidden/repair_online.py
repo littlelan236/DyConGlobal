@@ -216,7 +216,8 @@ def repair_online(cfg, run_id, *, rollout_ids=(), session_ids=(), apply=False, r
     root = Path(cfg["project_root"]).resolve()
     loaded = load_plan(root, run_id)
     cfg = loaded["config"]
-    if cfg.get("parallel", {}).get("enabled") and cfg["parallel"].get("branch_count", 1) > 1:
+    parallel = cfg.get("parallel", {}).get("enabled") and cfg["parallel"].get("branch_count", 1) > 1
+    if parallel and not pointwise:
         raise ValueError("Repair supports close-only capture without parallel branches")
     if cfg["capture"]["anchors"] != ["think_close"] or not cfg["capture"]["export"]["enabled"]:
         raise ValueError("Repair requires persisted close-only capture")
@@ -224,8 +225,23 @@ def repair_online(cfg, run_id, *, rollout_ids=(), session_ids=(), apply=False, r
         raise ValueError("--apply requires --repair-id")
     if pointwise:
         from hidden.repair_points import recover_points
+        if parallel:
+            from application.execution.capture_publication import freeze_selection, recover_spool
+            from hidden.archive_online import assert_inactive
+            if apply:
+                assert_inactive(run_id,root/cfg['capture']['export']['spool_root']/run_id)
+                recover_spool(cfg,run_id)
+            selection=freeze_selection(cfg,run_id,loaded['work_items']['items'],RunEvidence(root,run_id).read())
+            allowed_rollouts={row['rollout_id'] for row in selection['rollouts']}
+            allowed_sessions={row['session_id'] for row in selection['rollouts']}
+            if set(rollout_ids)-allowed_rollouts or set(session_ids)-allowed_sessions:
+                raise ValueError('Parallel repair requires final accepted canonical sessions')
+            if not rollout_ids and not session_ids:
+                rollout_ids=sorted(allowed_rollouts)
+            if not rollout_ids and not session_ids:
+                raise ValueError('No final accepted canonical sessions')
         return recover_points(cfg, run_id, rollout_ids=rollout_ids, session_ids=session_ids,
-                              apply=apply, repair_id=repair_id)
+                              apply=apply, repair_id=repair_id,visualization_parallel=parallel)
     evidence = RunEvidence(root, run_id).read()
     spool = root / cfg["capture"]["export"]["spool_root"] / run_id
     nas = Path(cfg["paths"]["nas_root"]) / cfg["capture"]["export"]["root"] / run_id

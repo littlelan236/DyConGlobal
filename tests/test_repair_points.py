@@ -89,3 +89,47 @@ def test_point_identity_conflict_never_silently_deduplicates(tmp_path,monkeypatc
     cfg,sid,sp,event=fixture(tmp_path,monkeypatch)
     with pytest.raises(ValueError,match='Contradictory'):
         _tensor([(sp,event),(sp,{**event,'query_id':'conflict'})],tmp_path/'nas',cfg,{})
+
+
+def test_upload_failure_does_not_seal_manifest_and_can_resume(tmp_path, monkeypatch):
+    import hidden.repair_points as points
+    cfg, sid, sp, event = fixture(tmp_path, monkeypatch)
+    original = points.publish_files
+    def fail_receipt(source, target, files, timeout):
+        if any(name.endswith('/sessions/' + sid + '/receipt.json') for name in files):
+            raise TimeoutError('upload timeout')
+        return original(source, target, files, timeout)
+    monkeypatch.setattr(points, 'publish_files', fail_receipt)
+    first = recover_points(cfg, 'run', session_ids=[sid], apply=True, repair_id='repair')
+    assert first['summary']['published_sessions'] == 0
+    assert not (tmp_path / 'nas/online/run/capture-repairs/repair/receipt.json').exists()
+    monkeypatch.setattr(points, 'publish_files', original)
+    second = recover_points(cfg, 'run', session_ids=[sid], apply=True, repair_id='repair')
+    assert second['summary']['published_sessions'] == 1
+
+
+def test_crash_between_report_and_manifest_resumes_immutable_payload(tmp_path, monkeypatch):
+    import hidden.repair_points as points
+    cfg, sid, sp, event = fixture(tmp_path, monkeypatch)
+    original = points.publish_files
+    def crash_manifest(source, target, files, timeout):
+        if 'capture-repairs/repair/receipt.json' in files:
+            raise TimeoutError('manifest ACK interrupted')
+        return original(source, target, files, timeout)
+    monkeypatch.setattr(points, 'publish_files', crash_manifest)
+    with pytest.raises(TimeoutError):
+        recover_points(cfg, 'run', session_ids=[sid], apply=True, repair_id='repair')
+    reportpath = tmp_path / 'nas/online/run/capture-repairs/repair/report.json'
+    digest = sha256(reportpath)
+    monkeypatch.setattr(points, 'publish_files', original)
+    result = recover_points(cfg, 'run', session_ids=[sid], apply=True, repair_id='repair')
+    assert result['summary']['published_sessions'] == 1
+    assert sha256(reportpath) == digest
+
+
+def test_duplicate_valid_native_coordinates_are_rejected(tmp_path, monkeypatch):
+    cfg, sid, sp, event = fixture(tmp_path, monkeypatch)
+    write_json(sp / 'index/duplicate.json', {**event, 'sample_id': 'duplicate'})
+    report = recover_points(cfg, 'run', session_ids=[sid], apply=True, repair_id='repair')
+    assert report['summary']['rejected_points'] == 2
+    assert report['sessions'][0]['coverage']['observed_native_exact'] == 0

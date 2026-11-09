@@ -12,8 +12,9 @@ from pathlib import Path
 
 from application.execution.evidence import RunEvidence
 from application.execution.run_plan import create_run, load_plan
+from application.execution.status import update_run_status
 from core.cancellation import CURRENT, Cancelled, CompletionWake, cancellable_run, policy, request_for
-from core.io import identifier, now, read_json, sha256, update_status, write_json
+from core.io import identifier, now, read_json, sha256, write_json
 from core.locking import exclusive_run, file_lock
 from rollout.artifacts import import_rollout
 from rollout.progress import Progress
@@ -137,6 +138,13 @@ def _finish_attempt(cfg, run_id, task, sample, context, out, runtime, state,
     write_json(out / 'execution-state.json', state)
     errors = list(state.get('capture_errors', []))
     capture_status = state.get('capture_status', 'disabled')
+    attempt_capture_diagnostics = {
+        'schema_version': 1, 'run_id': run_id,
+        'execution_attempt_id': os.environ.get('DYCON_EXECUTION_ATTEMPT'),
+        'sample_key': sample.sample_key, 'attempt_id': context.get('attempt_id'),
+        'session_id': capture_session_id, 'stage': 'finalize',
+        'errors': list(state.get('capture_diagnostic_errors', []))[:32],
+    }
     if capture_session_id is not None:
         try:
             recovered_status = _recover_capture_status(cfg, run, capture_session_id, rid, sha256(canonical)) if recovering else None
@@ -149,12 +157,23 @@ def _finish_attempt(cfg, run_id, task, sample, context, out, runtime, state,
                     capture_session_id, rollout_id=rid, trajectory_path=str(canonical),
                     trajectory_sha256=sha256(canonical), model_fingerprint=cfg['model']['fingerprint'])
                 capture_status = finalized['capture_status']
+                server_diagnostics = finalized.get('capture_diagnostics') or {}
+                server_diagnostics = server_diagnostics.get('stages') or {}
+                for key in ('schema_version', 'stage', 'run_id', 'execution_attempt_id',
+                            'sample_key', 'attempt_id', 'session_id', 'stages', 'by_anchor',
+                            'by_request', 'missing', 'missing_count', 'missing_by_anchor',
+                            'truncated_count', 'position_truncated_count', 'queue'):
+                    if key in server_diagnostics:
+                        attempt_capture_diagnostics[key] = server_diagnostics[key]
                 if capture_status not in {'complete', 'not_exported'}:
                     raise RuntimeError('Capture is ' + capture_status)
             else:
                 raise RuntimeError('Capture finalization requires recovery of session ' + capture_session_id + '; use dycon capture recover')
         except Exception as exc:
             capture_status = 'partial'
+            diagnostic = getattr(exc, 'capture_diagnostic', None)
+            if diagnostic:
+                attempt_capture_diagnostics.setdefault('errors', []).append(diagnostic)
             errors.append(repr(exc))
             write_json(out / 'capture-errors.json', errors)
     # Delete raw bytes only after import. Unacknowledged capture spool is untouched.
@@ -183,6 +202,12 @@ def _finish_attempt(cfg, run_id, task, sample, context, out, runtime, state,
         result['dependency_failure'] = dependency_failure
         result['failure_type'] = 'dependency_error'
     result['disposition'] = 'blocked' if status in {'CaptureError', 'StatisticsError', 'CleanupError', 'WebTraceError'} else disposition(cfg, status)
+    if capture_session_id is not None or attempt_capture_diagnostics.get('errors'):
+        try:
+            # Derived diagnostics are best-effort and cannot affect rollout status.
+            write_json(out / 'capture-diagnostics.json', attempt_capture_diagnostics)
+        except Exception:
+            pass
     write_json(out / 'attempt.json', result)
     return result
 
@@ -235,6 +260,9 @@ def _execute_mini_attempt(cfg, run_id, task, factory, runtime, sample, context, 
     stage_start = time.monotonic()
 
     def capture_failure(exc, abort=True):
+        diagnostic = getattr(exc, 'capture_diagnostic', None)
+        if diagnostic:
+            state.setdefault('capture_diagnostic_errors', []).append(diagnostic)
         capture_errors.append(repr(exc))
         write_json(out / 'capture-errors.json', capture_errors)
         if abort and cfg['capture']['failure_policy'] == 'block_rollout':
@@ -259,7 +287,9 @@ def _execute_mini_attempt(cfg, run_id, task, factory, runtime, sample, context, 
                 capture_client = CaptureClient(runtime['capture_control_url'], timeout=cfg['capture']['control_seconds'])
                 capture_session_id = capture_context['session_id']
                 write_json(out / 'capture-session.json', {'session_id': capture_session_id, 'metadata': capture_context})
-                capture_client.start(capture_context, graph_mode='FULL', prefix_cache_policy='safe_boundary')
+                capture_client.start(capture_context, graph_mode='FULL', prefix_cache_policy='safe_boundary',
+                    diagnostic_identity={'run_id': run_id, 'execution_attempt_id': os.environ.get('DYCON_EXECUTION_ATTEMPT'),
+                                         'sample_key': sample.sample_key, 'attempt_id': attempt_id})
             except Exception as exc:
                 capture_context = False
                 capture_status = 'failed'
@@ -323,12 +353,19 @@ def _execute_mini_attempt(cfg, run_id, task, factory, runtime, sample, context, 
                     try:
                         import requests
                         endpoint = cfg['serving']['base_url'].removesuffix('/v1').rstrip('/')
-                        flushed = requests.post(endpoint + '/dycon/capture/engine/flush',
-                            json={'session_id': capture_session_id},
-                            timeout=cfg['capture'].get('flush_timeout_seconds') or cfg['capture']['finalize_seconds'])
-                        flushed.raise_for_status()
-                        if flushed.json().get('failures'):
-                            raise RuntimeError('Capture drain failed: ' + str(flushed.json()['failures']))
+                        from hidden.backends.vllm.online import CaptureClient
+                        flush_result = CaptureClient(endpoint, timeout=cfg['capture'].get('flush_timeout_seconds') or cfg['capture']['finalize_seconds'])._request(
+                            'POST', '/dycon/capture/engine/flush', {'session_id': capture_session_id})
+                        try:
+                            plugin_diagnostics = flush_result.get('stage_diagnostics')
+                            if plugin_diagnostics:
+                                capture_client.report_diagnostics(capture_session_id, plugin_diagnostics)
+                        except Exception as diagnostic_exc:
+                            diagnostic = getattr(diagnostic_exc, 'capture_diagnostic', None)
+                            if diagnostic:
+                                state.setdefault('capture_diagnostic_errors', []).append(diagnostic)
+                        if flush_result.get('failures'):
+                            raise RuntimeError('Capture drain failed: ' + str(flush_result['failures']))
                     except Exception as exc:
                         capture_failure(exc, abort=False)
                         capture_status = 'partial'
@@ -476,19 +513,28 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
         boundary = _boundary(run, factory)
         if boundary:
             return {**sample.as_dict(), 'exit_status': boundary, 'disposition': 'pending'}
-        from application.execution.failed_retry import retry_index, superseded
+        from application.execution.failed_retry import (
+            retry_index, superseded, supersede_incomplete_attempt, worker_failure_authorization,
+        )
         operator_retries = runtime.get('operator_retries')
         if operator_retries is None:
             operator_retries = retry_index(run)
         result_path = work / 'result.json'
+        worker_authorization = worker_failure_authorization(operator_retries, sample.sample_key)
+        operator_predecessor = None
         if result_path.exists():
             old = read_json(result_path)
             if old.get('sample_key') != sample.sample_key:
                 raise ValueError('Completed sample identity changed')
-            if sample_settled(cfg, old) and not superseded(operator_retries, sample.sample_key, old):
+            old_superseded = superseded(operator_retries, sample.sample_key, old)
+            if sample_settled(cfg, old) and not old_superseded:
                 if sample_accepted(cfg, old):
                     verify_final(cfg['project_root'], run_id, sample.as_dict(), old, RunEvidence(cfg['project_root'], run_id).read())
                 return old
+            if old_superseded and old.get('attempt_id') is None:
+                operator_predecessor = old
+        elif worker_authorization is not None:
+            operator_predecessor = worker_authorization['outcome']
         manifest = runtime.get('work_items')
         if manifest is None:
             manifest = {'run_id': run_id, 'repeat_count': 1, 'items': [sample.as_dict()],
@@ -499,7 +545,8 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
         attempts.mkdir(parents=True, exist_ok=True)
         pattern = re.compile(re.escape(sample.attempt_prefix) + r'-(\d+)$')
         existing = sorted((int(m.group(1)), p) for p in attempts.iterdir() if (m := pattern.fullmatch(p.name)))
-        history = []
+        history = ([{**operator_predecessor, 'disposition': 'operator_retry'}]
+                   if operator_predecessor is not None else [])
         reserved = None
         for _, out in existing:
             context_path = out / 'attempt-context.json'
@@ -520,6 +567,10 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
             result = read_json(outcome_path) if outcome_path.exists() else None
             if result is not None and superseded(operator_retries, sample.sample_key, result):
                 history.append({**result, 'disposition': 'operator_retry'})
+                continue
+            if (result is None and context
+                    and supersede_incomplete_attempt(run, sample.sample_key, worker_authorization, out, context)):
+                history.append({**context, 'exit_status': 'WorkerFailure', 'disposition': 'operator_retry'})
                 continue
             needs_recovery = result is None or result.get('disposition') == 'blocked'
             if context and needs_recovery:
@@ -563,7 +614,10 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
         if reserved:
             out, context = reserved
         else:
-            number = max((n for n, _ in existing), default=-1) + 1
+            floors_path = run / 'rollout/replan-attempt-floors.json'
+            floors = read_json(floors_path) if floors_path.exists() else {}
+            floor = floors.get(sample.instance_id + '/' + sample.repetition_id, -1)
+            number = max([floor, *(n for n, _ in existing)]) + 1
             attempt_id = f'{sample.attempt_prefix}-{number:03d}'
             out = attempts / attempt_id
             out.mkdir(exist_ok=True)
@@ -635,22 +689,23 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
             if result.get('sample_key') != item['sample_key']:
                 raise ValueError('Completed sample identity changed')
             if sample_settled(cfg, result) and not superseded(operator_retries, item['sample_key'], result):
-                if sample_accepted(cfg, result):
+                if result.get('disposition') == 'accepted':
                     verify_final(root, run_id, item, result, evidence)
                 settled[item['sample_key']] = result
         if len(settled) == len(work_items):
             tracker = Progress(run, cfg, work_items, settled)
             tracker._write()
             failed = [k for k, v in settled.items() if not sample_accepted(cfg, v)]
-            update_status(run / 'status.json', 'failed' if failed else 'complete', failed=failed)
+            update_run_status(run, 'failed' if failed else 'complete', failed=failed)
+            _finalize_capture_publication(cfg, run_id, work_items)
             return settled
     if factory is not None:
         boundary = _boundary(run, factory)
         if boundary:
-            update_status(run / 'status.json', 'cancelled' if boundary == 'Cancelled' else 'failed', reason=boundary)
+            update_run_status(run, 'cancelled' if boundary == 'Cancelled' else 'failed', reason=boundary)
             return settled
     elif request_for(run, os.environ.get('DYCON_EXECUTION_ATTEMPT')) is not None:
-        update_status(run / 'status.json', 'cancelled', reason='Cancelled')
+        update_run_status(run, 'cancelled', reason='Cancelled')
         return settled
     # Recover capture publication using the established no-model recovery path.
     if resume and cfg.get('capture', {}).get('enabled'):
@@ -676,7 +731,8 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
     backend_context = adapter.open_run(cfg, run_id, factory=factory)
     factory = backend_context.factory
     outcomes = dict(settled)
-    update_status(run / "status.json", "rollout")
+    capture_producers = []
+    update_run_status(run, "rollout")
     try:
         checked = adapter.preflight(backend_context, selection["tasks"])
         if not checked.passed:
@@ -689,6 +745,8 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
             context = ServingManager(cfg, run / 'serving')
         with context as serving:
             runtime = {} if sharded else getattr(serving, 'runtime', {})
+            capture_producers = ([worker.manager.runtime.get('capture_controller') for worker in serving.workers]
+                                 if sharded else [runtime.get('capture_controller')])
             worker_limit = serving.capacity if sharded else cfg['execution']['rollout_workers']
             cancellation = CURRENT.get()
             runtime['cancellation'] = cancellation
@@ -733,7 +791,7 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
                 adapter.agent_class()
                 adapter.environment_class()
             if check_only:
-                update_status(run / "status.json", "validated")
+                update_run_status(run, "validated")
                 return {"startup": "passed"}
             # Explicit failed-task reruns go first, ahead of untouched pending tasks.
             pending = deque(sorted((item for item in work_items if item['sample_key'] not in settled),
@@ -823,46 +881,41 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
                     # Requeue before refilling; a temporarily empty running set is not completion.
                     fill()
             if stopped:
-                update_status(run / 'status.json', 'cancelled' if stopped == 'Cancelled' else 'failed',
+                update_run_status(run, 'cancelled' if stopped == 'Cancelled' else 'failed',
                               reason=stopped, pending_samples=len(work_items) - sum(sample_accepted(cfg, v) for v in outcomes.values()))
                 if counts_recorded(run):
                     rebuild_counts(run, loaded['work_items'])
                 return outcomes
-        if cfg["capture"]["enabled"] and cfg["capture"]["export"]["enabled"]:
-            from enrichment.online_trace import finalize_token_events
-
-            source = Path(cfg["paths"]["nas_root"]) / cfg["capture"]["export"]["root"] / run_id
-            target = root / "runs" / run_id / "enrichment/online"
-            if not target.exists() and (source / "requests").exists():
-                try:
-                    inventory = read_json(source / "inventory.json")
-                    finalize_token_events(
-                        source,
-                        target,
-                        open_ids=inventory.get("open_token_ids", [248068]),
-                        close_ids=inventory["close_token_ids"],
-                    )
-                except Exception as exc:
-                    write_json(run / "capture-finalization-error.json", {"error": repr(exc)})
-                    if cfg["capture"]["failure_policy"] == "block_rollout":
-                        from runtime.serving.errors import CaptureError
-
-                        raise CaptureError(str(exc)) from exc
         if counts_recorded(run):
             rebuild_counts(run, loaded['work_items'])
         tracker._write()
         failed = [item['sample_key'] for item in work_items
                   if not sample_accepted(cfg, outcomes.get(item['sample_key'], {}))]
-        update_status(run / "status.json", "failed" if failed else "complete", failed=failed)
+        update_run_status(run, "failed" if failed else "complete", failed=failed)
         return outcomes
     except Cancelled:
-        update_status(run / 'status.json', 'cancelling', reason='Cancelled')
+        update_run_status(run, 'cancelling', reason='Cancelled')
         return outcomes
     except BaseException as exc:
-        update_status(run / "status.json", "failed", error=repr(exc))
+        update_run_status(run, "failed", error=repr(exc))
         raise
     finally:
-        adapter.close_run(backend_context, CURRENT.get())
+        try:
+            adapter.close_run(backend_context, CURRENT.get())
+        finally:
+            if not check_only:
+                _finalize_capture_publication(cfg, run_id, work_items, producers=capture_producers)
+
+
+def _finalize_capture_publication(cfg, run_id, work_items, *, producers=()):
+    # run_manifest owns the run lock. All worker/serving/backend contexts have
+    # exited before this call, including cancellation and exception paths.
+    try:
+        from application.execution.capture_publication import finalize_capture_publication
+        return finalize_capture_publication(cfg, run_id, items=work_items, producers=producers)
+    except Exception:
+        # Even an import or summary-storage failure cannot change rollout facts.
+        return None
 
 
 def admitted_task(cfg, run_id, key, task, factory, runtime, sample=None):

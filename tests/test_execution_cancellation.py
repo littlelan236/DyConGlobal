@@ -91,14 +91,45 @@ def test_container_cleanup_exact_execution_and_no_image_prune():
     from runtime.containers.factory import cleanup_execution_containers
     removed, calls = [], []
     container = SimpleNamespace(id='owned', labels={'dycon.project': '/p', 'dycon.run': 'r', 'dycon.execution': '004'},
-                                remove=lambda force: removed.append('owned'))
+                                remove=lambda force: removed.append('owned'), reload=lambda: None)
     def listed(**kwargs):
         calls.append(kwargs)
         return [] if removed else [container]
     result = cleanup_execution_containers({'project_root': '/p'}, 'r', '004',
-                                         client=SimpleNamespace(containers=SimpleNamespace(list=listed)))
+                                         client=SimpleNamespace(containers=SimpleNamespace(list=listed),
+                                             networks=SimpleNamespace(list=lambda **kw: [])))
     assert result['complete'] and removed == ['owned']
     assert calls[0]['filters']['label'] == ['dycon.project=/p', 'dycon.run=r', 'dycon.execution=004']
+
+
+def test_container_cleanup_removes_only_owned_empty_networks():
+    from runtime.containers.networks import cleanup_owned_resources
+    removed = []
+    class Resource:
+        def __init__(self, kind, labels):
+            self.id = kind
+            self.labels = labels
+            self.attrs = {'Labels': labels, 'Containers': {}}
+        def reload(self):
+            return None
+        def remove(self, **kwargs):
+            removed.append(self.id)
+    labels = {'dycon.project': '/p', 'dycon.run': 'r', 'dycon.execution': '004'}
+    owned = Resource('owned-network', labels)
+    foreign = Resource('foreign-network', {'dycon.project': '/p', 'dycon.run': 'other', 'dycon.execution': '004'})
+    class Client:
+        class containers:
+            @staticmethod
+            def list(**kwargs):
+                return []
+        class networks:
+            @staticmethod
+            def list(**kwargs):
+                return ([] if owned.id in removed else [owned]) if kwargs.get('filters') else [owned, foreign]
+    result = cleanup_owned_resources({'project_root': '/p', 'environment': {'docker_host': 'fixture'}},
+        {'project': '/p', 'run': 'r', 'execution': '004'}, client=Client())
+    assert result['complete'] and result['removed_networks'] == ['owned-network']
+    assert removed == ['owned-network']
 
 
 def test_cancelled_never_becomes_a_seed_or_infrastructure_retry():

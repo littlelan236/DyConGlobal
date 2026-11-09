@@ -13,6 +13,8 @@ cd /home/wangtianyi/DyConGlobal
 
 `images-check` 校验已登记镜像，不等于任务容器和 harness 的完整启动验收。按需运行对应 benchmark 的 preflight 或 `harness ... --gold` 环境检查。
 
+`execution.supervisor_max_open_files` 设置 supervisor 及其管理子进程的软文件描述符上限。新 run 会冻结该值，并在 `execution/attempts/<attempt>/supervisor-limits.json` 记录实际软/硬限制；它不能超过主机硬限制，也不能替代控制并发和检查 FD 生命周期。
+
 ## 2. 创建并运行 rollout
 
 单次采样：
@@ -52,16 +54,24 @@ cd /home/wangtianyi/DyConGlobal
 
 ### Recover or retry
 
-优先用原阶段的恢复命令，例如 `capture recover RUN_ID` 恢复已存在的 capture 发布。只有确认 worker 已结束、清理状态完整，且明确需要重新执行选定失败样本时，才登记 `run retry-failed` 请求；之后通过 `run resume` 处理。每次新的主动重跑使用新的 request ID。CaptureError、pending recovery 或未确认的 spool 不应直接换 seed 重跑。
+优先用原阶段的恢复命令，例如 `capture recover RUN_ID` 恢复已存在的 capture 发布。只有确认 worker 已结束、清理状态完整，且明确需要重新执行选定失败样本时，才登记 `run retry-failed` 请求；之后通过 `run resume` 处理。每次新的主动重跑使用新的 request ID。使用可重复的 `--sample-key` 精确绑定 task/repetition，使用可重复的 `--exit-status` 指定要纳入的失败类型；不传 `LimitsExceeded` 即不会登记该类型。没有物理 attempt 的 `WorkerFailure` 也可以精确重跑：统一接口会从 `progress.json` 归档原始游标，`run resume` 再创建新的物理 attempt，并保留原证据。CaptureError、pending recovery 或未确认的 spool 不应直接换 seed 重跑；先执行 `capture recover RUN_ID`，确认已有证据已恢复或明确无法恢复后再登记重跑。
 
 ```bash
 .venvs/runner/bin/dycon run retry-failed RUN_ID \
-  --request-id REQUEST_ID --exit-status EXIT_STATUS \
-  --task-id INSTANCE_ID --reason "reason"
+  --request-id REQUEST_ID \
+  --exit-status OpenHandsError --exit-status WorkerFailure \
+  --sample-key SAMPLE_KEY_1 --sample-key SAMPLE_KEY_2 \
+  --reason "reason"
 .venvs/runner/bin/dycon run resume RUN_ID --detach
 ```
 
 详细边界见[入口约定](ENTRYPOINTS.md#runs-samples-and-attempts)与[capture 指南](CAPTURE-CN.md)。
+
+对于仅记录在 `progress.json`、没有 `result.json` 的 `WorkerFailure`，显式 `retry-failed` 请求会归档失败游标，并绑定已有未完成 attempt 的 context/start 哈希。后续 `resume` 从请求归档读取授权，不依赖重新生成的 progress 游标；跳过已授权的旧恢复路径，在 `rollout/operator-retry-consumptions/REQUEST_ID/SAMPLE_KEY/` 写消费回执，再以同一 seed round 创建新的物理 attempt。旧轨迹、capture、预算及身份文件原样保留。历史请求缺少目录快照时，仅允许绑定请求时间及之前执行范围内的旧 attempt，并记录解析结果；请求之后产生的新 attempt 仍走正常恢复，同一请求不会反复创建新 attempt。
+
+### 配置修订
+
+已有 run 的参数通过 `dycon run revise-config RUN_ID --revision-id ID --set sandbox.memory_mb=16384 --reason 'Increase memory'` 修订；先用 `--dry-run` 预览，应用前正式停止并确认清理完成。身份字段也可修改，需要显式 `--replan` 归档原状态。旧的专用字段修订命令已移除，完整参数、YAML patch 和恢复流程见[统一配置修订](CONFIG-REVISION-CN.md)。
 
 ## 5. 在线采集和 token 分析
 
@@ -85,7 +95,7 @@ cd /home/wangtianyi/DyConGlobal
 .venvs/analysis/bin/dycon difficulty-dataset resolved DATASET_ID \
   --source-run RUN_ID --index-id INDEX_ID
 .venvs/analysis/bin/dycon difficulty-split DATASET_ID SPLIT_ID
-.venvs/analysis/bin/dycon difficulty-train ATTEMPT_ID --training-config CONFIG.yaml
+.venvs/analysis/bin/dycon difficulty-train --training-config CONFIG.yaml
 ```
 
 Action 与 difficulty 产物位于项目级目录，使用显式来源 run 和固定选择。difficulty 数据集、划分和训练配置不可互相替代；详细命令、数据语义及预测器发布见各自模块 README。
@@ -109,3 +119,70 @@ SkillsBench、WebArena Verified、SWE-bench、Harbor 的 task 导入、容器准
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | skillsbench-agent75-r3-qwen36-27b-positive-gpu23-tp1-20261031 | +0.00% | +0.00% | +0.00% | +0.00% | +0.00% | +0.00% | +0.00% | +0.00% |
 | skillsbench-test57-r3-consensus32-train30-gpu0123-tp1-w4-s64-20261102 | -41.54% | -51.66% | -20.18% | -20.54% | -36.69% | -21.05% | -5.09% | -5.09% |
+
+
+## 追加 repetition 与重跑 accepted partial capture
+
+以下命令只登记计划；随后用 run resume 正式执行。操作前要求原执行退出且
+cleanup receipt 完整。Capture 异常应先检查并尝试恢复已有证据，保留旧 spool。
+
+所有当前 TimeoutError（failed/blocked）与 accepted 且 capture partial 的并集：
+
+    .venvs/runner/bin/dycon run retry-failed RUN_ID --request-id RETRY_ID --exit-status TimeoutError --accepted-capture-partial --reason 'Explicitly rerun timeout and partial capture samples'
+
+仅重跑 accepted 且 capture partial：省略 --exit-status。
+
+    .venvs/runner/bin/dycon run retry-failed RUN_ID --request-id PARTIAL_RETRY_ID --accepted-capture-partial --reason 'Explicitly rerun partial capture samples'
+
+为所有冻结 task 各追加 1 次独立 repetition，先预览：
+
+    .venvs/runner/bin/dycon run add-repetitions RUN_ID --request-id APPEND_ID --count 1 --reason 'Add one independent repetition' --dry-run
+
+将预览中的 old_plan_sha256 填入 HASH 后应用：
+
+    .venvs/runner/bin/dycon run add-repetitions RUN_ID --request-id APPEND_ID --count 1 --reason 'Add one independent repetition' --expect-plan-hash HASH
+    .venvs/runner/bin/dycon run resume RUN_ID --detach
+
+--count 是追加次数，针对所有冻结 task；例如原 5 次追加 1 次，新增 rep-005，
+总数变成 6 次，不重建旧结果。新样本和主动重跑都使用统一调度入口。
+重跑筛选默认覆盖整个 run；仅处理指定 sample 时重复传入 --sample-key，
+可配合 --expect-attempt SAMPLE_KEY=ATTEMPT_ID 固定当前物理 attempt。
+
+追加事务中断时，使用原 request ID 和原 reason 执行：
+
+    .venvs/runner/bin/dycon run add-repetitions RUN_ID --request-id APPEND_ID --recover --reason REASON
+
+恢复时不传 --count；存在未完成事务时执行入口会拒绝启动。seed 分配及审计规则见
+[入口契约](ENTRYPOINTS.md#append-repetitions-and-explicitly-rerun-accepted-partial-capture)。
+
+
+### 启动前核验实际队列
+
+将重跑与追加 repetition 连用时，先登记 retry-failed，再执行 add-repetitions，
+最后统一 resume。--count 10 表示每个冻结 task 追加 10 次；原 5 次变成 15 次，
+新增 rep-005 至 rep-014。75 个 task 将新增 750 个独立 sample。
+
+重跑队列应以 rollout/operator-retries/REQUEST_ID/request.json 中实际登记的 items、
+它们的归档原始终态、统一 retry index 中的 superseded 身份及当前状态投影为依据。
+不要只按登记前的筛选条件计数。启动前按 previous_exit_status 汇总实际 Pending 的
+重跑 sample，并单独报告新增 repetition sample 的数量；新样本没有历史终态，不应
+并入 TimeoutError 等重跑类别。仍处于 accepted 且 capture complete 的旧样本保留，
+其他未明确授权的失败也不自动重跑。
+
+
+## Dataset Ridge 两层划分评估
+
+已有具备训练资格的 difficulty dataset 时，使用统一入口完成 task 留出、内层 event 选优、重拟合及全部 test 轨迹评估：
+
+```bash
+.venvs/analysis/bin/dycon difficulty-ridge-holdout NEW_EVALUATION_ID \
+  --workflow-config difficulty/training/experiments/ridge-holdout.yaml
+.venvs/analysis/bin/dycon artifact verify NEW_EVALUATION_ID --scope difficulty-evaluation
+```
+
+先编辑 workflow YAML 选择 dataset；`run.mode: dry-run` 只核验来源与划分，`check-data` 再检查 hidden/cache，`fit` 实际拟合。
+各模式都使用新 ID，不覆盖已有输出。`visualization.enabled: false` 跳过绘图，保留预测、指标与 coverage audit。
+这项工作只消费已发布数据，不执行 rollout 或 hidden 重放。
+
+完整参数、显式 task manifest、恢复命令、产物位置及本次真实验收结果见
+[Dataset Ridge 任务留出评估与全量轨迹可视化](DIFFICULTY-RIDGE-HOLDOUT-CN.md)。

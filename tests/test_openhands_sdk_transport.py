@@ -5,7 +5,7 @@ import pytest
 import requests
 from runtime.agents import openhands_transport as transport
 from runtime.agents.skillsbench import _acp_details
-from rollout.adapters.openhands_bridge import OpenHandsBridge
+from rollout.adapters.openhands_bridge import OpenHandsBridge, upstream_error_evidence
 from core.deadline import Deadline
 
 @pytest.mark.parametrize('kind,phase', [(httpx.ConnectTimeout,'connect'),(httpx.ReadTimeout,'read'),(httpx.WriteTimeout,'write'),(httpx.PoolTimeout,'pool')])
@@ -60,6 +60,49 @@ def test_sdk_event_whitelist_discards_credentials():
     assert row['http_timeout']=={'read':3}
     assert row['exception_types']==['httpx.ReadTimeout']
     assert 'secret' not in json.dumps(row) and 'prompt' not in json.dumps(row)
+
+def test_upstream_error_response_has_bounded_safe_summary():
+    response=httpx.Response(500,json={'error':{
+        'type':'InternalServerError','code':'engine_error','param':None,
+        'message':'backend failure token=secret https://private.invalid/detail'}},
+        request=httpx.Request('POST','http://127.0.0.1/v1/chat/completions'))
+    evidence=transport.response_error_evidence(response)
+    row=transport.safe_event({'event':'sdk_http_finished','sdk_request_id':'sdk-'+'a'*32,
+        'http_status':500,**evidence})
+    assert row['http_error_type']=='InternalServerError'
+    assert row['http_error_code']=='engine_error'
+    assert row['http_error_body_sha256']
+    assert row['http_error_message']=='backend failure token=[redacted] [url]'
+    assert 'secret' not in json.dumps(row) and 'private.invalid' not in json.dumps(row)
+
+def test_sdk_http_outcome_is_joined_to_lifecycle_receipt(cfg,tmp_path):
+    bridge=OpenHandsBridge(cfg,{'run_id':'run','attempt_id':'a'},
+        {'bridge_listen':'127.0.0.1','bridge_advertise':'127.0.0.1','cleanup_seconds':2},
+        tmp_path,Deadline(5))
+    sdk_id='sdk-'+'c'*32
+    state={'lock':__import__('threading').Lock(),'events':[],'sdk_request_id':sdk_id,
+        'request_id':'req-'+'d'*32}
+    bridge.handlers[object()]=state
+    bridge.record_sdk_event({'event':'sdk_http_finished','sdk_request_id':sdk_id,
+        'http_status':500,'http_error_type':'InternalServerError','http_error_code':'engine_error'})
+    bridge.record_sdk_event({'event':'sdk_call_failed','sdk_request_id':sdk_id,
+        'exception_types':['httpx.HTTPStatusError'],'phase':'unknown'})
+    bridge._flush_events(state)
+    saved=json.loads(next((tmp_path/'diagnostics').glob('request-lifecycle-*.json')).read_text())
+    assert saved['sdk_http_status']==500
+    assert saved['http_error_code']=='engine_error'
+    assert saved['sdk_exception_types']==['httpx.HTTPStatusError']
+    assert [event['sdk_event'] for event in saved['events']]==['sdk_http_finished','sdk_call_failed']
+
+def test_upstream_model_error_evidence_is_safe_and_typed():
+    evidence=upstream_error_evidence({'error':{
+        'type':'InternalServerError','code':'engine_error',
+        'message':'failed token=secret https://private.invalid/trace'}})
+    assert evidence['upstream_error_type']=='InternalServerError'
+    assert evidence['upstream_error_code']=='engine_error'
+    assert evidence['upstream_error_message']=='failed token=[redacted] [url]'
+    assert evidence['upstream_error_payload_sha256']
+    assert 'secret' not in json.dumps(evidence) and 'private.invalid' not in json.dumps(evidence)
 
 def test_authenticated_sdk_events_are_attempt_bound_and_do_not_cancel(cfg,tmp_path):
     profile={'bridge_listen':'127.0.0.1','bridge_advertise':'127.0.0.1','cleanup_seconds':2}

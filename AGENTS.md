@@ -17,7 +17,7 @@
 ## 配置与数据
 
 - rollout 等共享运行参数仍使用根 `config.yaml`；difficulty estimator 训练专用配置位于 `difficulty/training/config.yaml`，由正式 `difficulty-train` CLI 读取。`catalog/manifest.json` 仅维护 benchmark 任务定义与分区；轨迹、补丁和评测属于指定 run 的 `evidence.json`。
-- `runs/<run>/resolved-config.json`、selection、hash 和 artifact receipt 是不可变证据，禁止为适配新参数而修改旧快照。
+- `runs/<run>/resolved-config.json`、selection、hash 和 artifact receipt 是受审计证据，禁止直接编辑。明确授权的配置修订统一使用 `dycon run revise-config`，保留 before/after 与哈希链；身份变化必须显式 `--replan` 并归档原状态。不得恢复已移除的专用字段修订接口。
 - unresolved、未评测和基础设施故障的成功剩余量标签保留 null；重建 token 证据不能冒充 exact IDs；action 分析复用现有 hidden。
 - 使用任务对应的 `.venvs/runner`、`.venvs/analysis`、`.venvs/easysteer`、`.venvs/latent-vllm`，不混用推理和提取 runtime。
 - 保留已有未提交修改。SSH 密码和 API key 不得写入工程文档或配置。

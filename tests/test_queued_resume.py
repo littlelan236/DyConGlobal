@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from application.execution.capture_budget_revision import revise_serving_placement
+from application.execution.config_revision import revise_config
 from application.execution.queued_resume import execute, wait_processes
 from application.execution.run_plan import load_plan
 from core.io import read_json, sha256, write_json
@@ -18,8 +18,9 @@ def test_placement_revision_preserves_computation_and_completed_evidence(cfg):
     before = read_json(run / 'resolved-config.json')
     gpus = [2] if before['serving']['tensor_parallel_size'] == 1 else list(range(2, 2 + before['serving']['tensor_parallel_size']))
     stable = {name: sha256(run / name) for name in ['selection.json', 'tasks.json', 'rollout/work-items.json', 'evidence.json'] if (run / name).exists()}
-    result = revise_serving_placement(cfg['project_root'], run.name, revision_id='move', gpus=gpus,
-                                      base_url='http://127.0.0.1:8107/v1', reason='User authorized GPU placement')
+    updates = {'serving.gpus': gpus, 'serving.base_url': 'http://127.0.0.1:8107/v1'}
+    result = revise_config(cfg['project_root'], run.name, revision_id='move', updates=updates,
+                           reason='User authorized GPU placement')
     after = load_plan(cfg['project_root'], run.name)['config']
     normalized = copy.deepcopy(after)
     for key in ['gpus', 'base_url']:
@@ -27,10 +28,10 @@ def test_placement_revision_preserves_computation_and_completed_evidence(cfg):
     normalized['config_hash'] = before['config_hash']
     assert normalized == before
     assert all(sha256(run / name) == digest for name, digest in stable.items())
-    assert result['changed_config_fields'] == ['serving.gpus', 'serving.base_url']
-    assert read_json(run / 'events/config-revision-move.json')['event'] == 'run.serving_placement_revised'
-    assert revise_serving_placement(cfg['project_root'], run.name, revision_id='move', gpus=gpus,
-                                    base_url='http://127.0.0.1:8107/v1', reason='User authorized GPU placement') == result
+    assert result['changed_config_fields'] == ['serving.base_url', 'serving.gpus']
+    assert read_json(run / 'events/config-revision-move.json')['event'] == 'run.config_revised'
+    assert revise_config(cfg['project_root'], run.name, revision_id='move', updates=updates,
+                         reason='User authorized GPU placement') == result
 
 
 def test_wait_processes_observes_all_real_child_exits():

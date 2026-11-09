@@ -1,9 +1,10 @@
 """Thread-safe phase projections; GPU work is measured at transport boundaries."""
+import time
 from collections import Counter
 from contextlib import contextmanager
 from threading import RLock
 
-from core.io import now, write_json
+from core.io import now, read_json, write_json
 from rollout.retry import count_projection, sample_accepted
 
 
@@ -21,6 +22,7 @@ class Progress:
         self.generating = Counter()
         self.lock = RLock()
         self.errors = []
+        self._last_status_summary_write = 0.0
 
     def started(self, context, retry_kind):
         with self.lock:
@@ -100,13 +102,31 @@ class Progress:
         counts = count_projection(self.run)
         for field in ('limits_exceeded_count', 'reasoning_loop_count', 'resample_trigger_count'):
             summary[field] = counts.get(field)
-        write_json(self.run / 'progress.json', {
+        progress_record = {
             'schema_version': 2, 'updated_at': now(), 'samples': self.samples,
             **summary, 'counts_path': counts['path'],
             'observability_errors': self.errors,
             'environment_dependency_failure_count': failure_status(self.cfg['project_root'], self.run.name)['count'],
             'phase_projection_path': str(self.run / 'rollout/phases.json'),
-        })
+        }
+        progress_path = self.run / 'progress.json'
+        write_json(progress_path, progress_record)
+        if time.monotonic() - self._last_status_summary_write >= 1.0:
+            try:
+                from application.execution.status import refresh_run_status_summary
+                document = refresh_run_status_summary(self.cfg['project_root'], self.run.name)
+                if document is None:
+                    error_path = self.run / 'status-summary-error.json'
+                    detail = read_json(error_path).get('error') if error_path.exists() else 'unknown summary write error'
+                    self.errors.append('status summary refresh failed: ' + str(detail))
+                    progress_record['observability_errors'] = self.errors
+                    write_json(progress_path, progress_record)
+                else:
+                    self._last_status_summary_write = time.monotonic()
+            except Exception as exc:
+                self.errors.append('status summary refresh failed: ' + repr(exc))
+                progress_record['observability_errors'] = self.errors
+                write_json(progress_path, progress_record)
         self._write_live()
 
 

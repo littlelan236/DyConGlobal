@@ -1,14 +1,15 @@
 """Pinned SDK transport observation, published into the existing SDK wheel.
 
 Observe the existing LiteLLM/OpenAI/httpx path; never create another model client.
-Only the bounded DyCon driver is affected. No prompt, URL, credential or exception
-message is exported. Native SDK retries follow the driver's explicit zero policy.
+Only the bounded DyCon driver is affected. No prompt, URL, credential or request
+body is exported. Native SDK retries follow the driver's explicit zero policy.
 """
 from __future__ import annotations
 
 from contextvars import ContextVar
 from functools import lru_cache
 import importlib.metadata
+import hashlib
 import json
 import math
 import os
@@ -44,6 +45,46 @@ def exception_evidence(exc):
     return {'exception_types': types, 'phase': phase}
 
 
+def safe_error_message(message):
+    message = re.sub(r'(?i)bearer\s+\S+', 'Bearer [redacted]', message)
+    message = re.sub(r'https?://\S+', '[url]', message)
+    message = re.sub(r'(?i)(api[_-]?key|token|password|secret)\s*[:=]\s*[^\s,;]+',
+                     r'\1=[redacted]', message)
+    message = ''.join(ch if ch.isprintable() else ' ' for ch in message)
+    return re.sub(r'\s+', ' ', message).strip()[:512]
+
+
+def response_error_evidence(response):
+    """Extract bounded structured diagnostics from an upstream error response."""
+    length = response.headers.get('content-length')
+    if length and (not length.isdigit() or int(length) > 65536):
+        return {'http_error_body_omitted': True}
+    try:
+        body = response.read()
+    except Exception:
+        return {'http_error_body_unavailable': True}
+    evidence = {'http_error_body_sha256': hashlib.sha256(body).hexdigest()}
+    if len(body) > 65536:
+        return {**evidence, 'http_error_body_omitted': True}
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        return evidence
+    error = payload.get('error') if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return evidence
+    for key in ('type', 'code', 'param'):
+        value = error.get(key)
+        if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', value):
+            evidence['http_error_' + key] = value
+    message = error.get('message')
+    if isinstance(message, str):
+        message = safe_error_message(message)
+        if message:
+            evidence['http_error_message'] = message
+    return evidence
+
+
 def safe_event(value):
     """Bound and whitelist authenticated SDK telemetry before disk persistence."""
     if not isinstance(value, dict) or value.get('event') not in _EVENTS:
@@ -58,6 +99,21 @@ def safe_event(value):
         v = value.get(k)
         if type(v) in (int, float) and math.isfinite(v) and v >= 0:
             row[k] = v
+    for key in ('http_error_type', 'http_error_code', 'http_error_param'):
+        field = value.get(key)
+        if isinstance(field, str) and re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', field):
+            row[key] = field
+    body_sha = value.get('http_error_body_sha256')
+    if isinstance(body_sha, str) and re.fullmatch(r'[a-f0-9]{64}', body_sha):
+        row['http_error_body_sha256'] = body_sha
+    for key in ('http_error_body_omitted', 'http_error_body_unavailable'):
+        if type(value.get(key)) is bool:
+            row[key] = value[key]
+    message = value.get('http_error_message')
+    if isinstance(message, str):
+        message = safe_error_message(message)
+        if message:
+            row['http_error_message'] = message
     row['role'] = value.get('role') if value.get('role') in {'agent', 'condenser', 'critic'} else 'unknown'
     row['http_timeout'] = {k: v for k, v in (value.get('http_timeout') or {}).items()
         if k in {'connect', 'read', 'write', 'pool'} and
@@ -151,7 +207,9 @@ if _active is None:
             state['last_error'] = {**facts, **exception_evidence(exc), 'trace': trace}
             _emit(state, 'sdk_http_failed', **state['last_error'])
             raise
-        _emit(state, 'sdk_http_finished', **facts, http_status=response.status_code, trace=trace)
+        error = response_error_evidence(response) if response.status_code >= 400 else {}
+        _emit(state, 'sdk_http_finished', **facts, http_status=response.status_code,
+              trace=trace, **error)
         if response.status_code == 400:
             try:
                 error = response.json().get('error', {})

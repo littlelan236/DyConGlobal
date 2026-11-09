@@ -30,11 +30,12 @@ def test_benchflow_plane_owns_compose_hooks(tmp_path):
     assert planes.start() == "start"
 
 
-def test_benchflow_cleanup_never_removes_shared_leased_images(tmp_path):
+def test_benchflow_cleanup_never_removes_shared_leased_images(tmp_path, monkeypatch):
     pytest.importorskip('benchflow')
     import asyncio
     from runtime.agents.skillsbench import OwnedPlanes
     from core.io import read_json
+    monkeypatch.setattr('runtime.containers.networks.cleanup_owned_resources', lambda *a, **kw: {'complete':True})
     stopped=[]
     class Inner:
         def create_environment(self):

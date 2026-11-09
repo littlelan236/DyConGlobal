@@ -1,0 +1,36 @@
+schema_version: 1
+run:
+  mode: fit
+data:
+  dataset_id: skillsbench-positive77-terminal-20261102
+  expected_receipt_sha256: null
+  targets:
+  - submission_remaining_reasoning_tokens_log1p
+  - submission_remaining_steps_linear
+outer_split:
+  strategy: task_random_v1
+  seed: 42
+  test_fraction: 0.2
+inner_split:
+  strategy: event_random_v1
+  seed: 42
+  validation_fraction: 0.2
+model:
+  kind: ridge
+  ridge:
+    layers:
+    - 0
+    - 31
+    alphas:
+    - 0.0001
+    - 1.0
+    - 100000000.0
+    standardize: true
+    blas_threads: 4
+evaluation:
+  nmse_normalization: target_energy
+visualization:
+  enabled: true
+  export_formats:
+  - png
+  - svg
