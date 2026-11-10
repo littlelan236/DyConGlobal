@@ -255,3 +255,84 @@ def test_rollout_progress_refreshes_summary_and_terminal_stage(loaded, cfg):
     status.update_run_status(loaded["run"], "complete")
     document = read_json(loaded["run"] / "status-summary.json")
     assert document["status"]["stage"] == "complete"
+
+
+def test_run_status_matches_active_cli_despite_stale_progress(loaded, cfg, monkeypatch, capsys):
+    import json
+    import subprocess
+    from core.cli import main
+
+    run = loaded["run"]
+    old = attempt(loaded, 0, 0, execution="001",
+                  result={"exit_status": "OpenHandsError", "disposition": "failed"})
+    current = attempt(loaded, 0, 1,
+                      result={"exit_status": "Submitted", "disposition": "accepted",
+                              "capture_status": "complete"})
+    attempt(loaded, 0, 2, started=False)
+    attempt(loaded, 1, 0)
+    write_json(run / "execution/latest.json", {"attempt": "002"})
+    write_json(run / "status.json", {"stage": "rollout"})
+    item = loaded["work_items"]["items"][0]
+    write_json(run / "progress.json", {
+        "updated_at": "source-time", "accepted_samples": 4,
+        "failed_samples": 1, "pending_samples": -2, "physical_attempts": 5,
+        "samples": {item["sample_key"]: read_json(old / "attempt.json"),
+                    "obsolete-sample": {"exit_status": "Submitted", "disposition": "accepted"}},
+    })
+    write_json(run / "rollout/phases.json", {"updated_at": "source-time"})
+    before = {p: p.read_bytes() for p in run.rglob("*") if p.is_file()}
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: SimpleNamespace(
+        stdout="application.execution.supervisor " + run.name))
+    main(["--config", cfg["config_source"], "run", "active-status"])
+    active = json.loads(capsys.readouterr().out)["runs"][0]
+    main(["--config", cfg["config_source"], "run", "status", run.name])
+    detailed = json.loads(capsys.readouterr().out)
+    assert detailed["sample_summary"] == active["sample_summary"]
+    assert detailed["sample_summary"]["exit_status_counts"] == {"Pending": 1, "Running": 1, "Submitted": 1}
+    progress = detailed["progress"]
+    assert progress["planned_samples"] == 3
+    assert progress["accepted_samples"] == 1
+    assert progress["failed_samples"] == 0
+    assert progress["pending_samples"] == 2
+    assert progress["physical_attempts"] == 5
+    assert progress["updated_at"] == "source-time"
+    assert progress["samples"][item["sample_key"]]["attempt_id"] == current.name
+    assert progress["samples"][item["sample_key"]]["capture_status"] == "complete"
+    assert set(progress["samples"]) == {i["sample_key"] for i in loaded["work_items"]["items"]}
+    assert {p: p.read_bytes() for p in run.rglob("*") if p.is_file()} == before
+
+
+def test_run_status_projects_authorized_retry_and_terminal_failures(loaded, cfg):
+    from application.execution.failed_retry import request_failed_retry
+
+    run = loaded["run"]
+    first = loaded["work_items"]["items"][0]
+    old = attempt(loaded, 0, 0, execution="001",
+                  result={"exit_status": "OpenHandsError", "disposition": "failed"})
+    attempt(loaded, 1, 0, result={"exit_status": "AgentCompleted", "disposition": "failed"})
+    write_json(old.parent.parent / "result.json", read_json(old / "attempt.json"))
+    write_json(run / "progress.json", {"samples": {first["sample_key"]: read_json(old / "attempt.json")}})
+    request_failed_retry(cfg["project_root"], run.name, request_id="status-retry",
+                         exit_statuses=["OpenHandsError"], sample_keys=[first["sample_key"]], reason="Retry sample")
+    write_json(run / "execution/latest.json", {"attempt": "002"})
+    result = status.run_status(cfg["project_root"], run.name)
+    assert result["sample_summary"] == summary(loaded, read_json(run / "progress.json")["samples"])
+    assert result["sample_summary"]["exit_status_counts"] == {"AgentCompleted": 1, "Pending": 2}
+    assert result["progress"]["failed_samples"] == 1
+    assert result["progress"]["accepted_samples"] == 0
+    assert result["progress"]["pending_samples"] == 2
+
+
+@pytest.mark.parametrize("cancelled, expected", [(True, "Cancelled"), (False, "Interrupted")])
+def test_run_status_classifies_exited_unfinished_attempt_without_progress(loaded, cfg, cancelled, expected):
+    run = loaded["run"]
+    attempt(loaded, 0, 0, execution="001")
+    write_json(run / "execution/latest.json", {"attempt": "002"})
+    write_json(run / "execution/attempts/001/exit.json", {"exit_code": -15})
+    if cancelled:
+        write_json(run / "execution/attempts/001/termination.json", {"request_id": "stop"})
+    (run / "progress.json").unlink(missing_ok=True)
+    result = status.run_status(cfg["project_root"], run.name)
+    assert result["sample_summary"]["exit_status_counts"] == {expected: 1, "Pending": 2}
+    assert result["progress"]["planned_samples"] == 3
+    assert result["progress"]["pending_samples"] == 2

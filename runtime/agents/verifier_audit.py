@@ -129,7 +129,7 @@ def frozen_verifier_contract(task):
             relative = Path(member['path'])
             if relative.is_absolute() or '..' in relative.parts:
                 return contract
-            if relative.as_posix() not in {'tests/test.sh', 'test.sh'}:
+            if relative.as_posix() not in {'tests/test.sh', 'test.sh', 'verifier/test.sh'}:
                 continue
             path = root / relative
             if path.is_symlink() or not path.resolve().is_relative_to(root):

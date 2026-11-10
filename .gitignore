@@ -208,3 +208,9 @@ desktop.ini
 # WebArena machine-local image and environment manifests
 /runtime/webarena-browser/
 /runtime/webarena-environments/
+
+# LoRA engineering training attempts and machine-local configuration
+/RL/checkpoints/**
+/RL/logs/**
+/RL/reports/**
+/RL/experiments/*.local.yaml

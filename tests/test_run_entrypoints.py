@@ -25,14 +25,19 @@ def test_run_status_uses_snapshot_even_when_root_yaml_breaks(cfg,capsys):
 
 def test_run_status_reports_sample_summary_before_other_details(cfg,capsys):
     from core.cli import main
-    run=make_run(cfg)
+    Catalog(cfg["project_root"]).register_tasks([task("entry-task")])
+    run=create_run(cfg,"entry-test",operation="rollout",task_ids=["entry-task"],repeat_count=4)
+    items=load_plan(cfg["project_root"],run.name)["work_items"]["items"]
     (run/"execution").mkdir(parents=True,exist_ok=True)
     write_json(run/"execution/latest.json",{"attempt":"001"})
+    outcomes=[
+        {"disposition":"accepted","exit_status":"Submitted","serving_assignment":{"execution_attempt_id":"000"}},
+        {"disposition":"accepted","exit_status":"ContextWindowExceededError","serving_assignment":{"execution_attempt_id":"001"}},
+        {"disposition":"retry_pending","exit_status":"LimitsExceeded","serving_assignment":{"execution_attempt_id":"001"}},
+        {"disposition":"pending","exit_status":"Running","serving_assignment":{"execution_attempt_id":"001"}},
+    ]
     write_json(run/"progress.json",{"samples":{
-        "s0":{"disposition":"accepted","exit_status":"Submitted","serving_assignment":{"execution_attempt_id":"000"}},
-        "s1":{"disposition":"accepted","exit_status":"ContextWindowExceededError","serving_assignment":{"execution_attempt_id":"001"}},
-        "s2":{"disposition":"retry_pending","exit_status":"LimitsExceeded","serving_assignment":{"execution_attempt_id":"001"}},
-        "s3":{"disposition":"pending","exit_status":"Running"},
+        item["sample_key"]:{**item,**outcome} for item,outcome in zip(items,outcomes)
     }})
 
     main(["--config",cfg["config_source"],"run","status",run.name])
@@ -45,13 +50,15 @@ def test_run_status_reports_sample_summary_before_other_details(cfg,capsys):
         "pending_count":1,
         "retry_pending_count":1,
         "failure_counts":{"ContextWindowExceededError":1,"LimitsExceeded":1},
+        "exit_status_counts":{"Submitted":1,"ContextWindowExceededError":1,"LimitsExceeded":1,"Running":1},
         "latest_attempt":{
             "execution_attempt_id":"001",
-            "sample_count":2,
+            "sample_count":3,
             "accepted_count":1,
-            "pending_count":0,
+            "pending_count":1,
             "retry_pending_count":1,
             "failure_counts":{"ContextWindowExceededError":1,"LimitsExceeded":1},
+            "exit_status_counts":{"ContextWindowExceededError":1,"LimitsExceeded":1,"Running":1},
         },
     }
 

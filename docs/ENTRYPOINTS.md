@@ -63,6 +63,8 @@ An active run uses schema 2. `repeat_count` is the number of independent samples
 
 `run wait` waits for the supervisor exit event. It does not poll progress. `run status` and `report run` are read-only views. `run cancel` records a cancellation request; inspect termination and cleanup receipts before restarting or repairing a run.
 
+`run status RUN_ID` uses the same current-sample projection and `sample_summary` as `run active-status`, including `exit_status_counts` and the latest-execution cohort. Its detailed `progress.samples` contains those projected rows; `planned_samples`, `accepted_samples`, `failed_samples` (failed/blocked dispositions), and `pending_samples` (queued/running pending disposition) are recalculated from them. Historical retry/workload counters and source timestamps remain recorded diagnostics. The read-only query does not rewrite `progress.json` or refresh persisted snapshots.
+
 `run active-status` is a compact, read-only view of live runs. Each run keeps `run_id`, `operation`, `task_count`, `status`, `progress_updated_at`, and the planned `sample_count`, followed only by `sample_summary`:
 
 - `sample_summary` exposes sample/accepted/pending/retry counts, `failure_counts`, and `exit_status_counts` across all planned samples. `pending_count` includes queued and running samples (the `pending` disposition); `exit_status_counts.Pending` counts only those waiting to run, while `exit_status_counts.Running` counts those already running. For example, 127 queued plus 63 running gives `pending_count: 190`.
@@ -215,3 +217,22 @@ Python 调用方使用同一 `difficulty.evaluation.holdout.run` service。
 
 Standalone 训练仍为 `dycon difficulty-train --training-config CONFIG.yaml`，attempt ID 写在 YAML 的
 `run.attempt_id`，不是 CLI 位置参数。Standalone `model.ridge.plots_enabled` 默认 true，以保持旧入口行为。
+
+## SkillsBench accepted reward audit
+
+Use the read-only audit entry point for a frozen SkillsBench run:
+
+```bash
+.venvs/runner/bin/dycon skillsbench audit-rewards RUN_ID --output OUTPUT_DIR
+```
+
+The command uses the same current task × repetition projection as `run status`. It scans all current samples whose disposition is exactly `accepted` and whose finite numeric `raw_reward.reward < 1`; it includes partial rewards and does not coerce missing, boolean, string, NaN, or infinite values to zero. The run must be explicitly named and bound to the frozen SkillsBench benchmark. `OUTPUT_DIR` must be new; the command never overwrites a report or writes into run attempts, evaluation receipts, status, or configuration.
+
+A report directory contains:
+
+- `summary.json`: policy version, scope, source hashes, candidate and processing counts, classification totals, task/rule summaries, and completeness.
+- `samples.jsonl`: one detailed record per candidate, including the selected physical attempt, classification, primary rule, reason, evidence hashes, missing evidence, and source-change flags.
+- `samples.csv`: tabular form of the candidate records.
+- `report.md`: human-readable run and task summary plus VerifierError and Review records.
+
+The policy is `skillsbench_accepted_reward_audit_v1`. `VerifierError` means the evidence proves an unrecovered verifier failure; `ValidOutcome` means completed evaluation evidence explains the below-one reward; `Review` means evidence, contract ownership, or ordering is insufficient. Findings are normal audit results and do not make the command fail. A source change or unreadable candidate is recorded as Review and makes the audit incomplete.

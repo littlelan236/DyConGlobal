@@ -177,6 +177,13 @@ def _active_sample_summary(samples, latest_attempt_id):
             "latest_attempt": {**latest, "exit_status_counts": counts(latest_rows)}}
 
 
+def _sample_status_projection(loaded, progress):
+    """Share current sample rows and counts across every run status view."""
+    latest_attempt_id = _latest_execution_attempt(loaded["run"])
+    samples = _active_sample_rows(loaded, progress, latest_attempt_id)
+    return samples, _active_sample_summary(samples, latest_attempt_id)
+
+
 def run_status(root, run_id):
     loaded = load_plan(root, run_id)
     run = loaded["run"]
@@ -210,10 +217,18 @@ def run_status(root, run_id):
     workers = run / "serving/worker-pool.json"
     if workers.exists():
         result["serving_workers"] = read_json(workers)
-    result["sample_summary"] = _sample_summary(
-        (result.get("progress") or {}).get("samples") or {},
-        _latest_execution_attempt(run),
-    )
+    progress = result.get("progress") or {}
+    samples, result["sample_summary"] = _sample_status_projection(loaded, progress)
+    summary = result["sample_summary"]
+    result["progress"] = {
+        **progress,
+        "samples": samples,
+        "planned_samples": summary["sample_count"],
+        "accepted_samples": summary["accepted_count"],
+        "failed_samples": sum(row.get("disposition") in {"failed", "blocked"}
+                              for row in samples.values()),
+        "pending_samples": summary["pending_count"],
+    }
     return {
         "run_id": result["run_id"],
         "sample_summary": result["sample_summary"],
@@ -370,8 +385,7 @@ def reconcile_run(root, run_id):
 def _run_summary_projection(loaded, status, progress):
     # Shared single-run projection for active-status and persisted snapshots.
     run = loaded["run"]
-    latest_attempt_id = _latest_execution_attempt(run)
-    samples = _active_sample_rows(loaded, progress, latest_attempt_id)
+    samples, summary = _sample_status_projection(loaded, progress)
     return {
         "run_id": run.name,
         "operation": loaded["plan"].get("operation"),
@@ -379,7 +393,7 @@ def _run_summary_projection(loaded, status, progress):
         "status": status,
         "progress_updated_at": progress.get("updated_at"),
         "sample_count": len(samples),
-        "sample_summary": _active_sample_summary(samples, latest_attempt_id),
+        "sample_summary": summary,
     }
 
 

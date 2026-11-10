@@ -163,6 +163,17 @@ def test_non_ctrf_and_comments_are_not_assumed_completion_contracts(tmp_path):
     assert frozen_verifier_contract(task)['ctrf_expected'] is None
 
 
+def test_frozen_verifier_directory_contract_is_hash_guarded(tmp_path):
+    path = tmp_path / 'package/verifier/test.sh'
+    put(path, 'uvx pytest --ctrf /logs/verifier/ctrf.json test_outputs.py\n')
+    files = [{'path': 'verifier/test.sh', 'sha256': sha256(path), 'mode': 0o644}]
+    task = {'instance': {'task_path': str(path.parent.parent), 'files': files,
+                         'package_sha256': hash_json(files)}}
+    contract = frozen_verifier_contract(task)
+    assert contract['verified'] is True
+    assert contract['ctrf_expected'] is True
+
+
 def test_settlement_only_reclassifies_proven_fault_and_preserves_reward(tmp_path):
     from rollout.retry import disposition
 
@@ -181,6 +192,32 @@ def test_settlement_only_reclassifies_proven_fault_and_preserves_reward(tmp_path
     put(tmp_path / 'benchflow/a/verifier/test-stdout.txt', '=== 2 failed in 1s ===\n')
     assert audit_zero_evaluation(tmp_path, {}, 'AgentCompleted', False, 'normalized', raw)[3]['classification'] == 'ValidZero'
     assert audit_zero_evaluation(tmp_path, {}, 'LimitsExceeded', False, 'normalized', raw)[3] is None
+
+
+def test_accepted_reward_policy_distinguishes_terminal_download_failure():
+    from runtime.agents.accepted_reward_audit import _python_runtime_download_failed
+
+    log = ('Downloading https://github.com/astral-sh/python-build-standalone/releases/download/ '
+           'cpython-3.10.22-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz\n'
+           'error: Request failed after 3 retries\n'
+           'Caused by: tls handshake eof\n')
+    assert _python_runtime_download_failed([log]) is True
+    recovered = log + 'Successfully installed pytest\n================ pytest session starts ================\n=== 2 failed in 1s ===\n'
+    assert _python_runtime_download_failed([recovered]) is False
+
+
+def test_python_runtime_download_failure_is_not_a_package_install_failure(tmp_path):
+    from runtime.agents.accepted_reward_audit import _audit_candidate
+
+    attempt = tmp_path / 'runs/r/rollout/tasks/simpo/repetitions/rep-000/attempts/rep-000-attempt-000'
+    put(attempt / 'benchflow/x/verifier/test-stdout.txt',
+        'Downloading cpython-3.10.22-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz\n'
+        'error: Request failed after 3 retries\nCaused by: tls handshake eof\n')
+    row = {'instance_id': 'simpo', 'repetition_id': 'rep-000', 'attempt_id': 'rep-000-attempt-000',
+           'sample_key': 's1', 'disposition': 'accepted', 'raw_reward': {'reward': 0}}
+    result = _audit_candidate(tmp_path, 'r', row, {})
+    assert result['classification'] == 'VerifierError'
+    assert result['reason_code'] == 'python_runtime_download_failed'
 
 
 @pytest.mark.parametrize('evidence', ['pytest', 'earlier_summary', 'ctrf', 'recovered_stderr', 'nonzero'])

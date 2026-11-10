@@ -111,6 +111,9 @@ def main(argv=None):
     sb = sb_sub.add_parser('environment-check', help='Audit frozen task environments without model requests')
     sb.add_argument('run_id')
     sb.add_argument('--workers', type=int, default=1)
+    sb = sb_sub.add_parser('audit-rewards', help='Read-only audit of accepted SkillsBench rewards below one')
+    sb.add_argument('run_id')
+    sb.add_argument('--output', type=Path, required=True, help='New report directory; existing paths are rejected')
     sb = sb_sub.add_parser("qualify", help="Freeze request-role evidence from a real OpenHands tool probe")
     sb.add_argument("run_id")
     sb.add_argument("profile_id")
@@ -813,6 +816,19 @@ def main(argv=None):
             raise SystemExit(2)
         return
     if a.command == "skillsbench":
+        if a.skillsbench_command == "audit-rewards":
+            if a.set or a.analysis_run_id:
+                parser.error("audit-rewards uses the explicit frozen run; do not pass --set or --run-id")
+            from runtime.agents.accepted_reward_audit import audit_accepted_rewards
+            try:
+                result = audit_accepted_rewards(Path(a.config).resolve().parent, a.run_id, a.output)
+            except (ValueError, OSError, KeyError, RuntimeError) as exc:
+                print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=__import__('sys').stderr)
+                raise SystemExit(1)
+            print(json.dumps(result, ensure_ascii=False))
+            if not result.get("complete", False):
+                raise SystemExit(3)
+            return
         if a.set or a.analysis_run_id:
             parser.error("skillsbench registry commands read the editable root config; no run override")
         from core.backends import capabilities
