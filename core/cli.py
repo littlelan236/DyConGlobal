@@ -17,6 +17,8 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     from steering.cli import register as register_steering
     register_steering(sub)
+    from RL.cli import register as register_lora
+    register_lora(sub)
     harbor = sub.add_parser("harbor", help="Pinned Harbor task/runtime integration")
     hb_sub = harbor.add_subparsers(dest="harbor_command", required=True)
     hb = hb_sub.add_parser("runtime-prepare", help="Publish a pinned isolated worker and hashed dependency lock")
@@ -303,13 +305,13 @@ def main(argv=None):
     artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
     q = artifact_sub.add_parser("show")
     q.add_argument("run_id", nargs="?")
-    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis"], default="run")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt"], default="run")
     q.add_argument("--storage-root", type=Path)
     q.add_argument("--with-tensors", action="store_true")
     q.add_argument("--dataset-id")
     q = artifact_sub.add_parser("verify")
     q.add_argument("run_id", nargs="?")
-    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis"], default="run")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt"], default="run")
     q.add_argument("--storage-root", type=Path)
     q.add_argument("--with-tensors", action="store_true")
     q.add_argument("--dataset-id")
@@ -571,6 +573,17 @@ def main(argv=None):
     p.add_argument("--hidden-size", type=int)
     p.add_argument("--endpoint", default="submission")
     a = parser.parse_args(argv)
+    if a.command == "lora-train" or (a.command == "artifact" and a.scope == "lora-attempt"):
+        if a.set or a.analysis_run_id:
+            parser.error("LoRA uses an independent training YAML; do not pass --set or --run-id")
+        from RL.cli import execute as execute_lora
+        try:
+            result = execute_lora(a, resolve(a.config))
+        except (ValueError, OSError, KeyError, RuntimeError) as exc:
+            parser.error(str(exc))
+        print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
+        return
+
     if (a.command in {"steering-dataset", "steering-visualize"} or
             (a.command == "artifact" and a.scope.startswith("steering-"))):
         if a.set or a.analysis_run_id:

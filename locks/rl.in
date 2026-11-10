@@ -1,0 +1,14 @@
+# Single GPU bf16 engineering LoRA training; serving environments stay untouched.
+torch==2.13.0
+transformers==5.17.0
+peft>=0.18,<1
+accelerate==1.15.0
+safetensors==0.8.0
+numpy==2.3.5
+PyYAML==6.0.3
+pydantic==2.13.5
+requests==2.34.2
+packaging>=23
+pytest==9.1.1
+ruff==0.17.0
+setuptools==80.10.2

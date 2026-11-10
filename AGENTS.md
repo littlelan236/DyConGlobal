@@ -21,3 +21,11 @@
 - unresolved、未评测和基础设施故障的成功剩余量标签保留 null；重建 token 证据不能冒充 exact IDs；action 分析复用现有 hidden。
 - 使用任务对应的 `.venvs/runner`、`.venvs/analysis`、`.venvs/easysteer`、`.venvs/latent-vllm`，不混用推理和提取 runtime。
 - 保留已有未提交修改。SSH 密码和 API key 不得写入工程文档或配置。
+
+
+## LoRA foundation
+
+- `.venvs/rl` is the dedicated single-GPU Qwen3.5-9B LoRA training environment. Its dependencies and cache may live on `/data3`; source stays in the original uppercase `RL/` package.
+- `dycon lora-train --training-config YAML` is the formal CLI. `RL/experiments/lora-smoke.yaml` and explicit task training YAMLs are authorized standalone LoRA configuration exceptions, read by `RL/config.py`, with paths relative to the project root. Do not import rollout model/serving settings, change root `config.yaml`, or pass `--set`/`--run-id` to train.
+- `fresh`, complete-checkpoint `resume`, and adapter `warm_start` share `RL.service.run`; no alternate launcher, third-party adapter fallback, implicit latest checkpoint or silent fresh restart. A new attempt ID is required for every invocation.
+- `dycon artifact show/verify ID --scope lora-attempt --storage-root ROOT` uses the existing artifact interface. Outputs belong to `ROOT/RL/checkpoints/ID`; LoRA resolution does not relax global `owned_path`. See `RL/README.md` for identities, recovery and engineering-only validation boundaries.

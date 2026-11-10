@@ -1,0 +1,33 @@
+schema_version: 1
+run:
+  attempt_id: lora-qwen35-9b-smoke-001
+  mode: smoke
+  seed: 42
+  start:
+    mode: fresh
+    checkpoint: null
+model:
+  path: /VM/wangtianyi/DyConGlobal/models/Qwen3.5-9B
+  dtype: bfloat16
+  attention_backend: sdpa
+  gradient_checkpointing: true
+lora:
+  rank: 16
+  alpha: 32
+  dropout: 0.0
+  target_scope: text_backbone_all_linear
+runtime:
+  gpu: 0
+  output_root: /data3/wangtianyi/DyConGlobal
+training:
+  max_updates: 4
+  gradient_accumulation_steps: 2
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 1.0
+  scheduler: constant
+  checkpoint_every_updates: 2
+validation:
+  fixture_id: causal-text-smoke-v1
+  max_sequence_length: 512
+  stop_after_update: null

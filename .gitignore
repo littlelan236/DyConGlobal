@@ -214,3 +214,8 @@ desktop.ini
 /RL/logs/**
 /RL/reports/**
 /RL/experiments/*.local.yaml
+/RL/experiments/*.local.yml
+# Local profiler traces, tensorboard events and adapter exports
+/RL/profiles/
+/RL/tensorboard/
+/RL/exports/

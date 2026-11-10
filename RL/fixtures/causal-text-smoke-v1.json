@@ -1,0 +1,10 @@
+{
+  "fixture_id": "causal-text-smoke-v1",
+  "purpose": "engineering_smoke",
+  "provenance": "Handwritten synthetic engineering text, not historical rollout evidence or a business dataset.",
+  "rows": [
+    {"prompt": "Explain a simple check: ", "completion": "A frozen base stays unchanged while the adapter learns. Count the valid targets and save the training state. "},
+    {"prompt": "Describe a small example: ", "completion": "Two plus three equals five. Verify the input mask, then compare the restored output with the saved output. "},
+    {"prompt": "List the next action: ", "completion": "Read the fixed input, calculate a finite loss, update only the adapter, and record the result. "}
+  ]
+}

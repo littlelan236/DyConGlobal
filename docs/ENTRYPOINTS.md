@@ -236,3 +236,14 @@ A report directory contains:
 - `report.md`: human-readable run and task summary plus VerifierError and Review records.
 
 The policy is `skillsbench_accepted_reward_audit_v1`. `VerifierError` means the evidence proves an unrecovered verifier failure; `ValidOutcome` means completed evaluation evidence explains the below-one reward; `Review` means evidence, contract ownership, or ordering is insufficient. Findings are normal audit results and do not make the command fail. A source change or unreadable candidate is recorded as Review and makes the audit incomplete.
+
+
+## LoRA engineering foundation
+
+Use `.venvs/rl/bin/dycon lora-train --training-config RL/experiments/lora-smoke.yaml` for single-GPU bf16 Qwen3.5-9B LoRA engineering validation. The `RL/` source remains in the original project; `.venvs/rl` is an independent environment with `locks/rl.in` and `locks/rl.txt`, stored on `/data3` on this server. The standalone YAML is an explicit training configuration exception, resolved against the root project selected by the ordinary root CLI configuration. Rollout `config.yaml` stays unchanged. Neither `--set` nor `--run-id` is accepted.
+
+Only `dry-run` and synthetic-CE `smoke` are supported. Select `run.start.mode: fresh`, `resume` (a committed complete step checkpoint), or `warm_start` (this module's adapter export). All paths delegate to `RL.service.run`; resume failure never becomes a new training phase. Every invocation requires a new output attempt ID; an existing failed directory is not overwritten. The default GPU is physical 0, with selection applied before importing CUDA/PyTorch; an occupied GPU is rejected without stopping services or changing cards.
+
+Inspect these outputs through `artifact show/verify ID --scope lora-attempt --storage-root /data3/wangtianyi/DyConGlobal`. The optional artifact-root registry key is `paths.artifact_roots.lora-attempt`; normal `paths.artifact_scan_roots` discovery also applies. The physical tree is `ROOT/RL/checkpoints/ID`. Artifact verification checks committed content and state; model equivalence is a separate integration test, and neither constitutes benchmark quality evaluation.
+
+See [RL/README.md](../RL/README.md) for all-linear text-backbone LoRA coverage, frozen base/vision/output-head rules, token-weighted accumulation, immutable identities, resume/warm-start contracts, failure artifacts, and acceptance commands. This foundation does not yet implement an RL objective, reward, business dataset or vLLM adapter serving.
