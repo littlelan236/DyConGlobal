@@ -1,0 +1,19 @@
+schema_version: 1
+replay_id: swebench-step-logprobs-20261110-v3
+dataset:
+  id: swebench-consensus-step-20261110-v3
+  root: /data3/wangtianyi/DyConGlobal
+runtime:
+  backend: native_vllm_trace_v1
+  python: .venvs/latent-vllm/bin/python
+  gpus: [0]
+  tensor_parallel_size: 1
+  max_num_seqs: 2
+  max_num_batched_tokens: 4096
+  max_model_len: 32768
+  kv_cache_memory_bytes: 8589934592
+  enable_prefix_caching: false
+  enable_chunked_prefill: true
+storage:
+  output_root: /data3/wangtianyi/DyConGlobal
+  max_shard_bytes: 268435456

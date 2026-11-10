@@ -10,24 +10,11 @@ from core.io import hash_json, read_json, sha256
 FIXTURE = Path(__file__).parent / "fixtures/causal-text-smoke-v1.json"
 
 
-def validate_batch(batch, *, vocab_size, max_length):
-    if set(batch) != {"input_ids", "attention_mask", "labels"}:
-        raise ValueError("Batch must contain input_ids, attention_mask and labels")
-    ids, mask, labels = (batch[key] for key in ("input_ids", "attention_mask", "labels"))
-    if ids.ndim != 2 or ids.shape != mask.shape or ids.shape != labels.shape or not ids.numel():
-        raise ValueError("Inconsistent/nonempty batch shapes are required")
-    if ids.dtype != torch.long or labels.dtype != torch.long:
-        raise ValueError("Token IDs and labels must be int64")
-    if ids.shape[1] > max_length or ids.shape[1] < 2:
-        raise ValueError("Batch sequence length exceeds the limit or has no shifted position")
-    if ((ids < 0) | (ids >= vocab_size)).any() or ((labels != -100) & ((labels < 0) | (labels >= vocab_size))).any():
-        raise ValueError("Token IDs or labels outside vocabulary")
-    if not ((mask == 0) | (mask == 1)).all() or ((mask == 0) & (labels != -100)).any():
-        raise ValueError("Invalid attention mask or supervised padding")
-    count = int((labels[:, 1:] != -100).sum())
-    if count == 0:
-        raise ValueError("Batch contains zero supervised causal targets")
-    return count
+def validate_batch(batch, *, vocab_size, max_length, supervision=None):
+    """Compatibility count API; prepare_batch also exposes availability and identity."""
+    from RL.supervision import prepare_batch
+    return prepare_batch(batch, vocab_size=vocab_size, max_length=max_length,
+                         supervision=supervision).selected_count
 
 
 def causal_ce(model, batch):
@@ -39,7 +26,11 @@ def causal_ce(model, batch):
     return loss_sum, int((labels != -100).sum())
 
 
-def fixture_batches(tokenizer, max_length):
+def fixture_batches(tokenizer, max_length, supervision=None):
+    from RL.config import Supervision
+    from RL.supervision import FIXTURE_MASK, fixture_loss_mask, input_selection_identity, prepare_batch
+
+    supervision = supervision or Supervision()
     fixture = read_json(FIXTURE)
     batches = []
     records = []
@@ -65,11 +56,18 @@ def fixture_batches(tokenizer, max_length):
         mask = [1] * (len(ids) - padding) + [0] * padding
         batch = {key: torch.tensor([value], dtype=torch.long) for key, value in
                  (("input_ids", ids), ("attention_mask", mask), ("labels", labels))}
+        if supervision.mode == "explicit_mask":
+            batch["loss_mask"] = fixture_loss_mask(batch, index)
         batches.append(batch)
         records.append({key: value.tolist() for key, value in batch.items()})
+    vocab_size = len(tokenizer)
+    selections = [prepare_batch(batch, vocab_size=vocab_size, max_length=max_length,
+                                supervision=supervision) for batch in batches]
     return batches, {"fixture_id": fixture["fixture_id"], "fixture_sha256": sha256(FIXTURE),
                      "encoded_batches_sha256": hash_json(records), "batch_count": len(batches),
-                     "max_sequence_length": max_length, "evidence_class": "engineering_generated_tokens"}
+                     "max_sequence_length": max_length, "evidence_class": "engineering_generated_tokens",
+                     "mask_source": FIXTURE_MASK if supervision.mode == "explicit_mask" else None,
+                     "supervision": input_selection_identity(selections, supervision)}
 
 
 def probe_logits(model, batch, length=24):

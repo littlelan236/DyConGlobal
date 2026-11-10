@@ -12,15 +12,16 @@ from RL.training import seed_everything
 LORA = Lora(rank=2, alpha=4, dropout=0.0, target_scope="text_backbone_all_linear")
 
 
-def raw_model(layers=2):
+def raw_model(layers=2, *, linear_only=False, max_positions=128):
     seed_everything(123)
     config = Qwen3_5Config(
         text_config=dict(vocab_size=64, hidden_size=32, intermediate_size=48, num_hidden_layers=layers,
                          num_attention_heads=2, num_key_value_heads=1, head_dim=16,
                          linear_num_key_heads=1, linear_num_value_heads=2,
                          linear_key_head_dim=16, linear_value_head_dim=16,
-                         layer_types=["linear_attention", "full_attention"] * (layers // 2),
-                         max_position_embeddings=128, pad_token_id=0, eos_token_id=1,
+                         layer_types=(["linear_attention"] * layers if linear_only else
+                                      ["linear_attention", "full_attention"] * (layers // 2)),
+                         max_position_embeddings=max_positions, pad_token_id=0, eos_token_id=1,
                          rope_parameters={"rope_type": "default", "rope_theta": 10000.0,
                                           "partial_rotary_factor": 0.5, "mrope_section": [1, 1, 2]}),
         vision_config=dict(depth=1, hidden_size=32, intermediate_size=48, num_heads=2, out_hidden_size=32))

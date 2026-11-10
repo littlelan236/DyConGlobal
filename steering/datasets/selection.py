@@ -11,7 +11,8 @@ from application.execution.evidence import RunEvidence
 from core.io import artifact_roots, hash_json, identifier, owned_path, read_json, sha256
 
 
-def select_sources(cfg, source_runs, *, rollout_ids=(), rollout_list=None, all_submitted=False):
+def select_sources(cfg, source_runs, *, rollout_ids=(), rollout_list=None, all_submitted=False,
+                   verify_source_hashes=True):
     runs = [source_runs] if isinstance(source_runs, str) else list(source_runs or [])
     if not runs or len(runs) != len(set(runs)):
         raise ValueError("Declare nonempty, distinct source runs")
@@ -78,9 +79,9 @@ def select_sources(cfg, source_runs, *, rollout_ids=(), rollout_list=None, all_s
         source_cfg = read_json(config_path)
         owner = Path(source_cfg.get("project_root", cfg["project_root"])).resolve()
         evidence = RunEvidence(owner, run)
-        if not evidence.path.is_file() or evidence.path.resolve() != (run_dir / "evidence.json").resolve():
+        if verify_source_hashes and (not evidence.path.is_file() or evidence.path.resolve() != (run_dir / "evidence.json").resolve()):
             raise ValueError("Run resolver and RunEvidence owner disagree")
-        original = evidence.read()
+        original = evidence.read(validate=verify_source_hashes)
         ids = requests[run]
         if all_submitted:
             ids = sorted(
@@ -92,8 +93,8 @@ def select_sources(cfg, source_runs, *, rollout_ids=(), rollout_list=None, all_s
             )
         if not ids:
             raise ValueError(f"No explicitly selected eligible rollouts: {run}")
-        selected = evidence.select(ids)
-        if selected["evidence_sha256"] != hash_json(original):
+        selected = evidence.select(ids, audit=verify_source_hashes)
+        if verify_source_hashes and selected["evidence_sha256"] != hash_json(original):
             raise ValueError("Run evidence changed during selection; retry with a stable snapshot")
         snapshot = {
             "schema_version": original["schema_version"],
@@ -106,15 +107,15 @@ def select_sources(cfg, source_runs, *, rollout_ids=(), rollout_list=None, all_s
         for rid in selected["rollout_ids"]:
             row = selected["rollouts"][rid]
             expected = bindings.get((run, rid), {}).get("trajectory_sha256")
-            if expected is not None and expected != row["trajectory_sha256"]:
+            if verify_source_hashes and expected is not None and expected != row["trajectory_sha256"]:
                 raise ValueError(f"Expected trajectory SHA mismatch: {run}/{rid}")
             trajectory = owned_path(owner, row["trajectory_path"])
             if not trajectory.is_relative_to(run_dir):
                 raise ValueError("Canonical trajectory is outside its owning run")
-            if sha256(trajectory) != row["trajectory_sha256"]:
+            if verify_source_hashes and sha256(trajectory) != row["trajectory_sha256"]:
                 raise ValueError(f"Canonical trajectory checksum mismatch: {run}/{rid}")
             task = selected["tasks"][row["task_key"]]
-            if row["model_fingerprint"] != source_cfg["model"]["fingerprint"]:
+            if verify_source_hashes and row["model_fingerprint"] != source_cfg["model"]["fingerprint"]:
                 raise ValueError("Rollout model differs from frozen run model")
             snapshot["rollouts"][rid] = copy.deepcopy(original["rollouts"][rid])
             eid = row.get("selected_evaluation_id")
@@ -144,7 +145,8 @@ def select_sources(cfg, source_runs, *, rollout_ids=(), rollout_list=None, all_s
                 }
             )
             dependencies[str(trajectory)] = row["trajectory_sha256"]
-        evidence.validate(snapshot)
+        if verify_source_hashes:
+            evidence.validate(snapshot)
         snapshots[run], configs[run] = snapshot, source_cfg
         dependencies[str(config_path)] = sha256(config_path)
         run_records.append(

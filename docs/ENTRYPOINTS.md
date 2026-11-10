@@ -21,6 +21,7 @@ Formal work goes through `core.cli`. Do not launch internal workers, copy a task
 | Difficulty estimation | `difficulty-dataset`, `difficulty-split`, `difficulty-train/ridge/mlp/predict/evaluate`, `difficulty-ridge-holdout` | analysis |
 | Steering analysis | `steering-dataset`, `steering-visualize` | analysis |
 | Artifact inspection | `artifact show/verify`, `report run` | runner or analysis per command |
+| Offline GRPO step data and behavior replay | `rl-dataset build/check/materialize/replay-logprobs/check-logprobs` | runner; isolated replay worker uses latent-vLLM |
 
 ### Live generation throughput
 
@@ -242,8 +243,25 @@ The policy is `skillsbench_accepted_reward_audit_v1`. `VerifierError` means the 
 
 Use `.venvs/rl/bin/dycon lora-train --training-config RL/experiments/lora-smoke.yaml` for single-GPU bf16 Qwen3.5-9B LoRA engineering validation. The `RL/` source remains in the original project; `.venvs/rl` is an independent environment with `locks/rl.in` and `locks/rl.txt`, stored on `/data3` on this server. The standalone YAML is an explicit training configuration exception, resolved against the root project selected by the ordinary root CLI configuration. Rollout `config.yaml` stays unchanged. Neither `--set` nor `--run-id` is accepted.
 
-Only `dry-run` and synthetic-CE `smoke` are supported. Select `run.start.mode: fresh`, `resume` (a committed complete step checkpoint), or `warm_start` (this module's adapter export). All paths delegate to `RL.service.run`; resume failure never becomes a new training phase. Every invocation requires a new output attempt ID; an existing failed directory is not overwritten. The default GPU is physical 0, with selection applied before importing CUDA/PyTorch; an occupied GPU is rejected without stopping services or changing cards.
+Offline GRPO is supported through the existing `lora-train` entrypoint. Use
+`RL/experiments/grpo-offline-k3-smoke.yaml` for strict schema/data-readiness dry-run,
+then provide an explicit dataset ID for a task run. All eligible complete groups
+in that dataset are consumed; no training/validation/test partition is created. The objective uses raw T=1
+ratios, a frozen initial-policy reference, token K3 and exactly one pass over frozen
+groups. Select `run.start.mode: fresh`, `resume` (a committed complete step checkpoint),
+or `warm_start` (this module's adapter export). All paths delegate to `RL.service.run`;
+resume failure never becomes a new training phase.
 
 Inspect these outputs through `artifact show/verify ID --scope lora-attempt --storage-root /data3/wangtianyi/DyConGlobal`. The optional artifact-root registry key is `paths.artifact_roots.lora-attempt`; normal `paths.artifact_scan_roots` discovery also applies. The physical tree is `ROOT/RL/checkpoints/ID`. Artifact verification checks committed content and state; model equivalence is a separate integration test, and neither constitutes benchmark quality evaluation.
 
-See [RL/README.md](../RL/README.md) for all-linear text-backbone LoRA coverage, frozen base/vision/output-head rules, token-weighted accumulation, immutable identities, resume/warm-start contracts, failure artifacts, and acceptance commands. This foundation does not yet implement an RL objective, reward, business dataset or vLLM adapter serving.
+See [RL/README.md](../RL/README.md) for all-linear text-backbone LoRA coverage, frozen base/vision/output-head rules, immutable identities, resume/warm-start contracts, and acceptance commands. Offline dataset construction and logprob replay are provided separately by `rl-dataset` below.
+
+## Offline GRPO dataset foundation
+
+`rl-dataset` uses standalone dataset/replay YAML files as explicit configuration exceptions, resolved against the ordinary project root. Sources, output/cache roots and GPU admission remain explicit. Build groups all original parallel-consensus candidates per decision and preserves native prompt/completion IDs; sparse supervision covers only the current completion in original target coordinates. Source audit is configurable and defaults off; artifact receipt integrity remains mandatory.
+
+The five subcommands are `build --dataset-config YAML [--dry-run|--recover]`, `check DATASET_ID --dataset-root ROOT [--level metadata|sources|full]`, `materialize DATASET_ID --dataset-root ROOT --cache-root CACHE_ROOT`, `replay-logprobs --replay-config YAML [--dry-run|--recover]`, and `check-logprobs REPLAY_ID --storage-root ROOT [--with-values]`. To check a replay against its dataset, pass `--dataset-id DATASET_ID --dataset-root DATASET_ROOT` together. Build dry-run freezes no artifact and inspects selection only; replay dry-run checks existing dataset/policy/length inputs without loading a model.
+
+Dataset/cache/replay locations are `ROOT/RL/datasets/DATASET_ID`, `CACHE_ROOT/RL/cache/CACHE_ID`, and `OUTPUT_ROOT/RL/replays/REPLAY_ID`. Artifact IDs are immutable; failed staging requires explicit compatible recovery. Source checks in `check --level sources|full` follow the frozen `audit.enabled` setting, while local artifact receipt integrity is always checked. Materialization is an optional mmap cache, and replay can read native ledgers directly.
+
+`replay-logprobs` reads only temperature/top_p/top_k from the root config and historical model/dtype/constraints from frozen sources. Its isolated pinned native vLLM worker records processed generated-token logprobs. `--dry-run` never loads a model; `--recover` continues compatible sealed branch results with frozen root sampling. Build recovery restarts from the last complete rollout with the original selection. `artifact show/verify ID --scope rl-dataset|rl-cache|rl-replay --storage-root ROOT` inspects committed artifacts. Replay estimates require explicit loader opt-in; zero-support groups are unavailable. See [RL dataset](../RL/dataset/README.md) for supported constraints, tests and recovery. GRPO training uses the existing `lora-train` service, documented in [offline GRPO](../RL/GRPO.md); replay estimates are not its probability denominator.

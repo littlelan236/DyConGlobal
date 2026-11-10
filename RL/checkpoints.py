@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import shutil
 from pathlib import Path
 
 from core.io import hash_json, read_json, sha256, write_json
@@ -75,10 +76,18 @@ def verify_checkpoint(directory):
             or receipt.get("global_step") != state["global_step"]):
         raise ValueError("Checkpoint step identity mismatch")
     verify_adapter(directory / "adapter", metadata["adapter_contract"], verify_owner=False)
+    if "grpo" in metadata["contract"] and "grpo/reference-logprobs.pt" not in receipt["files"]:
+        raise ValueError("GRPO checkpoint reference cache missing")
+    if "grpo" in metadata["contract"]:
+        from RL.grpo.contract import validate_reference_files, receipt_metadata
+        validate_reference_files(directory, metadata["contract"])
+        expected = receipt_metadata(metadata["contract"], state)
+        if any(receipt.get(k) != v for k, v in expected.items()):
+            raise ValueError("GRPO checkpoint receipt objective/cursor mismatch")
     return receipt
 
 
-def save_checkpoint(model, optimizer, scheduler, state, directory, contract, adapter_identity):
+def save_checkpoint(model, optimizer, scheduler, state, directory, contract, adapter_identity, *, extra_files=None):
     import torch
 
     from RL.training import capture_rng
@@ -94,13 +103,26 @@ def save_checkpoint(model, optimizer, scheduler, state, directory, contract, ada
     metadata = {"schema_version": 1, "state": dict(state), "contract": contract,
                 "adapter_contract": adapter_identity}
     write_json(staging / "state.json", metadata)
+    if extra_files:
+        import shutil
+        from core.io import owned_path
+        for name, source_file in extra_files.items():
+            target = owned_path(staging, name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_file, target)
     payload = {"metadata": metadata, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
                "rng": capture_rng()}
     with (staging / "training-state.pt").open("wb") as stream:
         torch.save(payload, stream)
         stream.flush()
         os.fsync(stream.fileno())
-    commit_receipt(staging, "lora-checkpoint-v1", global_step=state["global_step"], contract_sha256=hash_json(contract))
+    extra_metadata = {}
+    if "grpo" in contract:
+        from RL.grpo.contract import validate_reference_files, receipt_metadata
+        validate_reference_files(staging, contract)
+        extra_metadata = receipt_metadata(contract, state)
+    commit_receipt(staging, "lora-checkpoint-v1", global_step=state["global_step"],
+                   contract_sha256=hash_json(contract), **extra_metadata)
     staging.rename(directory)
     fd = os.open(directory.parent, os.O_DIRECTORY)
     try:

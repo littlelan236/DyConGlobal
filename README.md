@@ -16,6 +16,10 @@ DyConGlobal runs coding-agent benchmarks and manages their rollout, evaluation, 
 | [Action entropy policy](docs/ACTION-ENTROPY-RUN-POLICY-CN.md) | Run-frozen consensus representative and entropy rules |
 | [Multi-GPU TP=1](docs/MULTI-GPU-TP1-CN.md) | Per-GPU serving and trajectory scheduling |
 | [Steering datasets](docs/STEERING-DATASET-LDA-CN.md) | Immutable branch-hidden datasets and visualizations |
+| [RL training foundation](RL/README.md) | LoRA training, sparse supervision and checkpoint contracts |
+| [Offline GRPO training](RL/GRPO.md) | Frozen native groups, one epoch, raw T=1 ratios, token K3 and exact resume |
+| [GRPO engineering acceptance](RL/GRPO_VALIDATION.md) | Automated tests and Qwen3.5-9B synthetic GPU/resume evidence |
+| [Offline GRPO datasets](RL/dataset/README.md) | Native-token step groups, sparse masks and processed-logprob replay |
 | [Difficulty feature contract](docs/DIFFICULTY-FEATURE-CONTRACT-CN.md) | Hidden identity, eligibility, task splits, and Ridge input |
 | [Dataset Ridge task holdout](docs/DIFFICULTY-RIDGE-HOLDOUT-CN.md) | Nested task/event split, Ridge search and refit, NMSE/R², full test trajectories, and verified results |
 | [Trajectory comparison](docs/TRAJECTORY-COMPARISON-CN.md) | Resolved repetitions and terminal workload curves |
@@ -45,10 +49,11 @@ Every new run includes `status-summary.json`, a refreshable per-run JSON snapsho
 - `catalog/` defines benchmark tasks and partitions. Run-specific trajectories, patches, and evaluations live in run evidence.
 - `rollout/`, `benchmark_evaluation/`, `enrichment/`, and `hidden/` implement execution and post-processing.
 - `action/`, `difficulty/`, and `steering/` hold immutable analysis datasets and outputs.
+- `RL/` provides single-GPU LoRA causal CE and `offline_grpo_k3_v1` training through `dycon lora-train`; `RL/dataset/` builds immutable offline decision-step groups and historical processed-logprob replay artifacts. GRPO uses every eligible complete group once, with a frozen initial reference and token K3; no training split is required.
 - `runs/RUN_ID/` contains frozen run configuration, task selection, attempts, canonical outputs, and receipts.
 
 Active runs use schema 2. A run freezes its effective configuration and selected tasks at creation. Resume and run-bound analysis use that snapshot. Catalog task partitions are not training splits, and a submitted patch is not evidence that a task was resolved.
 
 ## Runtime environments
 
-Use `.venvs/runner` for run execution, Docker, and harness; `.venvs/analysis` for token processing and offline analysis; `.venvs/easysteer` for managed serving and online capture; and `.venvs/latent-vllm` for offline hidden replay. Do not mix environments to bypass the project entrypoints.
+Use `.venvs/runner` for run execution, Docker, harness and `rl-dataset` commands; `.venvs/analysis` for token processing and offline analysis; `.venvs/easysteer` for managed serving and online capture; `.venvs/latent-vllm` for offline hidden replay and isolated dataset logprob replay; and `.venvs/rl` for LoRA training. Do not mix environments to bypass the project entrypoints.

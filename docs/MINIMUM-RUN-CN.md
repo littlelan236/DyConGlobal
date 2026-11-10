@@ -110,6 +110,36 @@ Action 与 difficulty 产物位于项目级目录，使用显式来源 run 和�
 
 多 GPU 独立 TP=1 调度使用配置 `serving.trajectory_sharding: per_gpu_tp1`，由正式 run 入口执行，见[多 GPU 指南](MULTI-GPU-TP1-CN.md)。
 
+## RL/dataset：离线 step 数据与 logprobs 重放
+
+入口为 `.venvs/runner/bin/dycon rl-dataset`。先阅读 [RL/dataset 模块文档](../RL/dataset/README.md)，以 [dataset 示例](../RL/dataset/configs/swebench-consensus-example.yaml) 和 [replay 示例](../RL/dataset/configs/replay-logprobs-example.yaml) 编写独立 YAML；显式设置来源 run/rollout、全新产物 ID、物理根目录与重放 GPU。示例配置中的历史 ID 不表示已有成功数据集，以下 `DATASET_ID`、`REPLAY_ID` 和各路径均需与自己的配置一致。
+
+```bash
+# 只检查来源选择，不构建数据集
+.venvs/runner/bin/dycon rl-dataset build --dataset-config DATASET.yaml --dry-run
+
+# 明确需要实际构建时执行
+.venvs/runner/bin/dycon rl-dataset build --dataset-config DATASET.yaml
+.venvs/runner/bin/dycon rl-dataset check DATASET_ID --dataset-root DATASET_ROOT --level full
+.venvs/runner/bin/dycon rl-dataset materialize DATASET_ID --dataset-root DATASET_ROOT --cache-root CACHE_ROOT
+
+# 先预检；正式重放由 CLI 启动隔离 latent-vLLM worker
+.venvs/runner/bin/dycon rl-dataset replay-logprobs --replay-config REPLAY.yaml --dry-run
+.venvs/runner/bin/dycon rl-dataset replay-logprobs --replay-config REPLAY.yaml
+.venvs/runner/bin/dycon rl-dataset check-logprobs REPLAY_ID --storage-root OUTPUT_ROOT --with-values --dataset-id DATASET_ID --dataset-root DATASET_ROOT
+.venvs/runner/bin/dycon artifact verify REPLAY_ID --scope rl-replay --storage-root OUTPUT_ROOT
+```
+
+每组保留同一 decision step 的全部候选，输入使用 native prompt/output token，监督仅覆盖本分支生成的 reasoning+action，mask 使用原始 target 坐标。默认完整组至少有两个全部可用分支；未选中或未 retained 不会因此被丢弃。构建阶段把历史 score 保留为元数据，训练阶段由版本化 GRPO objective 冻结 Advantage。
+
+离线训练沿用 `.venvs/runner/bin/dycon lora-train --training-config RL/experiments/grpo-offline-k3-smoke.yaml` 做 dry-run；实际训练使用 `.venvs/rl/bin/dycon lora-train --training-config TASK.yaml`。填写新 attempt ID、dataset ID 和空闲物理 GPU。训练扫描整个 dataset 的完整 eligible groups，只遍历一次 epoch，无 split manifest；raw T=1 ratio 与 token K3 共用冻结的 initial-policy logprob。配置、reference cache、checkpoint/resume、产物验证和验收边界见 [GRPO 指南](../RL/GRPO.md) 与 [测试报告](../RL/GRPO_VALIDATION.md)。
+
+`audit.enabled` 默认关闭，控制来源身份与哈希核验；`check --level full` 不会强行打开已关闭的来源审计。产物 receipt 始终核验。Dataset 保存在 `DATASET_ROOT/RL/datasets/DATASET_ID`，可选 mmap cache 保存在 `CACHE_ROOT/RL/cache/CACHE_ID`，重放产物保存在 `OUTPUT_ROOT/RL/replays/REPLAY_ID`。
+
+重放只从根配置读取 temperature/top_p/top_k，模型、dtype 和其他约束读取冻结的历史来源；不支持的约束在加载模型前拒绝。默认输出 `replay_estimate`，不能等同原始生成时记录的行为概率；loader 需要显式 `allow_replay_estimates=True`，且存在零支持 `-inf` 的整组仍不可用。Qwen GDN、真实长上下文和多卡容量需另外验收。
+
+中断后，分别使用 `build --dataset-config DATASET.yaml --recover` 或 `replay-logprobs --replay-config REPLAY.yaml --recover`。构建恢复采用冻结 selection，从完整 rollout 边界继续；重放恢复采用原始采样快照和已封存 branch。输入、实现或 runtime 不兼容时拒绝续跑；旧版无 checkpoint 的 staging 不能直接恢复。完整限制与合成测试命令见模块文档。
+
 ## 8. 任务专用入口
 
 SkillsBench、WebArena Verified、SWE-bench、Harbor 的 task 导入、容器准备和 preflight 各有约束。开始任务前阅读[benchmark 操作指南](BENCHMARKS-CN.md)，不要从实验报告复制旧 run 的命令或资源参数。

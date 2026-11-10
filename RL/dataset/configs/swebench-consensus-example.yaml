@@ -1,0 +1,23 @@
+schema_version: 1
+dataset_id: swebench-consensus-step-20261110-v3
+sources:
+  runs: [verified80-consensus32-resolved106plus331-gpu03-tp4-w4-s64-20261027]
+  all_submitted: true
+audit:
+  enabled: false
+filters:
+  benchmark_family: swebench
+  rollout_modes: [parallel_consensus]
+  outcome: any
+quality:
+  token_evidence: native_exact
+  group_policy: complete_native_group_v1
+  min_branches: 2
+  alias_policy: canonical_origin_once_v1
+supervision:
+  policy: native_completion_reasoning_action_v1
+storage:
+  dataset_root: /data3/wangtianyi/DyConGlobal
+  cache_root: /data3/wangtianyi/DyConGlobal
+  max_shard_bytes: 268435456
+  memory_budget_gib: 4

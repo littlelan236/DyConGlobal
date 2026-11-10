@@ -1,8 +1,41 @@
 # Qwen3.5-9B LoRA foundation
 
+训练接口的配置、运行与代码示例见 **[训练接口使用指南](TRAINING.md)**：
+
+| 使用情境 | 文档 |
+|---|---|
+| CLI、完整 YAML、fresh/resume/warm_start、Python 服务与训练核心 | [TRAINING.md](TRAINING.md) |
+| 外部 `loss_mask`、确定性 uniform、监督坐标与计数 | [SPARSE_SUPERVISION.md](SPARSE_SUPERVISION.md) |
+| CE/MLP 分块、checkpoint policy、exact-length 与 offload | [LONG_CONTEXT.md](LONG_CONTEXT.md) |
+| 离线数据集、token cache 和历史概率 replay | [dataset/README.md](dataset/README.md) |
+| 离线 GRPO、reference cache、一次 epoch 与精确恢复 | [GRPO.md](GRPO.md) |
+| GRPO 自动化测试和真实 Qwen synthetic GPU 验收 | [GRPO_VALIDATION.md](GRPO_VALIDATION.md) |
+
 This module provides a single GPU bf16 LoRA engineering training core in the original
-DyConGlobal checkout. It does not implement RL, a reward, GRPO/PPO, a business dataset,
-benchmark evaluation, vLLM adapter serving, quantization, or distributed training.
+DyConGlobal checkout. It supports synthetic causal CE and the versioned offline
+`offline_grpo_k3_v1` objective. Benchmark evaluation, vLLM adapter serving,
+quantization and distributed training remain separate.
+The separate [dataset module](dataset/README.md) constructs offline native-token step groups
+and extracts historical processed logprob estimates through isolated native vLLM replay.
+
+Dataset operations use `.venvs/runner/bin/dycon rl-dataset`; the command manages its own
+isolated `.venvs/latent-vllm` worker for inference. Dataset/replay YAMLs own explicit source
+bindings, physical roots and replay resources. The root config provides only replay
+`temperature/top_p/top_k`; historical model/dtype/constraints come from frozen source
+snapshots. Dataset, cache and replay artifacts live under `ROOT/RL/{datasets,cache,replays}/ID`
+and use the unified `artifact show/verify` interface. See the [dataset workflow](dataset/README.md#workflow)
+for build/check/materialize/replay commands and explicit recovery.
+
+The dataset Python loader returns groups, original target-coordinate masks and optional
+`behavior_logprobs`. The versioned `offline_grpo_k3_v1` objective now consumes these
+sealed groups through the same `lora-train` entrypoint. It uses raw T=1 ratios against
+a frozen initial policy, token K3 on native completion targets, frozen advantages and
+exactly one epoch; processed replay estimates are never used as the policy denominator.
+Replay estimates require explicit loader opt-in, and any zero-support member makes its
+whole group unavailable to the probability loader.
+
+See [offline GRPO](GRPO.md) for score semantics, group weighting, reference/cache
+identity, one-epoch cursors, complete-checkpoint resume and acceptance commands.
 
 Use `.venvs/rl`, independently locked by `locks/rl.in` / `locks/rl.txt`. On this server
 the environment and its UV cache live under `/data3/wangtianyi/DyConGlobal/RL/`;
@@ -11,7 +44,9 @@ the environment and its UV cache live under `/data3/wangtianyi/DyConGlobal/RL/`;
 
 ```bash
 cd /home/wangtianyi/DyConGlobal
-.venvs/rl/bin/dycon lora-train --training-config RL/experiments/lora-smoke.yaml
+.venvs/runner/bin/dycon lora-train --training-config RL/experiments/lora-sparse-uniform.yaml
+# The preset above defaults to dry-run. For actual synthetic training, copy a task
+# YAML, set a fresh attempt_id and run.mode: smoke, then use .venvs/rl/bin/dycon.
 .venvs/runner/bin/dycon artifact verify ATTEMPT_ID \
   --scope lora-attempt --storage-root /data3/wangtianyi/DyConGlobal
 ```
@@ -30,9 +65,26 @@ are resolved only by an actual model load. `run.mode: smoke` uses the packaged,
 handwritten synthetic fixture `RL/fixtures/causal-text-smoke-v1.json`; deterministic
 repetition constructs the configured test length. It is engineering-generated token
 evidence, not historical native-token evidence or a business training set. No user
-batch is automatically truncated. The supported fixture length is 8–2048; the fixed
-prompt must also fit. Successful capacity at one length is not a guarantee for longer
-contexts.
+batch is automatically truncated. The fixture configuration range is 8–262144; the
+fixed prompt must fit. Lengths above 2048 require the long-context settings described
+below. The schema limit does not establish device capacity, and successful capacity
+at one length is not a guarantee for longer contexts.
+
+Long-context settings and their causal/gradient contracts are documented in
+[`LONG_CONTEXT.md`](LONG_CONTEXT.md). The additive memory policy supports chunked CE,
+position-chunked MLPs, exact-length microbatches, Flash-only full attention, explicit
+activation offload budgets and three checkpoint schedules. Lengths above 2048 require
+chunked CE, exact length and Flash full attention. Run the supplied
+`RL/experiments/lora-long-throughput.yaml` (throughput oriented) or
+`RL/experiments/lora-long-memory.yaml` (memory oriented) with its attempt ID changed
+and `run.mode: dry-run` before selecting a real fresh attempt. Dry-run reports estimates
+and does not certify capacity.
+
+Sparse target supervision (`labels`, `explicit_mask`, deterministic `uniform`) is
+documented in [`SPARSE_SUPERVISION.md`](SPARSE_SUPERVISION.md). It selects original
+causal targets before vocabulary projection while preserving full input histories.
+The `lora-sparse-*.yaml` presets default to dry-run. New sparse acceptance covers CPU
+tiny Qwen3.5/PEFT and runner dry-run; no new sparse GPU capacity is certified.
 
 All three start modes use the same `dycon lora-train` command and
 `RL.service.run(root_config, training_config)` Python service:
@@ -81,6 +133,9 @@ causal CE in `RL.validation`. Labels use `-100` for prompt/padding; shift happen
 Accumulation weights by supervised token count, including a final partial window.
 Invalid batches, nonfinite losses/gradients and zero effective gradients fail before
 an optimizer update. The optimizer contains only the trainable adapter parameters.
+See the [Python API examples](TRAINING.md#4-python-服务与训练核心) for concrete batch,
+callback and selected-loss calls. Low-level `train` does not publish attempts or
+checkpoints automatically; `RL.service.run` manages the formal lifecycle.
 
 Outputs live in `runtime.output_root/RL/checkpoints/ATTEMPT_ID/`. Files include the
 frozen source/resolved YAML, attempt/environment/model identity, complete target and
@@ -131,5 +186,12 @@ not instantiate; their complete names are recorded in the checkpoint inventory.
 They are outside the actual text backbone and therefore are not LoRA targets. The
 current backbone has no extra/MTP target modules. Stored checkpoint element counts
 must not be substituted for these actual loaded/trainable counts.
+
+Long-context acceptance and measured capacity are reported in
+[`LONG_CONTEXT_VALIDATION.md`](LONG_CONTEXT_VALIDATION.md). The initial 2K–24K ladder
+uses two updates per fresh attempt, then separate-process complete-checkpoint resume
+and adapter reload. It records explicit source/kernels, temporary-logit block size,
+peak memory, host/offload transfers, throughput and remaining device margin. Only the
+last completed and fully verified lengths count as accepted capacity.
 
 [Validation report](VALIDATION.md): 40 CPU checks, full real-GPU acceptance and 95 existing-function regression tests passed on 2026-11-10. The continuous/resumed final adapter difference was 0.0.

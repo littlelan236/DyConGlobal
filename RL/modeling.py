@@ -115,12 +115,14 @@ class Coverage:
                                 "nonzero_B_gradient": False, "max_B_gradient_norm": 0.0}
                      for t in targets}
         self.handles = []
+        self.last_gradients = {}
         for name, module in self.modules.items():
             def hook(_module, _inputs, _output, path=name):
                 self.rows[path]["executed"] = True
             self.handles.append(module.register_forward_hook(hook))
 
     def gradients(self):
+        self.last_gradients = {}
         for name, module in self.modules.items():
             grad = module.lora_B["default"].weight.grad
             if grad is not None:
@@ -131,6 +133,12 @@ class Coverage:
                 row["gradient_seen"] = True
                 row["nonzero_B_gradient"] |= norm > 0
                 row["max_B_gradient_norm"] = max(row["max_B_gradient_norm"], norm)
+                category = row["category"]
+                summary = self.last_gradients.setdefault(category, {"projections": 0, "nonzero_B_gradients": 0,
+                                                                   "max_B_gradient_norm": 0.0})
+                summary["projections"] += 1
+                summary["nonzero_B_gradients"] += int(norm > 0)
+                summary["max_B_gradient_norm"] = max(summary["max_B_gradient_norm"], norm)
 
     def finish(self, before, after):
         for name, row in self.rows.items():

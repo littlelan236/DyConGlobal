@@ -21,13 +21,14 @@ class RunEvidence:
     def empty(self):
         return {"schema_version": 1, "rollouts": {}, "evaluations": {}, "tasks": {}, "run_id": self.run_id, "revision": 0}
 
-    def read(self):
+    def read(self, *, validate=True):
         if not self.path.exists():
             return self.empty()
         data = read_json(self.path)
         if data.get("schema_version") not in (1, 2):
             raise ValueError(f"Unsupported run catalog schema: {self.path}")
-        self.validate(data)
+        if validate:
+            self.validate(data)
         return data
 
     @contextmanager
@@ -118,8 +119,8 @@ class RunEvidence:
                 if rid not in data["rollouts"] or outcome.get(subject_digest(data["rollouts"][rid])[0]) != subject_digest(data["rollouts"][rid])[1]:
                     raise ValueError("Evaluation outcome binds an unknown rollout or different subject")
 
-    def select(self, rollout_ids=(), *, partition=None):
-        data = self.read()
+    def select(self, rollout_ids=(), *, partition=None, audit=True):
+        data = self.read(validate=audit)
         requested = list(rollout_ids)
         if len(requested) != len(set(requested)):
             raise ValueError("Duplicate rollout IDs")

@@ -209,12 +209,20 @@ desktop.ini
 /runtime/webarena-browser/
 /runtime/webarena-environments/
 
-# LoRA engineering training attempts and machine-local configuration
+# RL artifacts: source packages remain visible (RL/dataset and RL/grpo)
 /RL/checkpoints/**
+/RL/datasets/
+/RL/cache/
+/RL/replays/
+/RL/extractions/
 /RL/logs/**
 /RL/reports/**
+# Machine-specific execution configs; reusable experiment templates stay tracked
 /RL/experiments/*.local.yaml
 /RL/experiments/*.local.yml
+/RL/experiments/**/*.local.yaml
+/RL/experiments/**/*.local.yml
+/RL/experiments/grpo-objective-20261110/
 # Local profiler traces, tensorboard events and adapter exports
 /RL/profiles/
 /RL/tensorboard/

@@ -1,0 +1,411 @@
+{
+  "synthetic": true,
+  "description": "Generated token fixture; no benchmark trajectories",
+  "groups": [
+    {
+      "group": {
+        "group_id": "synthetic-g0",
+        "expected_branch_count": 3,
+        "data_ready": true
+      },
+      "members": [
+        {
+          "group_id": "synthetic-g0",
+          "branch_id": 0,
+          "branch_sample_id": "synthetic-g0-b0",
+          "prompt_token_ids": [
+            2,
+            3,
+            4
+          ],
+          "completion_token_ids": [
+            12,
+            20,
+            30
+          ],
+          "prompt_sha256": "d7eefc196ef023da67dd9b5259fed0808f1facf4725975cd7b4d65d0b897fbfa",
+          "completion_sha256": "9a9bc7f85fa0728eeddc0a72157b1dcf58beda59541538ed9c8ca8a3c1463a0a",
+          "historical_score": 0.0,
+          "action": {
+            "synthetic_fixture": true,
+            "branch": 0
+          },
+          "audit_enabled": true
+        },
+        {
+          "group_id": "synthetic-g0",
+          "branch_id": 1,
+          "branch_sample_id": "synthetic-g0-b1",
+          "prompt_token_ids": [
+            2,
+            3,
+            4
+          ],
+          "completion_token_ids": [
+            13,
+            20,
+            31,
+            31
+          ],
+          "prompt_sha256": "d7eefc196ef023da67dd9b5259fed0808f1facf4725975cd7b4d65d0b897fbfa",
+          "completion_sha256": "f9b9d7b27f4a9351abedf2df89f39b2ca7efc086d02f49c7f977967e1d6941f1",
+          "historical_score": 1.0,
+          "action": {
+            "synthetic_fixture": true,
+            "branch": 1
+          },
+          "audit_enabled": true
+        },
+        {
+          "group_id": "synthetic-g0",
+          "branch_id": 2,
+          "branch_sample_id": "synthetic-g0-b2",
+          "prompt_token_ids": [
+            2,
+            3,
+            4
+          ],
+          "completion_token_ids": [
+            14,
+            20,
+            32,
+            32,
+            32
+          ],
+          "prompt_sha256": "d7eefc196ef023da67dd9b5259fed0808f1facf4725975cd7b4d65d0b897fbfa",
+          "completion_sha256": "941c8bd7a769153a7e74f74389aac0fc010a5d81882254ce77dd077b887db2da",
+          "historical_score": 2.0,
+          "action": {
+            "synthetic_fixture": true,
+            "branch": 2
+          },
+          "audit_enabled": true
+        }
+      ]
+    },
+    {
+      "group": {
+        "group_id": "synthetic-g1",
+        "expected_branch_count": 3,
+        "data_ready": true
+      },
+      "members": [
+        {
+          "group_id": "synthetic-g1",
+          "branch_id": 0,
+          "branch_sample_id": "synthetic-g1-b0",
+          "prompt_token_ids": [
+            2,
+            3,
+            5
+          ],
+          "completion_token_ids": [
+            12,
+            21,
+            30
+          ],
+          "prompt_sha256": "e6e93bacd7239f258d3af1018679149d2a9a3e0bfc41a91da7e684b4666dc8ce",
+          "completion_sha256": "ea0dbce734773f1cbf8de625b084a21e5d914605cb3a52514f055bc8c9ac80c7",
+          "historical_score": 0.0,
+          "action": {
+            "synthetic_fixture": true,
+            "branch": 0
+          },
+          "audit_enabled": true
+        },
+        {
+          "group_id": "synthetic-g1",
+          "branch_id": 1,
+          "branch_sample_id": "synthetic-g1-b1",
+          "prompt_token_ids": [
+            2,
+            3,
+            5
+          ],
+          "completion_token_ids": [
+            13,
+            21,
+            31,
+            31
+          ],
+          "prompt_sha256": "e6e93bacd7239f258d3af1018679149d2a9a3e0bfc41a91da7e684b4666dc8ce",
+          "completion_sha256": "e09bec6d1de19d2d883f5190a06e84dd41d954d4dd06e1452800d6e1687caf9e",
+          "historical_score": 1.0,
+          "action": {
+            "synthetic_fixture": true,
+            "branch": 1
+          },
+          "audit_enabled": true
+        },
+        {
+          "group_id": "synthetic-g1",
+          "branch_id": 2,
+          "branch_sample_id": "synthetic-g1-b2",
+          "prompt_token_ids": [
+            2,
+            3,
+            5
+          ],
+          "completion_token_ids": [
+            14,
+            21,
+            32,
+            32,
+            32
+          ],
+          "prompt_sha256": "e6e93bacd7239f258d3af1018679149d2a9a3e0bfc41a91da7e684b4666dc8ce",
+          "completion_sha256": "f9e122bd625496d3c4465bdac6e3fe91bc5115fc746d1f9fd16373c400203b95",
+          "historical_score": 2.0,
+          "action": {
+            "synthetic_fixture": true,
+            "branch": 2
+          },
+          "audit_enabled": true
+        }
+      ]
+    },
+    {
+      "group": {
+        "group_id": "synthetic-g2",
+        "expected_branch_count": 3,
+        "data_ready": true
+      },
+      "members": [
+        {
+          "group_id": "synthetic-g2",
+          "branch_id": 0,
+          "branch_sample_id": "synthetic-g2-b0",
+          "prompt_token_ids": [
+            2,
+            3,
+            6
+          ],
+          "completion_token_ids": [
+            12,
+            22,
+            30
+          ],
+          "prompt_sha256": "efc85a3060ce989a65e9aa2e1de66ea10d5b38b1211f0205aecc01190c33c6d6",
+          "completion_sha256": "1dae7fc7da5b57c08dd70e381ef2f40d510169cc4fc614b371d59468f70f4cb0",
+          "historical_score": 0.0,
+          "action": {
+            "synthetic_fixture": true,
+            "branch": 0
+          },
+          "audit_enabled": true
+        },
+        {
+          "group_id": "synthetic-g2",
+          "branch_id": 1,
+          "branch_sample_id": "synthetic-g2-b1",
+          "prompt_token_ids": [
+            2,
+            3,
+            6
+          ],
+          "completion_token_ids": [
+            13,
+            22,
+            31,
+            31
+          ],
+          "prompt_sha256": "efc85a3060ce989a65e9aa2e1de66ea10d5b38b1211f0205aecc01190c33c6d6",
+          "completion_sha256": "f6852346d14f451128a1fd5caeb50c16609eaca9a2a6db0f45bd6b726f229c31",
+          "historical_score": 1.0,
+          "action": {
+            "synthetic_fixture": true,
+            "branch": 1
+          },
+          "audit_enabled": true
+        },
+        {
+          "group_id": "synthetic-g2",
+          "branch_id": 2,
+          "branch_sample_id": "synthetic-g2-b2",
+          "prompt_token_ids": [
+            2,
+            3,
+            6
+          ],
+          "completion_token_ids": [
+            14,
+            22,
+            32,
+            32,
+            32
+          ],
+          "prompt_sha256": "efc85a3060ce989a65e9aa2e1de66ea10d5b38b1211f0205aecc01190c33c6d6",
+          "completion_sha256": "86cead0c06dec999628ef49c6b150f4d1ead4c66b17b404e46b343fddbb17e00",
+          "historical_score": 2.0,
+          "action": {
+            "synthetic_fixture": true,
+            "branch": 2
+          },
+          "audit_enabled": true
+        }
+      ]
+    },
+    {
+      "group": {
+        "group_id": "synthetic-g3",
+        "expected_branch_count": 3,
+        "data_ready": true
+      },
+      "members": [
+        {
+          "group_id": "synthetic-g3",
+          "branch_id": 0,
+          "branch_sample_id": "synthetic-g3-b0",
+          "prompt_token_ids": [
+            2,
+            3,
+            7
+          ],
+          "completion_token_ids": [
+            12,
+            23,
+            30
+          ],
+          "prompt_sha256": "ae62ae5ff3405c3476e9b0720de4aac084e0bfcb2401f5f5a2f33162be498d0d",
+          "completion_sha256": "bf08be2b7df3885b3c86f46a62cebb1494f33194d250762409c9d74c10d020f7",
+          "historical_score": 0.0,
+          "action": {
+            "synthetic_fixture": true,
+            "branch": 0
+          },
+          "audit_enabled": true
+        },
+        {
+          "group_id": "synthetic-g3",
+          "branch_id": 1,
+          "branch_sample_id": "synthetic-g3-b1",
+          "prompt_token_ids": [
+            2,
+            3,
+            7
+          ],
+          "completion_token_ids": [
+            13,
+            23,
+            31,
+            31
+          ],
+          "prompt_sha256": "ae62ae5ff3405c3476e9b0720de4aac084e0bfcb2401f5f5a2f33162be498d0d",
+          "completion_sha256": "7361d0919ff1dd2f1d5a1e30960e0a6fbe23b531db87dff1429da2fc036d542f",
+          "historical_score": 1.0,
+          "action": {
+            "synthetic_fixture": true,
+            "branch": 1
+          },
+          "audit_enabled": true
+        },
+        {
+          "group_id": "synthetic-g3",
+          "branch_id": 2,
+          "branch_sample_id": "synthetic-g3-b2",
+          "prompt_token_ids": [
+            2,
+            3,
+            7
+          ],
+          "completion_token_ids": [
+            14,
+            23,
+            32,
+            32,
+            32
+          ],
+          "prompt_sha256": "ae62ae5ff3405c3476e9b0720de4aac084e0bfcb2401f5f5a2f33162be498d0d",
+          "completion_sha256": "03cd919b43eb168f293c3628ff364dd9d0008e66390d657e9a6593dda1bb5f01",
+          "historical_score": 2.0,
+          "action": {
+            "synthetic_fixture": true,
+            "branch": 2
+          },
+          "audit_enabled": true
+        }
+      ]
+    },
+    {
+      "group": {
+        "group_id": "synthetic-g4",
+        "expected_branch_count": 3,
+        "data_ready": true
+      },
+      "members": [
+        {
+          "group_id": "synthetic-g4",
+          "branch_id": 0,
+          "branch_sample_id": "synthetic-g4-b0",
+          "prompt_token_ids": [
+            2,
+            3,
+            8
+          ],
+          "completion_token_ids": [
+            12,
+            24,
+            30
+          ],
+          "prompt_sha256": "a5d5bd42a607f8bdcf9760b0445f552a32d7319bab7ba3d90cd582d6cac019ce",
+          "completion_sha256": "3bb3a50798b24d6c36c49e681301fdda165f964e998565978f9867b98f784b93",
+          "historical_score": 0.0,
+          "action": {
+            "synthetic_fixture": true,
+            "branch": 0
+          },
+          "audit_enabled": true
+        },
+        {
+          "group_id": "synthetic-g4",
+          "branch_id": 1,
+          "branch_sample_id": "synthetic-g4-b1",
+          "prompt_token_ids": [
+            2,
+            3,
+            8
+          ],
+          "completion_token_ids": [
+            13,
+            24,
+            31,
+            31
+          ],
+          "prompt_sha256": "a5d5bd42a607f8bdcf9760b0445f552a32d7319bab7ba3d90cd582d6cac019ce",
+          "completion_sha256": "546a4dde1c9cb26685652a98de1e0282c560757f24ab37cbdc904a799eb302ea",
+          "historical_score": 1.0,
+          "action": {
+            "synthetic_fixture": true,
+            "branch": 1
+          },
+          "audit_enabled": true
+        },
+        {
+          "group_id": "synthetic-g4",
+          "branch_id": 2,
+          "branch_sample_id": "synthetic-g4-b2",
+          "prompt_token_ids": [
+            2,
+            3,
+            8
+          ],
+          "completion_token_ids": [
+            14,
+            24,
+            32,
+            32,
+            32
+          ],
+          "prompt_sha256": "a5d5bd42a607f8bdcf9760b0445f552a32d7319bab7ba3d90cd582d6cac019ce",
+          "completion_sha256": "8c84782df92ca70c24861aa13cad0e8b32d9fa4abccc1052b328bf8a957f03c7",
+          "historical_score": 2.0,
+          "action": {
+            "synthetic_fixture": true,
+            "branch": 2
+          },
+          "audit_enabled": true
+        }
+      ]
+    }
+  ]
+}

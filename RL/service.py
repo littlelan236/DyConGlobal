@@ -13,6 +13,8 @@ from core.io import hash_json, now, read_json, sha256, write_json
 from core.locking import file_lock
 from RL.artifacts import base_identity, commit_receipt, dependency_versions, source_identity
 from RL.config import attempt_directory, load, schedule_contract
+from RL.resources import memory_plan
+from RL.supervision import describe_policy
 
 
 def _source(config):
@@ -41,7 +43,24 @@ def _source(config):
 
 
 def _preflight(config, root, parent):
+    memory_plan(config)
     base = base_identity(config.model.path, root)
+    if config.algorithm is not None:
+        from RL.grpo.data import prepare
+        from RL.grpo.contract import validate_input, validate_resume, validate_reference_files
+        raw, proof = prepare(config)
+        validate_input(base, proof)
+        if parent:
+            identity = parent["identity"]["contract"]
+            if identity["base_fingerprint"] != base["fingerprint"] or identity["lora"] != config.lora.model_dump():
+                raise ValueError("Source adapter base/tokenizer/LoRA identity mismatch")
+            if config.run.start.mode == "resume":
+                metadata = read_json(Path(parent["path"]) / "state.json")
+                validate_resume(config, proof, metadata)
+                validate_reference_files(parent["path"], metadata["contract"])
+                if metadata["contract"].get("source_fingerprint") != source_identity(root)["fingerprint"]:
+                    raise ValueError("GRPO resume source implementation identity mismatch")
+        return {**base, "grpo_dataset": proof}
     fixture = Path(__file__).parent / "fixtures/causal-text-smoke-v1.json"
     if parent:
         contract = parent["identity"]["contract"]
@@ -50,6 +69,8 @@ def _preflight(config, root, parent):
         if config.run.start.mode == "resume":
             state = read_json(Path(config.run.start.checkpoint) / "state.json")
             expected = state["contract"]
+            if "supervision" not in expected.get("schedule", {}).get("training", {}):
+                raise ValueError("Legacy checkpoint lacks a supervision contract; use explicit adapter warm_start")
             if (expected["schedule"] != schedule_contract(config)
                     or expected["input"]["fixture_sha256"] != sha256(fixture)):
                 raise ValueError("Resume schedule or fixed input identity mismatch")
@@ -78,12 +99,18 @@ def run(root_config, training_config):
                     "output": str(directory), "base_fingerprint": base["fingerprint"],
                     "fixture_sha256": sha256(Path(__file__).parent / "fixtures/causal-text-smoke-v1.json"),
                     "resolved_config": config.model_dump(), "source": parent and parent["path"],
+                    "memory_plan": memory_plan(config),
+                    "supervision": describe_policy(config.training.supervision),
+                    "algorithm": config.algorithm.name if config.algorithm else "causal_ce",
+                    "grpo": config.grpo.model_dump() if config.grpo else None,
+                    "dataset": base.get("grpo_dataset"),
                     "coverage": "text backbone all Linear; exact paths resolved only when loading the model"}
         directory.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(directory.parent / ("." + config.run.attempt_id + ".lock"), nonblocking=True):
             directory.mkdir(exist_ok=False)
             attempt = {"schema_version": 1, "attempt_id": config.run.attempt_id, "purpose": "engineering_smoke",
                        "start_mode": config.run.start.mode, "status": "initializing", "created_at": now(),
+                       "supervision": describe_policy(config.training.supervision),
                        "parent": {k: v for k, v in parent.items() if k not in {"identity", "adapter"}} if parent else None}
             write_json(directory / "attempt.json", attempt)
             (directory / "training-config.yaml").write_bytes(source.read_bytes())
@@ -141,17 +168,19 @@ def _train(config, root, directory, base, parent, attempt):
         save_checkpoint,
         verify_adapter,
     )
+    from RL.memory import LossBackend, attention_context, configure_checkpointing, install_mlp_backend
     from RL.modeling import (
         Coverage,
         adapter_fingerprint,
-        enable_checkpointing,
         frozen_checksums,
         inject,
         load_base,
         parameter_manifest,
     )
+    from RL.profiling import UpdateTelemetry
+    from RL.supervision import consumed_selected_tokens
     from RL.training import optimizer_and_scheduler, seed_everything, train
-    from RL.validation import causal_ce, fixture_batches, probe_logits
+    from RL.validation import fixture_batches, probe_logits
 
     if torch.cuda.device_count() != 1:
         raise RuntimeError("LoRA training requires exactly one visible CUDA device")
@@ -163,6 +192,10 @@ def _train(config, root, directory, base, parent, attempt):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     torch.backends.cuda.matmul.allow_tf32 = False
+    # bf16 reduced-precision GEMM reductions depend on token-block dimensions.
+    # Full-fp32 accumulation is required for dense/chunked numerical equivalence.
+    torch.backends.cuda.preferred_blas_library("cublaslt")
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (False, False)
     seed_everything(config.run.seed)
     source = source_identity(root)
     environment = {"python": sys.version, "platform": platform.platform(), "cuda": torch.version.cuda,
@@ -173,12 +206,22 @@ def _train(config, root, directory, base, parent, attempt):
                                                "name": getattr(getattr(qwen, name, None), "__name__", None)}
                                         for name in ["causal_conv1d_fn", "torch_chunk_gated_delta_rule"]},
                    "tolerances": tolerances}
+    plan = memory_plan(config)
+    environment["memory_plan"] = plan
+    environment["qwen_implementation_sha256"] = sha256(Path(qwen.__file__))
+    environment["linear_attention"] = {
+        name: {"module": getattr(getattr(qwen, name, None), "__module__", None),
+               "name": getattr(getattr(qwen, name, None), "__name__", None)}
+        for name in ["causal_conv1d_fn", "torch_chunk_gated_delta_rule", "torch_recurrent_gated_delta_rule"]}
     environment["determinism"] = {
         "algorithms": torch.are_deterministic_algorithms_enabled(),
         "cudnn_deterministic": torch.backends.cudnn.deterministic,
         "cudnn_benchmark": torch.backends.cudnn.benchmark,
         "cublas_workspace_config": os.environ["CUBLAS_WORKSPACE_CONFIG"],
         "matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "bf16_reduced_precision_reduction": torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
+        "bf16_reduction_split_k": torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction_split_k,
+        "blas_library": str(torch.backends.cuda.preferred_blas_library()),
     }
     environment["linear_attention"]["execution_backend"] = {
         "causal_conv1d": "reference_pytorch" if source["dependencies"]["causal-conv1d"] is None else "installed_kernel_dispatch",
@@ -200,7 +243,8 @@ def _train(config, root, directory, base, parent, attempt):
     expected_targets = parent["identity"]["contract"]["targets"] if parent else None
     model, targets = inject(model, config.lora, adapter=parent["adapter"] if parent else None,
                             expected_targets=expected_targets)
-    enable_checkpointing(model)
+    mlps = install_mlp_backend(model, config.training.memory.mlp_chunk_tokens)
+    offloader = configure_checkpointing(model, config, plan["host_budget_bytes_per_rank"])
     torch.cuda.synchronize()
     loading = {"seconds": time.monotonic() - started, "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
                "peak_reserved_bytes": torch.cuda.max_memory_reserved()}
@@ -208,7 +252,14 @@ def _train(config, root, directory, base, parent, attempt):
     manifest["checkpoint_inventory"] = checkpoint_inventory
     manifest["extra_backbone_targets"] = [t for t in targets if t["category"] == "extra"]
     write_json(directory / "trainable-parameters.json", manifest)
-    batches, input_identity = fixture_batches(tokenizer, config.validation.max_sequence_length)
+    if config.algorithm is not None:
+        return _train_grpo(config, root, directory, base, parent, attempt, model, targets,
+                           optimizer_settings=config.training, environment=environment,
+                           loading=loading, mlps=mlps, offloader=offloader)
+    batches, input_identity = fixture_batches(tokenizer, config.validation.max_sequence_length,
+                                              config.training.supervision)
+    write_json(directory / "input-identity.json", input_identity)
+    write_json(directory / "selection.json", input_identity["supervision"])
     adapter_identity = adapter_contract(base, targets, config.lora)
     if parent:
         verify_adapter(parent["adapter"], adapter_identity)
@@ -216,6 +267,9 @@ def _train(config, root, directory, base, parent, attempt):
                 "adapter": adapter_identity, "source_fingerprint": source["fingerprint"],
                 "dependencies": source["dependencies"], "attention": environment["linear_attention"]}
     contract["determinism"] = environment["determinism"]
+    contract["memory_backend"] = {"strategy": config.training.memory.model_dump(),
+                                  "checkpoint_policy": config.training.checkpoint_policy,
+                                  "qwen_implementation_sha256": environment["qwen_implementation_sha256"]}
     optimizer, scheduler = optimizer_and_scheduler(model, config.training)
     initial_optimizer_entries = len(optimizer.state)
     initial_adapter = adapter_fingerprint(model)
@@ -229,8 +283,9 @@ def _train(config, root, directory, base, parent, attempt):
         state = restore_checkpoint(parent["path"], optimizer, scheduler, contract, adapter_identity)
         if state["consumed_microbatches"] != state["global_step"] * config.training.gradient_accumulation_steps:
             raise ValueError("Fixed fixture resume input cursor is inconsistent with global step")
-        expected_tokens = sum(int((batches[i % len(batches)]["labels"][:, 1:] != -100).sum())
-                              for i in range(state["consumed_microbatches"]))
+        expected_tokens = consumed_selected_tokens(
+            batches, state["consumed_microbatches"], vocab_size=model.config.text_config.vocab_size,
+            max_length=config.validation.max_sequence_length, supervision=config.training.supervision)
         if state["consumed_tokens"] != expected_tokens:
             raise ValueError("Fixed fixture resume token counter is inconsistent")
     initial_state = dict(state)
@@ -243,6 +298,10 @@ def _train(config, root, directory, base, parent, attempt):
         if initial_optimizer_entries != 0 or scheduler.last_epoch != 0 or any(state.values()):
             raise ValueError("Warm-start optimizer/schedule/cursors were not reset")
     coverage = Coverage(model, targets)
+    loss_backend = LossBackend(config.training.memory)
+    telemetry = UpdateTelemetry(model, loss_backend, mlps, offloader, directory,
+                                config.training.memory.profile_first_update,
+                                config.training.memory.attention_policy == "flash_only")
     attempt.update(status="training", contract=contract, loading=loading, initial_state=initial_state)
     write_json(directory / "attempt.json", attempt)
     metrics_path = directory / "metrics.jsonl"
@@ -252,6 +311,12 @@ def _train(config, root, directory, base, parent, attempt):
     cursor = state["consumed_microbatches"]
     stream = (batches[(cursor + index) % len(batches)] for index in range(total_microbatches))
     def update(current, metrics):
+        metrics.update(telemetry.finish())
+        metrics["adapter_gradient_coverage"] = coverage.last_gradients
+        if (directory / "kernel-audit.json").exists() and "kernel_audit" not in environment:
+            audit = read_json(directory / "kernel-audit.json")
+            environment["kernel_audit"] = {key: value for key, value in audit.items() if key != "cuda_kernels"}
+            write_json(directory / "environment.json", environment)
         with metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(metrics, allow_nan=False) + "\n")
             handle.flush()
@@ -262,17 +327,20 @@ def _train(config, root, directory, base, parent, attempt):
             # An eval probe does not consume training RNG, and is not part of the checkpoint payload.
         print(json.dumps({"attempt_id": config.run.attempt_id, **metrics}), flush=True)
     try:
-        state = train(model, stream, causal_ce, optimizer, scheduler, max_updates=stop,
-                      gradient_accumulation_steps=config.training.gradient_accumulation_steps,
-                      grad_clip=config.training.grad_clip, vocab_size=model.config.text_config.vocab_size,
-                      max_length=config.validation.max_sequence_length, state=state,
-                      on_update=update, on_gradients=coverage.gradients)
+        with attention_context(config.training.memory.attention_policy):
+            state = train(model, stream, loss_backend, optimizer, scheduler, max_updates=stop,
+                          gradient_accumulation_steps=config.training.gradient_accumulation_steps,
+                          grad_clip=config.training.grad_clip, vocab_size=model.config.text_config.vocab_size,
+                          max_length=config.validation.max_sequence_length, state=state,
+                          on_update=update, on_gradients=coverage.gradients,
+                          on_window_start=telemetry.start, supervision=config.training.supervision)
         if state["global_step"] != stop:
             raise ValueError("Fixed fixture exhausted before the requested update boundary")
         final_adapter = adapter_fingerprint(model)
         coverage_report = coverage.finish(initial_adapter, final_adapter)
     finally:
         coverage.close()
+        telemetry.close()
     frozen_after = frozen_checksums(model)
     if frozen_before != frozen_after:
         raise ValueError("Frozen base tensor checksums changed")
@@ -307,3 +375,145 @@ def _train(config, root, directory, base, parent, attempt):
                    contract_sha256=hash_json(contract))
     return {"attempt_id": config.run.attempt_id, "status": status, "path": str(directory),
             "state": state, "target_count": len(targets), "trainable_parameters": manifest["trainable_parameters"]}
+
+
+def _train_grpo(config, root, directory, base, parent, attempt, model, targets, *,
+                optimizer_settings, environment=None, loading=None, mlps=(), offloader=None):
+    """Offline objective within the common attempt/model/checkpoint lifecycle."""
+    import shutil
+    import torch
+
+    from RL.checkpoints import adapter_contract, export_adapter, restore_checkpoint, save_checkpoint, verify_adapter
+    from RL.grpo.contract import validate_input, validate_resume, validate_reference_files, receipt_metadata
+    from RL.grpo.data import prepare, tensor_groups
+    from RL.grpo.backend import GroupObjective
+    from RL.grpo.reference import build_reference, load_reference
+    from RL.memory import attention_context
+    from RL.modeling import adapter_fingerprint, frozen_checksums, Coverage
+    from RL.profiling import UpdateTelemetry
+    from RL.training import optimizer_and_scheduler, train_grpo
+
+    raw_groups, proof = prepare(config)
+    validate_input(base, proof)
+    groups = list(tensor_groups(raw_groups))
+    write_json(directory / "input-identity.json", proof)
+    write_json(directory / "selection.json", {"group_ids": proof["eligible_group_ids"],
+                "group_order_sha256": proof["group_order_sha256"]})
+    write_json(directory / "frozen-groups.json", raw_groups)
+    adapter_identity = adapter_contract(base, targets, config.lora)
+    if parent:
+        verify_adapter(parent["adapter"], adapter_identity)
+    initial_adapter = adapter_fingerprint(model)
+    frozen_before = frozen_checksums(model)
+    write_json(directory / "initial-adapter.json", initial_adapter)
+    (directory / "grpo").mkdir()
+    environment = environment or {}
+    source = source_identity(root)
+    metadata = None
+    if config.run.start.mode == "resume":
+        metadata = read_json(Path(parent["path"]) / "state.json")
+        validate_resume(config, proof, metadata)
+        validate_reference_files(parent["path"], metadata["contract"])
+        shutil.copytree(Path(parent["path"]) / "grpo", directory / "grpo", dirs_exist_ok=True)
+        reference_proof = metadata["contract"]["grpo"]
+        reference_values = load_reference(directory, groups, proof, reference_proof)
+    else:
+        export_adapter(model, directory / "grpo/reference/adapter", adapter_identity)
+        with attention_context(config.training.memory.attention_policy):
+            reference_values, reference_proof = build_reference(model, groups, directory, proof,
+                base, hash_json(initial_adapter), config.training.memory.loss_chunk_tokens)
+    contract = {"schedule": schedule_contract(config), "input": proof, "grpo": reference_proof,
+                "adapter": adapter_identity, "source_fingerprint": source["fingerprint"],
+                "dependencies": source["dependencies"], "attention": environment.get("linear_attention"),
+                "determinism": environment.get("determinism"),
+                "qwen_implementation_sha256": environment.get("qwen_implementation_sha256")}
+    optimizer, scheduler = optimizer_and_scheduler(model, optimizer_settings)
+    if metadata is not None:
+        if metadata["contract"] != contract:
+            raise ValueError("GRPO checkpoint contract differs; exact resume rejected")
+        state = restore_checkpoint(parent["path"], optimizer, scheduler, contract, adapter_identity)
+    else:
+        state = {"global_step": 0, "group_cursor": 0, "consumed_groups": 0,
+                 "consumed_branches": 0, "consumed_tokens": 0}
+    initial_state = dict(state)
+    coverage = Coverage(model, targets)
+    objective = GroupObjective(reference_values, config.grpo, config.training.memory.loss_chunk_tokens)
+    telemetry = UpdateTelemetry(model, objective, mlps, offloader, directory,
+                    config.training.memory.profile_first_update,
+                    config.training.memory.attention_policy == "flash_only")
+    metrics_path = directory / "metrics.jsonl"
+    metrics_path.touch(exist_ok=False)
+    attempt.update(status="training", contract=contract, initial_state=initial_state, loading=loading)
+    write_json(directory / "attempt.json", attempt)
+    write_json(directory / "grpo-contract.json", contract)
+    stop = config.validation.stop_after_update or proof["planned_updates"]
+    extra_files = {p.relative_to(directory).as_posix(): p for p in (directory / "grpo").rglob("*") if p.is_file()}
+    # Metric prefix travels with a checkpoint so resumed reports are reconstructible
+    # even if the source attempt is still incomplete after an interruption.
+    if metadata:
+        source_history = Path(parent["path"]) / "grpo/metrics-prefix.jsonl"
+        if not source_history.is_file():
+            raise ValueError("GRPO checkpoint metric prefix missing")
+        metrics_path.write_bytes(source_history.read_bytes())
+    def update(current, metrics):
+        metrics.update(telemetry.finish())
+        metrics["adapter_gradient_coverage"] = coverage.last_gradients
+        metrics["objective_version"] = "offline_grpo_k3_v1"
+        with metrics_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(metrics, allow_nan=False) + "\n")
+            stream.flush(); os.fsync(stream.fileno())
+        if (current["global_step"] % config.training.checkpoint_every_updates == 0
+                or current["global_step"] == stop):
+            save_checkpoint(model, optimizer, scheduler, current,
+                            directory / "checkpoints" / f"step-{current['global_step']:06d}",
+                            contract, adapter_identity, extra_files={**extra_files,
+                            "grpo/metrics-prefix.jsonl": metrics_path})
+        print(json.dumps({"attempt_id": config.run.attempt_id, **metrics}, allow_nan=False), flush=True)
+    try:
+        with attention_context(config.training.memory.attention_policy):
+            state = train_grpo(model, groups, objective, optimizer, scheduler,
+                group_batch_size=config.grpo.group_batch_size, max_epochs=config.grpo.max_epochs,
+                max_updates=stop, grad_clip=config.training.grad_clip, state=state,
+                on_update=update, on_window_start=telemetry.start, on_gradients=coverage.gradients)
+        if state["global_step"] != stop:
+            raise ValueError("GRPO dataset exhausted before its planned update boundary")
+        final_adapter = adapter_fingerprint(model)
+        coverage_report = coverage.finish(initial_adapter, final_adapter)
+    finally:
+        coverage.close(); telemetry.close()
+    frozen_after = frozen_checksums(model)
+    if frozen_before != frozen_after:
+        raise ValueError("Frozen base changed during GRPO training")
+    if state["global_step"] == proof["planned_updates"] and state["group_cursor"] != proof["group_count"]:
+        raise ValueError("Completed epoch cursor differs from frozen group count")
+    write_json(directory / "final-adapter.json", final_adapter)
+    export_adapter(model, directory / "adapter", adapter_identity)
+    status = "completed" if state["group_cursor"] == proof["group_count"] else "paused"
+    validation = {"purpose": "offline_grpo_k3_v1", "state": state, "input": proof,
+        "frozen_base_unchanged": True, "adapter_changed": initial_adapter != final_adapter,
+        "coverage": coverage_report, "initial_state": initial_state, "reference": reference_proof}
+    write_json(directory / "validation.json", validation)
+    from RL.grpo.metrics import read_metric_history
+    history = read_metric_history(metrics_path)
+    report = {"status": status, "input": proof, "reference": reference_proof,
+              "state": state, "updates": history}
+    write_json(directory / "grpo-report.json", report)
+    (directory / "report.md").write_text(
+        f"# Offline GRPO: {config.run.attempt_id}\n\nStatus: {status}. "
+        f"Groups: {proof['group_count']}/{proof['total_groups']}; coverage: {proof['group_coverage']:.3f}. "
+        f"Branches: {proof['branch_count']}. Consumed cursor: {state['group_cursor']}.\n\n"
+        f"Exclusions: {proof['exclusion_reasons']}. Advantage: {proof['advantage_distribution']}.\n\n"
+        "Ratio quantiles, clip fractions, K3 penalties and positive/negative logprob changes "
+        "are recorded per update in grpo-report.json and metrics.jsonl. "
+        "K3 measures the historical completion penalty; it is not an unbiased current-policy KL.\n",
+        encoding="utf-8")
+    if parent:
+        if sha256(Path(parent["owner"]) / "receipt.json") != parent["receipt_sha256"]:
+            raise ValueError("Source checkpoint changed during training")
+        verify_adapter(parent["adapter"], adapter_identity)
+    attempt.update(status=status, ended_at=now(), final_state=state)
+    write_json(directory / "attempt.json", attempt)
+    commit_receipt(directory, "lora-attempt-v1", status=status, attempt_id=config.run.attempt_id,
+                   contract_sha256=hash_json(contract), **receipt_metadata(contract, state))
+    return {"attempt_id": config.run.attempt_id, "status": status, "path": str(directory),
+            "state": state, "group_count": proof["group_count"], "branch_count": proof["branch_count"]}

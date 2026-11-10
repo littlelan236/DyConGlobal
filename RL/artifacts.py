@@ -142,10 +142,36 @@ def verify(cfg_or_root, scope, artifact_id, *, storage_root=None, dataset_id=Non
             or validation["input"] != contract["input"]
             or attempt["start_mode"] != config.run.start.mode):
         raise ValueError("LoRA attempt config/model/targets/state identity mismatch")
+    if "supervision" in contract["input"]:
+        if (not {"input-identity.json", "selection.json"}.issubset(receipt["files"])
+                or read_json(directory / "input-identity.json") != contract["input"]
+                or read_json(directory / "selection.json") != contract["input"]["supervision"]):
+            raise ValueError("LoRA input/selection identity mismatch")
     expected_step = config.validation.stop_after_update or config.training.max_updates
     if (validation["state"]["global_step"] != expected_step
             or (attempt["status"] == "completed") != (expected_step == config.training.max_updates)):
         raise ValueError("LoRA attempt schedule/status mismatch")
+    if config.algorithm is not None:
+        from RL.grpo.contract import validate_reference_files, receipt_metadata
+        from RL.grpo.metrics import read_metric_history
+        validate_reference_files(directory, contract)
+        extra = receipt_metadata(contract, validation["state"])
+        if any(receipt.get(k) != v for k, v in extra.items()):
+            raise ValueError("GRPO attempt receipt objective/cursor mismatch")
+        required_grpo = {"grpo-report.json", "grpo-contract.json", "frozen-groups.json",
+                         "input-identity.json", "selection.json"}
+        if not required_grpo.issubset(receipt["files"]):
+            raise ValueError("GRPO objective/report evidence missing")
+        if (read_json(directory / "grpo-contract.json") != contract or
+                read_json(directory / "input-identity.json") != contract["input"]):
+            raise ValueError("GRPO frozen input/objective contract mismatch")
+        history = read_metric_history(directory / "metrics.jsonl")
+        report = read_json(directory / "grpo-report.json")
+        if (len(history) != validation["state"]["global_step"] or not history
+                or report != {"status": attempt["status"], "input": contract["input"],
+                              "reference": contract["grpo"], "state": validation["state"], "updates": history}
+                or any(history[-1].get(k) != v for k, v in validation["state"].items())):
+            raise ValueError("GRPO report/metrics/cursor cannot be reconstructed")
     verify_adapter(directory / "adapter", contract["adapter"], verify_owner=False)
     count = len(receipt["files"])
     for checkpoint in sorted((directory / "checkpoints").glob("step-*")):
