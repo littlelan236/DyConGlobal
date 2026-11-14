@@ -1,3 +1,4 @@
+from difficulty.storage import difficulty_path
 """Unified configuration entry; delegates to the existing immutable attempt services."""
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,7 +30,7 @@ def run_config(cfg, config, *, raw, path):
         attempt_id = (config.model.kind.replace('_', '-') + '-' +
                       datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:8])
     identifier(attempt_id)
-    output = root / 'difficulty/checkpoints' / attempt_id
+    output = difficulty_path(root, 'checkpoints', attempt_id)
     if output.exists():
         raise FileExistsError(f'Attempt ID already exists (including partial): {output}')
     settings = resolve_settings(root, config)

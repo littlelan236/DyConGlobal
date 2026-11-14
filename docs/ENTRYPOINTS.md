@@ -21,7 +21,17 @@ Formal work goes through `core.cli`. Do not launch internal workers, copy a task
 | Difficulty estimation | `difficulty-dataset`, `difficulty-split`, `difficulty-train/ridge/mlp/predict/evaluate`, `difficulty-ridge-holdout` | analysis |
 | Steering analysis | `steering-dataset`, `steering-visualize` | analysis |
 | Artifact inspection | `artifact show/verify`, `report run` | runner or analysis per command |
-| Offline GRPO step data and behavior replay | `rl-dataset build/check/materialize/replay-logprobs/check-logprobs` | runner; isolated replay worker uses latent-vLLM |
+| Offline GRPO step data and behavior replay | `rl-dataset build/check/materialize/replay-logprobs/check-logprobs/probability-plan/probability-build/probability-check` | runner; isolated replay worker uses latent-vLLM |
+| RL training progress | `lora-status ATTEMPT_ID` or `lora-status --active` | runner; read-only, no Torch/model load |
+| RL memory and OOM analysis | `lora-memory ATTEMPT_ID --storage-root ROOT [--rank N] [--phase NAME] [--limit N]` | runner; read-only, no Torch/model load |
+| RL loss visualization | `lora-tensorboard ATTEMPT_ID --action start/status/stop/rebuild` | runner CLI; managed analysis workers, TensorBoard over SSH |
+| Frozen GRPO advantages | `lora-advantages ATTEMPT_ID`, explicit `--build-index/--index-status` for legacy JSON | runner query; analysis index worker |
+| LoRA/GRPO training and exact resume | `lora-train --training-config YAML` | runner dry-run; actual single/data-parallel training in rl |
+| Prepared GRPO data and append resume | `lora-prepare`, `artifact show/verify` with `rl-prepared`, `rl-reference`, `rl-extension` scopes | runner; CPU-only immutable preparation and receipt verification |
+
+### Capture spool usage
+
+Use `.venvs/runner/bin/dycon capture spool-usage [RUN_ID]` for a read-only JSON view of project capture reservations, configured quota/headroom/watermarks, local regular-file bytes and filesystem free space. A positional run filters its reservations/files and uses its frozen configuration; project quota totals remain visible. `--ledger-only` skips the local scan; `--scan-seconds N` sets its time budget (default 10). Incomplete scans report lower bounds. Relocated spool bases are followed, archived child symlinks are skipped, and the query never constructs or reclaims the budget ledger. See [Capture operations](CAPTURE-CN.md#capture-spool-用量只读) for accounting and configuration semantics.
 
 ### Live generation throughput
 
@@ -33,9 +43,16 @@ Each GPU row has a `status`: `ok` for a successful measurement, `metrics_unavail
 
 ### Frozen configuration comparison
 
-Use `run diff-config LEFT_RUN RIGHT_RUN` to compare the complete immutable `resolved-config.json` snapshots. The command validates and reads both run plans, reports leaf-level differences by JSON Pointer, and distinguishes an absent field from an explicit `null`. It never re-resolves either run against the current root configuration. Output defaults to Markdown; `--format json` returns the complete structured report. `--output PATH` writes a new file and refuses to overwrite an existing one.
+Use `run diff-config LEFT_RUN RIGHT_RUN` to compare configurable values from the two validated immutable `resolved-config.json` snapshots. The default Markdown report contains a compact task/sample summary followed by tables grouped by configuration section, including unchanged fields. `--only-changed` filters configuration rows to differences; the task/sample summary stays visible. The comparison direction is always left → right.
+
+Fields are discovered recursively from the current `RunConfig` schema (including run-local consensus/entropy options), rather than a maintained field allowlist. At least one frozen snapshot must contain a field for it to appear; missing fields are never filled from current defaults. Schema constants and `readOnly` fields are omitted. The derived branch capacity is marked `readOnly` in the schema; estimator/payload receipts, run hashes, task bodies, execution contexts and other generated metadata are not configurable rows. Nested legacy/extension fields inside configuration sections remain visible and are marked as outside the current schema. Mapping/list settings occupy one row per setting, rather than expanding arbitrary task-specific keys. Newly declared fields and sections are discovered automatically; new derived schema fields should declare `json_schema_extra={"readOnly": True}`.
+
+Markdown cells escape HTML, pipes, backticks and line breaks. Long values, including prompts, retain their beginning and end, original character count and SHA256 prefix; equality is checked on the full typed values before shortening. `--format json` returns schema 2, with exact unshortened values in `rows` and changed fields in `differences`. Missing, explicit `null`, and different JSON value types remain distinct. This replaces schema 1's full-snapshot leaf diff; `difference_count` now counts configurable settings only. The generic leaf-diff utility used by audited configuration revisions is retained.
+
+The command does not re-resolve either run against the current root configuration, mutate snapshots or query live status. The summary uses the frozen plan's repetition count, including audited additions, rather than parsing the run name. `--output PATH` writes a new file and refuses overwrite.
 
     .venvs/runner/bin/dycon run diff-config RUN_A RUN_B
+    .venvs/runner/bin/dycon run diff-config RUN_A RUN_B --only-changed
     .venvs/runner/bin/dycon run diff-config RUN_A RUN_B --format json --output config-diff.json
 
 ### Accepted repetition and trajectory comparison
@@ -100,6 +117,8 @@ Ordinary, capture-enabled, steering, and steering-plus-capture rollout all use `
 For independent TP=1 serving on multiple GPUs, use `serving.trajectory_sharding: per_gpu_tp1` with `run create/start/status/cancel/resume`. GPU and port assignments are frozen in the plan. Do not create a separate GPU sharding launcher. See [Multi-GPU TP=1](MULTI-GPU-TP1-CN.md).
 
 Capture is finalized and published under the run's source identity. Recovery resumes publication of existing evidence and does not request a new model response. See [Capture operations](CAPTURE-CN.md).
+
+New runs can opt into `capture.logprobs.enabled` through the shared root configuration, then use the same `run create/start/wait` lifecycle. The pinned vLLM V2 runner observes pre-grammar logits and emits one raw T=1 FP32 value per sampled output token; generation sampling parameters retain their frozen values. Native request receipts bind independent probability sidecars, which use the existing spool/publication/recovery path. Managed TP=1, persisted capture and unsteered generation are required. `rl-dataset build` seals available values into the neutral `raw_t1_output_tokens` stream, while `lora-train` assigns training roles in its own configuration. See [online raw capture](ONLINE-RAW-LOGPROBS-CN.md) for configuration limits, raw coverage, failure behavior and the remaining end-to-end performance acceptance.
 
 ## Benchmark backends
 
@@ -236,12 +255,38 @@ A report directory contains:
 - `samples.csv`: tabular form of the candidate records.
 - `report.md`: human-readable run and task summary plus VerifierError and Review records.
 
-The policy is `skillsbench_accepted_reward_audit_v1`. `VerifierError` means the evidence proves an unrecovered verifier failure; `ValidOutcome` means completed evaluation evidence explains the below-one reward; `Review` means evidence, contract ownership, or ordering is insufficient. Findings are normal audit results and do not make the command fail. A source change or unreadable candidate is recorded as Review and makes the audit incomplete.
+The policy is `skillsbench_verifier_audit_v2`, shared with online settlement. `VerifierError` means the evidence proves an unrecovered required verifier failure; `ValidOutcome` means the bound contract and scoring evidence explain the below-one reward; `Review` means evidence, contract ownership, or ordering is insufficient. Findings are normal audit results and do not make the command fail. A source change or unreadable candidate is recorded as Review and makes the audit incomplete. See [SkillsBench verifier audit](SKILLSBENCH-VERIFIER-AUDIT-CN.md) for online settlement, compatibility, and evidence limitations.
 
 
 ## LoRA engineering foundation
 
+Offline GRPO can select `training.memory.activation_offload: auto` and
+`training.memory.oom_retry` in its task YAML; allocator settings belong to
+`runtime.cuda_allocator`. All ranks agree on the step policy before forward and
+on local computation status before gradient collectives. A recoverable local CUDA
+OOM can trigger one same-window retry with boundary offload. Collective/optimizer
+failures are terminal. This same-process retry preserves existing checkpoint
+resume contracts. Query per-rank events through `lora-memory`; see
+[memory policy](../RL/LONG_CONTEXT.md#oom-recovery-configuration-2026-11-14) and
+[OOM validation](../RL/OOM_RECOVERY_VALIDATION.md). The 2026-11-14 CPU results do
+not establish actual CUDA memory savings or GPU OOM recovery; GPU acceptance is
+deferred while existing workloads are preserved.
+
 Use `.venvs/rl/bin/dycon lora-train --training-config RL/experiments/lora-smoke.yaml` for single-GPU bf16 Qwen3.5-9B LoRA engineering validation. The `RL/` source remains in the original project; `.venvs/rl` is an independent environment with `locks/rl.in` and `locks/rl.txt`, stored on `/data3` on this server. The standalone YAML is an explicit training configuration exception, resolved against the root project selected by the ordinary root CLI configuration. Rollout `config.yaml` stays unchanged. Neither `--set` nor `--run-id` is accepted.
+
+Eight-GPU GRPO uses the same CLI and GPU-lock/worker/artifact lifecycle. Explicitly
+set eight distinct `runtime.gpus`, `grpo.group_batch_size: 8`,
+`parallel_branch_chunk_size: 16`,
+`parallel_branch_schedule: distinct_parent_two_pass_v1`, a partition seed and
+`prefix_reuse.mode: boundary_grad` in the task YAML. Complete 32-branch parents
+remain the scoring unit; two separately scheduled rounds consume complementary
+halves. Each regular update uses eight different parents; round tails remain
+separate and normalize by their actual parent count. Prepared and native
+streaming paths use one frozen execution plan. Status distinguishes consumed
+halves, seen parents and fully completed parents. Exact resume binds that plan
+and world size; old whole-parent checkpoints cannot directly resume as 8x16.
+Do not add torchrun or a second launcher. See [8x16 configuration](../RL/DATA_PARALLEL_8X16.md)
+and [CPU/Gloo evidence and pending GPU acceptance](../RL/DATA_PARALLEL_8X16_VALIDATION.md).
 
 Offline GRPO is supported through the existing `lora-train` entrypoint. Use
 `RL/experiments/grpo-offline-k3-smoke.yaml` for strict schema/data-readiness dry-run,
@@ -252,16 +297,123 @@ groups. Select `run.start.mode: fresh`, `resume` (a committed complete step chec
 or `warm_start` (this module's adapter export). All paths delegate to `RL.service.run`;
 resume failure never becomes a new training phase.
 
+`grpo.reference_cache` selects the frozen shared anchor independently of
+`reference: initial_policy`: `model_forward` is the backward-compatible default;
+`probability_artifact` requires an explicit committed `rl-probability` (schema 3)
+or legacy raw `rl-replay` ID/root/scope;
+`dataset_probability` requires an explicit stream such as `raw_t1_output_tokens`.
+External sources require `dtype_compatibility: same_dtype` or
+`fp16_source_bf16_training`, complete eligible-branch coverage and matching raw T=1
+checkpoint/tokenizer/adapter identities. Missing/processed/nonfinite values fail
+before the first optimizer update; import performs no reference model-forward.
+One cache hash serves both ratio denominator and K3 while current is computed live.
+Prepared/legacy-cache resume reads checkpoint-local cache/provenance without
+reopening the external probability source. Native streaming resume inherits
+the frozen plan, original reference anchor and committed cursor, but reads the
+unconsumed native token ledgers and selected external raw probability payloads.
+It requires `runtime.data_preparation_async: true`, `prepared_data: null`, the
+original world size and unchanged dataset/source paths and identities. The
+parent checkpoint contract selects the path; async does not convert a prepared
+checkpoint into streaming. Streaming checkpoints support exact `resume` only.
+Source/dtype rules, schedule, model, dependency and numerical contracts remain
+enforced; project source fingerprints are audit metadata, not a resume gate.
+For supported non-streaming warm-starts, scores must match the actual starting
+adapter or use an explicit model-forward choice. See
+[streaming resume](../RL/STREAMING_RESUME.md) and its
+[acceptance boundaries](../RL/STREAMING_RESUME_VALIDATION.md).
+See [training guide](../RL/TRAINING.md), [GRPO](../RL/GRPO.md),
+[neutral stream contract](../RL/PROBABILITY_STREAM.md) and
+[external-anchor validation](../RL/GRPO_BINDING_VALIDATION.md).
+
 Inspect these outputs through `artifact show/verify ID --scope lora-attempt --storage-root /data3/wangtianyi/DyConGlobal`. The optional artifact-root registry key is `paths.artifact_roots.lora-attempt`; normal `paths.artifact_scan_roots` discovery also applies. The physical tree is `ROOT/RL/checkpoints/ID`. Artifact verification checks committed content and state; model equivalence is a separate integration test, and neither constitutes benchmark quality evaluation.
 
 See [RL/README.md](../RL/README.md) for all-linear text-backbone LoRA coverage, frozen base/vision/output-head rules, immutable identities, resume/warm-start contracts, and acceptance commands. Offline dataset construction and logprob replay are provided separately by `rl-dataset` below.
+
+Airport PDDL verifier corrections and separate historical plan semantics: [SkillsBench PDDL verifier](SKILLSBENCH-PDDL-VERIFIER-CN.md).
+
+Airport PDDL full verifier replay and explicit backed-up receipt replacement: [PDDL regrading](SKILLSBENCH-PDDL-REGRADE-CN.md).
 
 ## Offline GRPO dataset foundation
 
 `rl-dataset` uses standalone dataset/replay YAML files as explicit configuration exceptions, resolved against the ordinary project root. Sources, output/cache roots and GPU admission remain explicit. Build groups all original parallel-consensus candidates per decision and preserves native prompt/completion IDs; sparse supervision covers only the current completion in original target coordinates. Source audit is configurable and defaults off; artifact receipt integrity remains mandatory.
 
-The five subcommands are `build --dataset-config YAML [--dry-run|--recover]`, `check DATASET_ID --dataset-root ROOT [--level metadata|sources|full]`, `materialize DATASET_ID --dataset-root ROOT --cache-root CACHE_ROOT`, `replay-logprobs --replay-config YAML [--dry-run|--recover]`, and `check-logprobs REPLAY_ID --storage-root ROOT [--with-values]`. To check a replay against its dataset, pass `--dataset-id DATASET_ID --dataset-root DATASET_ROOT` together. Build dry-run freezes no artifact and inspects selection only; replay dry-run checks existing dataset/policy/length inputs without loading a model.
+Dataset construction and legacy replay commands are `build --dataset-config YAML [--dry-run|--recover]`, `check DATASET_ID --dataset-root ROOT [--level metadata|sources|full]`, `materialize DATASET_ID --dataset-root ROOT --cache-root CACHE_ROOT`, `replay-logprobs --replay-config YAML [--dry-run|--recover]`, and `check-logprobs REPLAY_ID --storage-root ROOT [--with-values]`. To check a replay against its dataset, pass `--dataset-id DATASET_ID --dataset-root DATASET_ROOT` together. Build dry-run freezes no artifact and inspects selection only; replay dry-run checks existing dataset/policy/length inputs without loading a model.
 
 Dataset/cache/replay locations are `ROOT/RL/datasets/DATASET_ID`, `CACHE_ROOT/RL/cache/CACHE_ID`, and `OUTPUT_ROOT/RL/replays/REPLAY_ID`. Artifact IDs are immutable; failed staging requires explicit compatible recovery. Source checks in `check --level sources|full` follow the frozen `audit.enabled` setting, while local artifact receipt integrity is always checked. Materialization is an optional mmap cache, and replay can read native ledgers directly.
 
-`replay-logprobs` reads only temperature/top_p/top_k from the root config and historical model/dtype/constraints from frozen sources. Its isolated pinned native vLLM worker records processed generated-token logprobs. `--dry-run` never loads a model; `--recover` continues compatible sealed branch results with frozen root sampling. Build recovery restarts from the last complete rollout with the original selection. `artifact show/verify ID --scope rl-dataset|rl-cache|rl-replay --storage-root ROOT` inspects committed artifacts. Replay estimates require explicit loader opt-in; zero-support groups are unavailable. See [RL dataset](../RL/dataset/README.md) for supported constraints, tests and recovery. GRPO training uses the existing `lora-train` service, documented in [offline GRPO](../RL/GRPO.md); replay estimates are not its probability denominator.
+New replay schema 2 produces `raw_t1_output_tokens_v1` from exact historical completion IDs under the frozen FP16 scoring checkpoint. It uses fixed T=1 pre-transform scoring independently of root/historical sampling parameters. `--dry-run` loads no model; `--recover` requires matching frozen dataset/cache/raw/runtime/implementation identities and sealed branch results. Legacy processed artifacts remain read-only diagnostics and cannot be relabeled or recovered as raw. Build recovery restarts from the last complete rollout with the original selection. `artifact show/verify ID --scope SCOPE --storage-root ROOT` (scopes `rl-dataset`, `rl-cache`, `rl-replay`, `rl-probability`, `rl-probability-plan`) inspects committed artifacts. The generic replay loader's estimate opt-in is separate from training compatibility. GRPO can import a committed raw artifact through the strict `probability_artifact` contract above; selected values must be finite. See [RL dataset](../RL/dataset/README.md) for producer configuration and current runtime acceptance limits.
+
+
+### Canonical probability coverage and publication
+
+Use `rl-dataset probability-plan --probability-config YAML [--recover]` to publish
+an immutable coverage plan without loading a model. The standalone strict YAML
+owns explicit dataset, source, output and plan bindings; it is a probability-task
+configuration exception, not a rollout root override. Sources are explicitly
+`dataset_stream`, `replay` or `probability`; no directory-name inference is used.
+`plan_sha256` identifies `plan.json`, independently of its enclosing receipt hash.
+
+Bind that ID/root/hash through `selection.coverage_plan` in the existing replay
+YAML; it is mutually exclusive with `selection.group_ids`. Replay preserves whole
+token-group eligibility and scheduling locality while submitting only missing
+branches. An empty missing set returns before GPU reservation/worker startup.
+Backfill output must match the exact frozen branch set and plan hash. Existing
+detach/status/cancel/recover operations retain their replay lifecycle.
+
+`rl-dataset probability-build --probability-config YAML [--recover]` validates and
+copies online-only, offline-only or mixed values through one canonical writer.
+It publishes schema 3 under `ROOT/RL/probabilities/ID/` (`rl-probability`); plans
+live under `ROOT/RL/probability-plans/ID/` (`rl-probability-plan`). Both reuse the
+existing locks, staging, receipt and atomic publication. Changing selection,
+policy, implementation or source receipts requires new IDs. Original dataset,
+request ledger, replay and receipt remain unchanged.
+
+The manifest separates one scoring function from explicitly permitted execution
+cohorts; source compute dtypes must agree. Missing, recorded collection failure,
+corruption/conflict and nonfinite coverage have distinct handling. Complete vector
+coverage does not imply finite training targets. Ordinary
+`probability-check ID --storage-root ROOT [--with-values]` and artifact verification
+read local receipt-covered copies; explicit `--sources` audits original sources
+and reports their availability separately. Prepared/legacy-cache training imports
+the final ID/root once and resumes from its local shared cache. Native streaming
+keeps reading selected values from that committed canonical artifact, which
+must remain accessible along with the native token ledgers; it need not reopen
+the canonical artifact's original upstream sources. Neither resume path merges
+or backfills probabilities.
+
+See [canonical contract and migration](../RL/dataset/PROBABILITY_ARTIFACTS.md),
+[configuration example](../RL/dataset/configs/probability-example.yaml) and
+[alignment acceptance](../RL/PROBABILITY_ALIGNMENT_VALIDATION.md).
+
+### SkillsBench verifier resources
+
+The formal dependencies-build/verify, profile/qualify, environment-check, verifier-control and job-start/status interfaces share immutable resource identities. See [verifier resource publications](SKILLSBENCH-VERIFIER-RESOURCES-CN.md) for the v2 release, network acceptance, blocked AgentOps py37 matrix, historical evidence and rollback boundaries.
+
+## RL progress and visualization
+
+Use the formal runner CLI for current and future training attempts:
+
+```bash
+.venvs/runner/bin/dycon lora-status --active
+.venvs/runner/bin/dycon lora-status ATTEMPT_ID --storage-root ROOT --watch 5 --format json
+.venvs/runner/bin/dycon lora-tensorboard ATTEMPT_ID --storage-root ROOT --action start --port 16006
+.venvs/runner/bin/dycon lora-advantages ATTEMPT_ID --storage-root ROOT --group-ordinal 0
+```
+
+Replace `ATTEMPT_ID` and `ROOT` with the attempt ID and its physical storage root.
+Status separates committed optimizer updates, inflight work and receipt-backed
+recoverable checkpoints. Old running processes remain observable without a
+restart; unavailable stage detail is `unknown`. TensorBoard replays historical
+metrics and follows complete new updates, with separate total/policy loss and
+unweighted K3 curves. `--action status/stop/rebuild` inspects, stops or explicitly
+rebuilds this attempt's owned visualization service; stopping it leaves training
+running. Access it over SSH forwarding to its loopback-only port.
+
+Advantage queries preserve native branch order and report frozen-value
+provenance. Prepared queries read metadata and score shards without token arrays
+by default. Legacy JSON requires explicit `--build-index` and exposes progress
+through `--index-status`; ordinary queries never start a full scan. All mutable
+events, heartbeats and indexes stay outside sealed artifact directories. See
+[RL observability](../RL/OBSERVABILITY.md) for forwarding, pagination, snapshot
+fields, inherited resume metrics and evidence limits.
+See [RL observability validation](../RL/OBSERVABILITY_VALIDATION.md) for test and deployment evidence.

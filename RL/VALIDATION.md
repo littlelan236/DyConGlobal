@@ -9,7 +9,7 @@
 - 开发分支：`feature/lora-foundation`。LoRA 实现保留在该分支工作区，未额外提交、合并或推送；未建立 worktree 或第二份工程。
 - 正式源码：大写 `RL/`；独立环境：`.venvs/rl`，链接到 `/data3/wangtianyi/DyConGlobal/RL/environment/rl`；依赖和缓存位于 `/data3`。
 - 8 个受保护基线文件逐字节 SHA 校验保持一致，包括根 `config.yaml`、SkillsBench 实现及其原有测试；共享入口与文档在原内容上追加/最小修改。
-- 验收运行时源码指纹与最终源码一致：`8fad0eca7b66375dc4947b5d85266fc445e19c606ce57b72bd82c95698303df5`。HEAD、dirty 文件摘要、实际源码哈希、依赖及输入身份均已写入训练产物。
+- 历史训练产物记录 HEAD、dirty 文件摘要、源码哈希、依赖及输入身份供审计。源码哈希不再作为 checkpoint resume 的兼容门槛；模型/tokenizer、配置、数据 schedule、reference、checkpoint 和 receipt 内容校验仍然生效。
 
 ## 已实现
 
@@ -18,7 +18,7 @@
 - 文本 backbone 全部 `nn.Linear`：248 个投影，包括 96 个 MLP、32 个 full-attention、120 个 linear-attention。rank=16 时可训练参数为 43,278,336；所有目标均实际执行、获得有效梯度并发生更新。
 - vision、embedding、lm_head 和全部基座参数冻结。实际实例化基座参数为 9,409,813,744；checkpoint 中未实例化的 15 个 `mtp.*` 权重完整列入产物清单，未以名称过滤实际 backbone。
 - 有效监督 token 加权梯度累积、最后不足窗口提交、有限性校验与梯度裁剪；测试 CE 与通用训练循环分离，causal shift 只执行一次。
-- `fresh`、完整 checkpoint `resume`、adapter `warm_start`；保存/恢复 optimizer、完整 scheduler、Python/NumPy/CPU/CUDA RNG、global step、microbatch/token 游标。恢复严格绑定 base/tokenizer、targets/shape、schedule、输入及源码/依赖身份，无静默回退。
+- `fresh`、完整 checkpoint `resume`、adapter `warm_start`；保存/恢复 optimizer、完整 scheduler、Python/NumPy/CPU/CUDA RNG、global step、microbatch/token 游标。恢复严格绑定 base/tokenizer、targets/shape、schedule、输入及依赖身份，无静默回退；source-code fingerprint 只作历史审计记录。
 - 标准 PEFT adapter 导出、完整 checkpoint 同盘原子发布、最后提交 receipt、不可覆盖 attempt、并发锁、失败状态/traceback保留，以及 `artifact show/verify --scope lora-attempt`。
 
 ## 测试结果

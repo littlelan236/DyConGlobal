@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 
 from core.io import hash_json, read_json, sha256, write_json
-from RL.artifacts import commit_receipt, inventory, verify_receipt
+from RL.artifacts import commit_receipt, inventory, verify_receipt, resume_contract_matches
 
 
 def adapter_contract(base, targets, lora):
@@ -76,14 +76,27 @@ def verify_checkpoint(directory):
             or receipt.get("global_step") != state["global_step"]):
         raise ValueError("Checkpoint step identity mismatch")
     verify_adapter(directory / "adapter", metadata["adapter_contract"], verify_owner=False)
-    if "grpo" in metadata["contract"] and "grpo/reference-logprobs.pt" not in receipt["files"]:
+    if ("grpo" in metadata["contract"] and metadata["contract"].get("streaming") is None
+            and metadata["contract"]["grpo"].get("cache_schema_version") != 3
+            and "grpo/reference-logprobs.pt" not in receipt["files"]):
         raise ValueError("GRPO checkpoint reference cache missing")
     if "grpo" in metadata["contract"]:
         from RL.grpo.contract import validate_reference_files, receipt_metadata
-        validate_reference_files(directory, metadata["contract"])
+        if metadata["contract"].get("streaming"):
+            from RL.grpo.stream_resume import resolve_checkpoint
+            resolve_checkpoint(directory, metadata["contract"])
+        else:
+            validate_reference_files(directory, metadata["contract"])
         expected = receipt_metadata(metadata["contract"], state)
         if any(receipt.get(k) != v for k, v in expected.items()):
             raise ValueError("GRPO checkpoint receipt objective/cursor mismatch")
+        if "prepared" in metadata["contract"]:
+            from RL.grpo.prepared import PreparedReader, resolve
+            prepared = PreparedReader(resolve(metadata["contract"]["prepared"]))
+            if (prepared.proof != metadata["contract"]["input"] or
+                    prepared.schedule["sha256"] != metadata["contract"]["prepared_schedule_sha256"]):
+                raise ValueError("Checkpoint prepared/schedule identity mismatch")
+            prepared.validate_state(state)
     return receipt
 
 
@@ -112,6 +125,12 @@ def save_checkpoint(model, optimizer, scheduler, state, directory, contract, ada
             shutil.copyfile(source_file, target)
     payload = {"metadata": metadata, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
                "rng": capture_rng()}
+    from RL.parallel import current
+    parallel = current()
+    if parallel:
+        if not parallel.rank_rng or len(parallel.rank_rng) != parallel.world_size:
+            raise ValueError("Distributed checkpoint missing rank RNG states")
+        payload["rank_rng"] = parallel.rank_rng
     with (staging / "training-state.pt").open("wb") as stream:
         torch.save(payload, stream)
         stream.flush()
@@ -119,7 +138,11 @@ def save_checkpoint(model, optimizer, scheduler, state, directory, contract, ada
     extra_metadata = {}
     if "grpo" in contract:
         from RL.grpo.contract import validate_reference_files, receipt_metadata
-        validate_reference_files(staging, contract)
+        if contract.get("streaming"):
+            from RL.grpo.stream_resume import resolve_checkpoint
+            resolve_checkpoint(staging, contract)
+        else:
+            validate_reference_files(staging, contract, verify_artifacts=False)
         extra_metadata = receipt_metadata(contract, state)
     commit_receipt(staging, "lora-checkpoint-v1", global_step=state["global_step"],
                    contract_sha256=hash_json(contract), **extra_metadata)
@@ -132,15 +155,18 @@ def save_checkpoint(model, optimizer, scheduler, state, directory, contract, ada
     return directory
 
 
-def restore_checkpoint(directory, optimizer, scheduler, expected_contract, expected_adapter_contract):
+def restore_checkpoint(directory, optimizer, scheduler, expected_contract, expected_adapter_contract, *, verify=True):
     import torch
 
     from RL.training import restore_rng
 
     directory = Path(directory)
-    verify_checkpoint(directory)
+    if verify:
+        verify_checkpoint(directory)
     metadata = read_json(directory / "state.json")
-    if metadata["contract"] != expected_contract or metadata["adapter_contract"] != expected_adapter_contract:
+    # Historical project code hashes are provenance, not a resume gate.
+    if (not resume_contract_matches(metadata["contract"], expected_contract)
+            or metadata["adapter_contract"] != expected_adapter_contract):
         raise ValueError("Resume schedule/input/base/targets/source contract mismatch")
     # Accept only verified local module output, and use the restricted Torch loader.
     payload = torch.load(directory / "training-state.pt", map_location="cpu", weights_only=True)
@@ -148,7 +174,17 @@ def restore_checkpoint(directory, optimizer, scheduler, expected_contract, expec
         raise ValueError("Training state and checkpoint metadata disagree")
     optimizer.load_state_dict(payload["optimizer"])
     scheduler.load_state_dict(payload["scheduler"])
-    restore_rng(payload["rng"])
+    from RL.parallel import current
+    parallel = current()
+    rank_rng = payload.get("rank_rng")
+    if parallel:
+        if not rank_rng or len(rank_rng) != parallel.world_size:
+            raise ValueError("Checkpoint rank RNG topology mismatch")
+        restore_rng(rank_rng[parallel.rank])
+    else:
+        if rank_rng:
+            raise ValueError("Distributed checkpoint requires its original world size")
+        restore_rng(payload["rng"])
     return dict(metadata["state"])
 
 

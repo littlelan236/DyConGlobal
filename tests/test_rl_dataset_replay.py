@@ -16,18 +16,44 @@ from RL.dataset.loader import collate_group, iter_groups
 from RL.dataset.materialize import materialize
 from RL.dataset.replay.artifacts import ReplayWriter, ReplayReader, check_replay, write_replay
 from RL.dataset.replay.service import dry_run, replay_logprobs, request_policy
-from RL.dataset.replay.validation import effective_policy, root_sampling, target_logprobs
+from RL.dataset.replay.validation import effective_policy, raw_contract, raw_policy, root_sampling, target_logprobs
 from RL.dataset.replay.worker import execute_batches, sampling_options
-from test_rl_dataset import token_source, build
+from test_rl_dataset import token_source as original_token_source, build
 from RL.dataset.build import build_dataset, check_dataset
+
+
+def token_source(tmp_path, **kwargs):
+    fixture = original_token_source(tmp_path, **kwargs)
+    source_file = tmp_path / "runs" / fixture[0]["run"] / "resolved-config.json"
+    source = read_json(source_file); source["serving"]["dtype"] = "float16"
+    write_json(source_file, source)
+    return fixture
 
 
 ROOT = {"generation": {"temperature": .6, "top_p": .95, "top_k": 20}, "config_source_sha256": "root-sha"}
 
 
 def replay_config(ds, tmp_path):
-    return {"schema_version": 1, "replay_id": "unit-replay", "dataset": {"id": ds.name, "root": str(ds.parents[2])},
+    return {"schema_version": 2, "probability_semantics": "raw_t1_output_tokens_v1", "replay_id": "unit-replay", "dataset": {"id": ds.name, "root": str(ds.parents[2])},
             "runtime": {"gpus": [0], "max_model_len": 32}, "storage": {"output_root": str(tmp_path/"replayed"), "max_shard_bytes": 1024}}
+
+
+def test_raw_contract_is_independent_of_root_and_history():
+    assert raw_contract()["temperature"] == 1.0
+    assert raw_contract()["top_p"] == 1.0 and raw_contract()["top_k"] == -1
+    assert raw_contract()["semantics"] == "raw_t1_output_tokens_v1"
+    assert raw_policy()["policy_sha256"] == raw_policy()["policy_sha256"]
+    cfg = ReplayConfig.model_validate(replay_config(Path("/tmp/RL/datasets/dataset"), Path("/tmp")))
+    assert cfg.sampling_semantics == "raw_t1_output_tokens_v1"
+    with pytest.raises(ValueError, match="read-only"):
+        ReplayConfig.model_validate({**replay_config(Path("/tmp/RL/datasets/dataset"), Path("/tmp")), "schema_version": 1})
+
+
+def test_raw_score_target_value_is_selected_by_native_token():
+    logits = np.array([2.0, 1.0, -3.0], dtype=np.float64)
+    expected = logits[1] - np.log(np.exp(logits).sum())
+    output = NS(finished=True, outputs=[NS(token_ids=[1], logprobs=[{1:NS(logprob=expected), 2:NS(logprob=-5)}])])
+    assert target_logprobs(output, [1]) == pytest.approx([expected], abs=0, rel=0)
 
 
 def outputs(ds, zero=False):
@@ -53,11 +79,9 @@ def test_float32_roundtrip_loader_and_receipt_binding(tmp_path):
 
 def test_zero_support_is_stored_but_entire_group_is_unavailable(tmp_path):
     ds = build(token_source(tmp_path))
-    path = Path(write_replay(ds, "zero", ROOT, outputs(ds, zero=True), tmp_path/"replayed")["path"])
-    assert check_replay(path, with_values=True)["tokens"] == 18
-    assert read_json(path/"summary.json")["probability_ready_groups"] == 0
-    with pytest.raises(ValueError, match="group has zero-support"):
-        list(iter_groups(ds, replay=path, allow_replay_estimates=True))
+    with pytest.raises(ValueError, match="Zero-support"):
+        write_replay(ds, "zero", ROOT, outputs(ds, zero=True), tmp_path/"replayed")
+    assert not (tmp_path/"replayed/RL/replays/zero/receipt.json").exists()
 
 
 @pytest.mark.parametrize("bad", ["token", "short", "nan", "positive", "extra"])
@@ -143,11 +167,11 @@ def test_worker_bounded_batches_and_native_sampling_contract(tmp_path):
 
 def test_interrupted_replay_recovers_only_sealed_branches(tmp_path):
     ds = build(token_source(tmp_path)); rows=[r for g in iter_groups(ds) for r in g["members"]]
-    identity={"replay_id":"recover", "dataset_receipt_sha256":sha256(ds/"receipt.json")}
+    identity={"replay_id":"recover", "dataset_receipt_sha256":sha256(ds/"receipt.json"), "raw_contract_sha256":hash_json(raw_contract()), "selection_sha256":"test"}
     root=tmp_path/"replayed"
     with pytest.raises(RuntimeError, match="interrupted"):
         with publication(root,"rl-replay","recover",signature=identity) as (stage,_):
-            writer=ReplayWriter(stage,ds,identity,1024)
+            writer=ReplayWriter(stage,ds,identity,1024,commit_every_branches=1)
             writer.put(rows[0],{"token_ids":rows[0]["completion_token_ids"]},[-.1]*3,policy_sha256="p",model_sha256="m")
             raise RuntimeError("interrupted")
     with publication(root,"rl-replay","recover",signature=identity,recover=True) as (stage,dest):
@@ -224,18 +248,18 @@ def test_formal_recovery_uses_frozen_root_sampling(tmp_path,monkeypatch):
     with pytest.raises(RuntimeError,match='interrupted'):replay_logprobs(cfg,file)
     changed={**cfg,'generation':{**ROOT['generation'],'temperature':.3},'config_source_sha256':'edited-root'}
     result=replay_logprobs(changed,file,recover=True)
-    assert calls==[.6,.6]
-    assert read_json(Path(result['path'])/'root-sampling.json')['root_config_sha256']=='root-sha'
+    assert calls==[1.0,1.0]
+    assert 'root_config_sha256' not in read_json(Path(result['path'])/'root-sampling.json')
     assert check_replay(result['path'],dataset_path=ds,with_values=True)['branches']==6
 
 
 def test_recovery_rejects_tampered_committed_array(tmp_path):
     ds=build(token_source(tmp_path));row=next(iter_groups(ds))['members'][0]
-    identity={'replay_id':'broken','dataset_receipt_sha256':sha256(ds/'receipt.json')}
+    identity={'replay_id':'broken','dataset_receipt_sha256':sha256(ds/'receipt.json'), 'raw_contract_sha256':hash_json(raw_contract()), 'selection_sha256':'test'}
     root=tmp_path/'replayed'
     with pytest.raises(RuntimeError):
         with publication(root,'rl-replay','broken',signature=identity) as (stage,_):
-            writer=ReplayWriter(stage,ds,identity,1024)
+            writer=ReplayWriter(stage,ds,identity,1024,commit_every_branches=1)
             writer.put(row,{'token_ids':row['completion_token_ids']},[-.2]*3,policy_sha256='p',model_sha256='m')
             raise RuntimeError('interrupted')
     shard=next(stage.glob('results/*/shards/*'))
@@ -279,3 +303,70 @@ def test_dispatch_timeout_terminates_worker_group(tmp_path,monkeypatch):
     with pytest.raises(subprocess.TimeoutExpired):dispatch('python',tmp_path/'job.json',tmp_path/'worker.log',1,tmp_path)
     import signal
     assert ('kill',signal.SIGTERM) in events and ('kill',signal.SIGKILL) in events
+
+
+@pytest.mark.parametrize("field, value, blocked", [
+    ("verify_identity", False, False),
+    ("fingerprint", "different-checkpoint", True),
+    ("path", "/different/checkpoint", True),
+    ("trust_remote_code", True, True),
+    ("dtype", "bfloat16", True),
+    ("tokenizer", "different-tokenizer", True),
+])
+def test_replay_cohort_ignores_only_verification_control(tmp_path, monkeypatch, field, value, blocked):
+    import RL.dataset.replay.service as service
+    ds = build(token_source(tmp_path))
+    group = next(iter_groups(ds))
+    original_run = group["members"][0]["source_run_id"]
+    source = read_json(ds / "source-evidence" / original_run / "resolved-config.json")
+    other = copy.deepcopy(source)
+    if field == "dtype":
+        other["serving"]["dtype"] = value
+    elif field != "tokenizer":
+        other["model"][field] = value
+    original_model = copy.deepcopy(source["model"])
+    cloned = copy.deepcopy(group)
+    for member in cloned["members"]:
+        member["source_run_id"] = "other-run"
+        if field == "tokenizer":
+            member["tokenizer_fingerprint"] = value
+    real_read = service.read_json
+    def read(path):
+        if str(path).endswith("source-evidence/other-run/resolved-config.json"):
+            return other
+        return real_read(path)
+    monkeypatch.setattr(service, "read_json", read)
+    monkeypatch.setattr(service, "selected_groups", lambda path, config, **kwargs: iter([group, cloned]))
+    cfg = ReplayConfig.model_validate(replay_config(ds, tmp_path))
+    plan = service.prepare(ds, ROOT, cfg)
+    assert bool(plan["blocked"]) is blocked
+    assert source["model"] == original_model
+    if field == "verify_identity":
+        assert len(plan["models"]) == 1
+        assert "verify_identity" not in next(iter(plan["models"].values()))["model"]
+        assert other["model"]["verify_identity"] is False
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_optional_preflight_reads_native_tokens_only_when_enabled(tmp_path, monkeypatch, enabled):
+    import RL.dataset.replay.service as service
+    ds = build(token_source(tmp_path))
+    value = replay_config(ds, tmp_path)
+    if enabled:
+        value["preflight"] = {"enabled": True}
+    cfg = ReplayConfig.model_validate(value)
+    assert cfg.preflight.enabled is enabled
+    real_groups = service.selected_groups
+    requested = []
+    def groups(path, config, **kwargs):
+        requested.append(kwargs["with_tokens"])
+        return real_groups(path, config, **kwargs)
+    def forbidden(*args):
+        raise AssertionError("Default metadata preparation must not read request ledgers")
+    monkeypatch.setattr(service, "selected_groups", groups)
+    if not enabled:
+        monkeypatch.setattr(service, "request_policy", forbidden)
+    plan = service.prepare(ds, ROOT, cfg)
+    assert requested == [enabled]
+    assert plan["counts"]["branches"] == 6
+    assert not plan["blocked"]

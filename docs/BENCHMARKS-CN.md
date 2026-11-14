@@ -34,3 +34,6 @@ Harbor 集成通过 backend registry 绑定 benchmark、agent、runtime、subjec
 
 
 SkillsBench ??????????????? timing receipt ? [SkillsBench ????](SKILLSBENCH-STARTUP-CN.md)?
+
+
+SkillsBench verifier resource releases and their exact profile/task snapshot references are documented in [verifier resources](SKILLSBENCH-VERIFIER-RESOURCES-CN.md). Local Python/Go/MathJax resources do not imply that every task or Maven business build is offline-qualified. New runs freeze the root configuration; old runs keep their original publication identities.

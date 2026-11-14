@@ -1,3 +1,4 @@
+from difficulty.storage import difficulty_path
 """Immutable dataset-owned split artifacts shared by model training attempts."""
 
 import json
@@ -35,7 +36,7 @@ def create_split(root, dataset_id, split_id, *, strategy="task_random_v1", seed=
     dataset_id, split_id = identifier(dataset_id), identifier(split_id)
     if seed < 0 or not math.isfinite(validation_fraction) or not math.isfinite(test_fraction):
         raise ValueError("Invalid split seed or fractions")
-    dataset = root / "difficulty/datasets" / dataset_id
+    dataset = difficulty_path(root, 'datasets', dataset_id)
     dataset_receipt_path = dataset / "receipt.json"
     dataset_receipt_sha = sha256(dataset_receipt_path)
     dataset_receipt = read_json(dataset_receipt_path)
@@ -60,7 +61,7 @@ def create_split(root, dataset_id, split_id, *, strategy="task_random_v1", seed=
             if not parent_experiment_id or not parent_receipt_sha256:
                 raise ValueError("Inherited split requires parent ID and receipt SHA")
             parent_experiment_id = identifier(parent_experiment_id)
-            parent_dir = root / "difficulty/checkpoints" / parent_experiment_id
+            parent_dir = difficulty_path(root, 'checkpoints', parent_experiment_id)
             if not parent_dir.is_dir() or sha256(parent_dir / "receipt.json") != parent_receipt_sha256:
                 raise ValueError("Parent attempt receipt SHA mismatch")
             proof = read_json(parent_dir / "receipt.json")
@@ -71,7 +72,7 @@ def create_split(root, dataset_id, split_id, *, strategy="task_random_v1", seed=
                 parent_split_digest = sha256(parent_dir / "split.json")
             else:
                 parent_attempt = read_json(parent_dir / "attempt.json")
-                parent_dataset = root / "difficulty/datasets" / parent_attempt["dataset_id"]
+                parent_dataset = difficulty_path(root, 'datasets', parent_attempt["dataset_id"])
                 parent_split_dir = parent_dataset / "splits" / parent_attempt["split_id"]
                 if sha256(parent_split_dir / "receipt.json") != parent_attempt["split_receipt_sha256"]:
                     raise ValueError("Parent split receipt changed")
@@ -133,7 +134,7 @@ def create_split(root, dataset_id, split_id, *, strategy="task_random_v1", seed=
 def load_split(root, dataset_id, split_id, dataset_receipt_sha256, samples):
     root = Path(root).resolve()
     dataset_id, split_id = identifier(dataset_id), identifier(split_id)
-    dataset = root / "difficulty/datasets" / dataset_id
+    dataset = difficulty_path(root, 'datasets', dataset_id)
     dataset_receipt = sha256(dataset / "receipt.json")
     if dataset_receipt != dataset_receipt_sha256:
         raise ValueError("Dataset receipt differs from training configuration")

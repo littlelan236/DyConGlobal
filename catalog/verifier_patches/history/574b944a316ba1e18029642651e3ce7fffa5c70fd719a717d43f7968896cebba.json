@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "tasks": {
+    "fix-build-agentops": {
+      "source_package_sha256": "112b6e065dc46568692dfc15818c98629fd4e13dc577b20af62551e8ac409c53",
+      "files": {
+        "task.md": {
+          "source_sha256": "f1826ae6d9b1a0bdd3740368027b110d1307accb03c4fc0913e9b12f075a5308",
+          "patch": "agentops-py38-py312-v1/task.md",
+          "effective_sha256": "a79a1ccd99df41b9862dd8dc80bcb5278d59a5572a25edc86fbe299a978fb422"
+        },
+        "verifier/agentops_matrix.py": {
+          "source_sha256": null,
+          "patch": "agentops-py38-py312-v1/verifier/agentops_matrix.py",
+          "effective_sha256": "95d4e644144c4c66cf2845c590d3ffaae057ec5997a8d6e099dc864883b8d930",
+          "mode": 420
+        },
+        "verifier/run_passed.sh": {
+          "source_sha256": "837776dc5221c16dd50f0f1ddfe0cd9e6333aa5be5dc356de3448f911900b59c",
+          "patch": "agentops-py38-py312-v1/verifier/run_passed.sh",
+          "effective_sha256": "e20ff3eca82353c0068a34fb2047a213b39106de33f4b76e731605f65a82186d"
+        },
+        "verifier/test_outputs.py": {
+          "source_sha256": "88a760014605f111a71ad132a59cb769dc9ed0e455cc76b5463032809f7022ed",
+          "patch": "agentops-py38-py312-v1/verifier/test_outputs.py",
+          "effective_sha256": "54a79fc96ec8026862d64aff8fc52beb9dd0895a80688160b86ab4aa50727863"
+        }
+      },
+      "contract": {
+        "capabilities": [
+          "agentops_ci",
+          "agentops_matrix_v1"
+        ],
+        "required_environments": [
+          "py38",
+          "py39",
+          "py310",
+          "py311",
+          "py312"
+        ]
+      }
+    }
+  }
+}

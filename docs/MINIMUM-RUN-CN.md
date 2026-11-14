@@ -75,8 +75,14 @@ cd /home/wangtianyi/DyConGlobal
 
 ## 5. 在线采集和 token 分析
 
+需要 rollout 同步保存 raw T=1 logprobs 时，在创建新 run 前于根配置启用 `capture.logprobs.enabled: true`，同时保留 `capture.enabled: true`、`capture.export.enabled: true`、managed TP=1 和现有 layers/anchors 配置；当前不支持 steering。生成 temperature、top-p/top-k 无需改成评分参数。通过上文同一 `run create/start/wait` 生命周期运行，resume 使用冻结开关。完整配置、预算、sidecar receipt 和验证范围见[在线 raw logprob 指南](ONLINE-RAW-LOGPROBS-CN.md)。
+
+`capture status` 或 hidden capture complete 不能单独证明 raw 概率覆盖。`rl-dataset build` 绑定可用 sidecar 后，检查 branch 的 `raw_probability_available`、group 的 `raw_probability_complete`，并运行 `rl-dataset check DATASET_ID --dataset-root DATASET_ROOT --level full`。概率失败保留原生 token；`capture recover` 只恢复已有 bytes 的发布，不补算缺值。
+
 ```bash
 .venvs/runner/bin/dycon capture status RUN_ID
+.venvs/runner/bin/dycon capture spool-usage
+.venvs/runner/bin/dycon capture spool-usage RUN_ID --ledger-only
 .venvs/analysis/bin/dycon online-index RUN_ID INDEX_ID
 .venvs/analysis/bin/dycon enrich RUN_ID
 .venvs/analysis/bin/dycon trajectory-token-audit RUN_ID
@@ -134,11 +140,99 @@ Action 与 difficulty 产物位于项目级目录，使用显式来源 run 和�
 
 离线训练沿用 `.venvs/runner/bin/dycon lora-train --training-config RL/experiments/grpo-offline-k3-smoke.yaml` 做 dry-run；实际训练使用 `.venvs/rl/bin/dycon lora-train --training-config TASK.yaml`。填写新 attempt ID、dataset ID 和空闲物理 GPU。训练扫描整个 dataset 的完整 eligible groups，只遍历一次 epoch，无 split manifest；raw T=1 ratio 与 token K3 共用冻结的 initial-policy logprob。配置、reference cache、checkpoint/resume、产物验证和验收边界见 [GRPO 指南](../RL/GRPO.md) 与 [测试报告](../RL/GRPO_VALIDATION.md)。
 
+训练概率来源由 task YAML 的 `grpo.reference_cache` 选择：缺省 `model_forward`；
+统一产物或旧离线导入设 `source: probability_artifact`，填写
+`artifact.scope: rl-probability`（旧 raw replay 仍用 `rl-replay`）、
+绝对 `root` 和 `id`；在线导入设 `source: dataset_probability` 和明确
+`stream: raw_t1_output_tokens`。两种外部模式都必须显式填写
+`dtype_compatibility: same_dtype` 或 `fp16_source_bf16_training`。先设置
+`run.mode: dry-run` 验证封存来源，再以 `run.mode: smoke` 执行；只对冻结的 eligible
+分支导入同一 shared anchor，current 实时计算。缺值/错绑/processed 不回退重算。
+Prepared/legacy-cache 路径的 resume 使用父 checkpoint 内的 cache 和 provenance，
+可不再访问原概率源。Native streaming 则继承原冻结 plan、advantage、reference
+anchor 和已提交 cursor，继续读取剩余 native token ledger 与外部 raw 概率；
+dataset 目录中的 `branches.jsonl` 仅保存 ledger 引用，不能替代 token 文件。
+Streaming resume 要求 `runtime.data_preparation_async: true`、`prepared_data: null`，
+保持原 world size、dataset/source 路径及完整 `training.max_updates`，通过
+`validation.stop_after_update` 暂停。每次预检和实际执行分别使用新 attempt ID；
+父 checkpoint 指向 `checkpoints/step-NNNNNN/`，不能只指向 adapter。父 contract
+决定 prepared/streaming 路径，不能用 async 开关互转；streaming checkpoint
+不支持 `warm_start` 或 `append_resume`。
+
+Source/dtype、模型、依赖、schedule 和数值合同变化仍会拒绝；project source
+fingerprint 只作审计记录。非 streaming 的 warm-start 必须匹配实际评分 adapter，
+或显式选择 model-forward。完整配置、旧格式只读兼容和查询/验证命令见
+[流式恢复](../RL/STREAMING_RESUME.md) 与 [训练指南](../RL/TRAINING.md)。
+2026-11-14 单卡/双卡短 native 数据续训验收已通过；v10 本身仅完成只读预检、
+anchor 和依赖核验，尚未执行 update 61，原长上下文 OOM 未解决。详见
+[流式验收记录](../RL/STREAMING_RESUME_VALIDATION.md)。历史外部评分数值验收
+边界继续见 [外部绑定报告](../RL/GRPO_BINDING_VALIDATION.md)。
+
 `audit.enabled` 默认关闭，控制来源身份与哈希核验；`check --level full` 不会强行打开已关闭的来源审计。产物 receipt 始终核验。Dataset 保存在 `DATASET_ROOT/RL/datasets/DATASET_ID`，可选 mmap cache 保存在 `CACHE_ROOT/RL/cache/CACHE_ID`，重放产物保存在 `OUTPUT_ROOT/RL/replays/REPLAY_ID`。
 
-重放只从根配置读取 temperature/top_p/top_k，模型、dtype 和其他约束读取冻结的历史来源；不支持的约束在加载模型前拒绝。默认输出 `replay_estimate`，不能等同原始生成时记录的行为概率；loader 需要显式 `allow_replay_estimates=True`，且存在零支持 `-inf` 的整组仍不可用。Qwen GDN、真实长上下文和多卡容量需另外验收。
+新 schema 2 重放使用冻结 FP16 checkpoint 对原生 completion 做 raw T=1、transform 前全词表归一化评分，不读取根配置的采样温度/top-p/top-k。旧 processed 产物只供诊断，不能改名后导入训练。通用 loader 的 `allow_replay_estimates=True` 与训练侧严格导入合同独立；训练要求所有 eligible target 为有限 float32。raw 评分不是精确历史 processed 行为重要性校正。Qwen GDN、真实长上下文和多卡容量的当前生产限制见 [dataset 文档](../RL/dataset/README.md)。
 
-中断后，分别使用 `build --dataset-config DATASET.yaml --recover` 或 `replay-logprobs --replay-config REPLAY.yaml --recover`。构建恢复采用冻结 selection，从完整 rollout 边界继续；重放恢复采用原始采样快照和已封存 branch。输入、实现或 runtime 不兼容时拒绝续跑；旧版无 checkpoint 的 staging 不能直接恢复。完整限制与合成测试命令见模块文档。
+中断后，分别使用 `build --dataset-config DATASET.yaml --recover` 或 `replay-logprobs --replay-config REPLAY.yaml --recover`。构建恢复采用冻结 selection，从完整 rollout 边界继续；raw 重放恢复采用冻结 dataset/cache、raw scoring、runtime/实现合同和已封存 branch。输入、实现或 runtime 不兼容时拒绝续跑；旧版无 checkpoint 的 staging 不能直接恢复。完整限制与合成测试命令见模块文档。
+
+### 在线值与缺失补评统一封存
+
+旧分支缺概率、新分支已有在线值时，先用
+[概率配置示例](../RL/dataset/configs/probability-example.yaml)显式填写已封存
+dataset、existing 来源、待生成 backfill replay ID/root、输出和 plan ID/root。
+不同 runtime 的 cohort hashes 必须预先显式允许，来源 compute dtype 必须一致。
+
+```bash
+# 发布 coverage plan，不加载模型；返回 plan_sha256 与独立 receipt hash。
+.venvs/runner/bin/dycon rl-dataset probability-plan --probability-config PROBABILITY.yaml
+# 将 plan ID/root/plan_sha256 分别写入：
+# REPLAY.yaml 的 selection.coverage_plan 和 PROBABILITY.yaml 的 coverage_plan。
+.venvs/runner/bin/dycon rl-dataset replay-logprobs --replay-config REPLAY.yaml --dry-run
+# 确需实际 GPU 补评且已安排资源时才运行：
+# .venvs/runner/bin/dycon rl-dataset replay-logprobs --replay-config REPLAY.yaml
+.venvs/runner/bin/dycon rl-dataset probability-build --probability-config PROBABILITY.yaml
+.venvs/runner/bin/dycon rl-dataset probability-check PROBABILITY_ID --storage-root ROOT --with-values
+.venvs/runner/bin/dycon artifact verify PROBABILITY_ID --scope rl-probability --storage-root ROOT
+```
+
+模型只接收 frozen missing branches；32 分支已有 31 条时只补 1 条，无缺失时不启动
+GPU worker。合并不调用模型，保留已有 FP32 bytes 并发布自包含 schema 3 到
+`ROOT/RL/probabilities/PROBABILITY_ID/`。plan 位于 `ROOT/RL/probability-plans/ID/`。
+online-only/offline-only 导出使用同一 build；无 backfill 时可直接 build。
+原 dataset/run/replay、在线 availability flags 和 receipts 不回写。
+
+训练改用 `source: probability_artifact`、`artifact.scope: rl-probability`，仅指定
+最终 ID/root，并显式保留 dtype 兼容规则。训练需要的 eligible branches 必须全部
+有有限值；`coverage_status: complete` 本身不代表 finite 或训练就绪。来源 NAS
+原上游来源离线时，普通 verify 和读取 canonical 概率产物仍使用其本地封存副本。
+Prepared/legacy-cache resume 使用 checkpoint 内 cache；native streaming resume
+仍需所选 canonical 产物及未消费 native ledgers 可达。`probability-check --sources`
+才显式追溯来源。流程、失败语义和恢复见
+[统一概率产物](../RL/dataset/PROBABILITY_ARTIFACTS.md)，CPU 证据及 GPU 待验收范围见
+[对齐验收报告](../RL/PROBABILITY_ALIGNMENT_VALIDATION.md)。
+
+### RL 训练进度、loss 曲线与 advantage
+
+实际训练启动后，使用 runner 环境查看进度或查询冻结数据：
+
+```bash
+.venvs/runner/bin/dycon lora-status --active
+.venvs/runner/bin/dycon lora-status ATTEMPT_ID --storage-root ROOT
+.venvs/runner/bin/dycon lora-tensorboard ATTEMPT_ID --storage-root ROOT --action start --port 16006
+.venvs/runner/bin/dycon lora-advantages ATTEMPT_ID --storage-root ROOT --group-ordinal 0
+```
+
+`ATTEMPT_ID` 和 `ROOT` 分别替换为训练 attempt ID 与实际存储根目录。
+TensorBoard 仅监听远程 `127.0.0.1`；本地运行
+`ssh -N -L 16006:127.0.0.1:16006 wangtianyi@10.249.187.9`，再打开
+`http://127.0.0.1:16006`。用同一 `lora-tensorboard` 命令的 `--action status`
+检查服务，`--action stop` 结束可视化；训练继续运行。
+
+Status 分开显示已提交 update、inflight 工作和可恢复 checkpoint；曲线只记录完整
+optimizer update。Advantage 来自冻结训练数据并标记来源；旧 JSON 需显式
+`--build-index`，通过 `--index-status` 查看构建进度。旧训练无需重启，缺失的阶段
+信息显示 `unknown`，索引和 events 不写入训练 artifact。更多用法见
+[训练指南](../RL/TRAINING.md#训练进度实时-loss-与冻结-advantage-查询)和
+[可观测性专题](../RL/OBSERVABILITY.md)。
 
 ## 8. 任务专用入口
 
@@ -216,3 +310,35 @@ cleanup receipt 完整。Capture 异常应先检查并尝试恢复已有证据�
 
 完整参数、显式 task manifest、恢复命令、产物位置及本次真实验收结果见
 [Dataset Ridge 任务留出评估与全量轨迹可视化](DIFFICULTY-RIDGE-HOLDOUT-CN.md)。
+
+## 8 卡 RL：distinct-parent 8×16（实验性）
+
+在完整任务 YAML 中使用以下字段；其余模型、dataset、reference 和输出配置仍需明确填写：
+
+```yaml
+runtime:
+  gpu: null
+  gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+grpo:
+  group_batch_size: 8
+  parallel_branch_chunk_size: 16
+  parallel_branch_schedule: distinct_parent_two_pass_v1
+  branch_partition_seed: 42
+  prefix_reuse:
+    mode: boundary_grad
+```
+
+至少 8 个合格父组，每组完整 32 分支评分；每步从 8 个不同父组各执行 16 条，
+两轮覆盖互补两半，尾窗分开。不得将同一父组两半安排在同一步。
+先设置 `run.mode: dry-run`，通过 runner 的 `dycon lora-train --training-config TASK.yaml`
+预检；8 张物理卡全部空闲后，设置 `run.mode: smoke`，再通过 rl 环境同一 CLI 训练。
+两次调用各使用新 attempt ID，不额外套 `torchrun`。
+
+G 个父组需要 `2*ceil(G/8)` 次更新；6773 父组为 1694 次更新、13546 个 half、
+216736 条分支。暂停使用 `validation.stop_after_update`，恢复指向完整 step checkpoint，
+保持冻结计划、world size 和完整 max_updates；旧 v10/1/2/4 卡 checkpoint 不能直接切换。
+状态中的 consumed halves、seen parents、completed parents 含义不同。
+
+2026-11-14 CPU 回归 426 passed、12 skipped，包含真实 8 进程 Gloo；8 卡真实模型、
+长 prefix 容量、吞吐和质量仍待验收。完整说明见 [8×16 协议](../RL/DATA_PARALLEL_8X16.md)
+及[验收记录](../RL/DATA_PARALLEL_8X16_VALIDATION.md)。

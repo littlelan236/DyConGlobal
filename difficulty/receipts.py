@@ -35,7 +35,8 @@ def verify_receipt(root, directory, *, expected_sha256=None, seen=None):
             raise ValueError(f"Bound source checksum mismatch: {source_path}")
         count += 1
     for parent in receipt.get("parents", []):
-        parent_path = owned_path(root, parent["path"])
+        from difficulty.storage import receipt_parent
+        parent_path = receipt_parent(root, parent["path"])
         _, checked = verify_receipt(root, parent_path, expected_sha256=parent["receipt_sha256"], seen=seen)
         count += checked
     return receipt, count

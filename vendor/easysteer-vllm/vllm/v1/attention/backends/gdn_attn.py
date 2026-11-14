@@ -83,6 +83,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
     kv_cache_spec: MambaSpec
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
+    @classmethod
+    def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
+        from vllm.v1.attention.backends.gdn_fullgraph import supports_raw_full_graph
+        if supports_raw_full_graph(vllm_config):
+            return AttentionCGSupport.ALWAYS
+        return cls._cudagraph_support
+
     reorder_batch_threshold: int = 1
 
     def __init__(
@@ -110,6 +117,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             self.num_spec = 0
         self.use_spec_decode: bool = self.num_spec > 0
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
+        from vllm.v1.attention.backends.gdn_fullgraph import (
+            RawGDNGraphBuffers, supports_raw_full_graph,
+        )
+        self.raw_full_graph = (
+            RawGDNGraphBuffers(vllm_config, kv_cache_spec, device)
+            if supports_raw_full_graph(vllm_config) else None
+        )
 
         self.use_full_cuda_graph: bool = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
@@ -216,6 +230,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         fast_build: bool = False,
     ) -> GDNAttentionMetadata:
         m = common_attn_metadata
+        if self.raw_full_graph is not None and m.num_actual_tokens <= self.raw_full_graph.max_tokens:
+            return self.raw_full_graph.build(m)
 
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
@@ -530,6 +546,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         Currently, only decode is supported for full cudagraphs with Mamba.
         """
         m = common_attn_metadata
+        if self.raw_full_graph is not None:
+            return self.raw_full_graph.build(m)
 
         assert (
             m.num_reqs <= self.decode_cudagraph_max_bs

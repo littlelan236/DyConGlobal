@@ -10,6 +10,7 @@ TP assembly or graph logic is duplicated here.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import hmac
 import logging
@@ -474,6 +475,23 @@ class DyConCapturePlugin:
             REQUEST_CONTEXT.reset(token)
         await self.receipt_lane.run(self._post, f"/dycon/capture/session/{session_id}/stop", {})
 
+    @staticmethod
+    def _raw_t1_values(final, generated):
+        if os.environ.get("DYCON_RAW_T1_ENABLED") != "1":
+            return None
+        values = []
+        for token_id, entry in zip(generated, final.outputs[0].logprobs or []):
+            item = entry.get(int(token_id)) if isinstance(entry, dict) else None
+            if item is None:
+                raise RuntimeError("raw T=1 output did not contain sampled-token value")
+            value = getattr(item, "logprob", item.get("logprob") if isinstance(item, dict) else None)
+            if value is None:
+                raise RuntimeError("raw T=1 output value is missing")
+            values.append(float(value))
+        if len(values) != len(generated):
+            raise RuntimeError("raw T=1 output/logit token alignment mismatch")
+        return values
+
     def _post(self, route, value):
         import requests
 
@@ -561,6 +579,14 @@ class DyConCapturePlugin:
                     "exclude_generation_window": [0, None],
                 }}
             if metadata is not None and request.sampling_params is not None:
+                if os.environ.get("DYCON_RAW_T1_ENABLED") == "1":
+                    params = request.sampling_params.clone()
+                    params.logprobs = 0
+                    params.prompt_logprobs = None
+                    params.logprob_token_ids = None
+                    params.extra_args = dict(params.extra_args or {})
+                    params.extra_args["dycon_raw_t1_sampled_token_v1"] = True
+                    request.sampling_params = params
                 if metadata.get("replay"):
                     # Native input admission owns prompt-target cache policy.
                     from vllm.capture import SelectSpec
@@ -604,6 +630,17 @@ class DyConCapturePlugin:
                 if native_state is None:
                     raise RuntimeError("Native capture admission has no request-local context")
                 native_state.update(native_request_id=request.request_id, binding=binding)
+                if os.environ.get("DYCON_RAW_T1_ENABLED") == "1":
+                    import msgspec
+                    policy = msgspec.to_builtins(request.sampling_params)
+                    policy.pop("logprobs", None)
+                    policy.pop("prompt_logprobs", None)
+                    policy.pop("logprob_token_ids", None)
+                    policy.pop("extra_args", None)
+                    native_state["raw_t1_generation_identity"] = {
+                        "generation_policy_sha256": hash_json(policy),
+                        "grammar_sha256": hash_json(policy.get("structured_outputs")),
+                        "steering": None}
                 await self._receipt_post(
                     "/dycon/capture/request/bind",
                     {"request_id": request.request_id, "metadata": binding},
@@ -637,9 +674,12 @@ class DyConCapturePlugin:
             owner = OWNER_CONTEXT.get()
             final = None
             generated = []
+            raw_values = []
+            raw_error = None
             branch_released = False
             params = args[1] if len(args) > 1 else kwargs["sampling_params"]
-            if metadata is not None and metadata.get("decision_id") and params.n != 1:
+            if (metadata is not None and params.n != 1 and
+                    (metadata.get("decision_id") or os.environ.get("DYCON_RAW_T1_ENABLED") == "1")):
                 raise ValueError("Parallel transport requires native n=1 for exact capture identity")
             options = self.parallel_options.get('reasoning_loop') or self.reasoning_loop_options
             guarded = bool(options.get('enabled') and not (metadata or {}).get('replay')
@@ -702,6 +742,11 @@ class DyConCapturePlugin:
                         "external_response_id": final.request_id,
                         "prompt_token_ids": list(final.prompt_token_ids or []),
                         "output_token_ids": generated,
+                        **({"raw_t1_logprobs_b64": base64.b64encode(
+                            np.asarray(raw_values, dtype="<f4").tobytes()).decode("ascii")}
+                           if os.environ.get("DYCON_RAW_T1_ENABLED") == "1" and raw_error is None else {}),
+                        **({"raw_t1_generation_identity": native_state["raw_t1_generation_identity"]}
+                           if "raw_t1_generation_identity" in native_state else {}),
                         "finish_reason": final.outputs[0].finish_reason,
                         "num_cached_tokens": getattr(final, "num_cached_tokens", 0) or 0,
                         **({"reasoning_loop": loop} if loop is not None else {}),
@@ -724,6 +769,15 @@ class DyConCapturePlugin:
                     final = output
                     ids = output.outputs[0].token_ids
                     new_ids = list(ids if delta else ids[len(generated):])
+                    if os.environ.get("DYCON_RAW_T1_ENABLED") == "1" and metadata is not None and raw_error is None:
+                        try:
+                            chunk = self._raw_t1_values(output, list(ids))
+                            raw_values.extend(chunk if delta else chunk[len(generated):])
+                            if len(raw_values) > json.loads(os.environ.get("DYCON_RAW_T1_OPTIONS", "{}")).get("max_request_tokens", 131072):
+                                raise ValueError("Raw probability request token budget exceeded")
+                        except Exception as exc:
+                            raw_error = type(exc).__name__
+                            raw_values.clear()
                     generated.extend(new_ids)
                     # Finished/closed requests win races with a new abort.
                     if (detector is not None and not state.get("reasoning_loop")

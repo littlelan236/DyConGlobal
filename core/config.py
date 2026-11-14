@@ -338,6 +338,17 @@ class CaptureExport(Strict):
         return self
 
 
+class CaptureLogprobs(Strict):
+    enabled: bool = False
+    probability_semantics: Literal["raw_t1_sampled_token_v1"] = "raw_t1_sampled_token_v1"
+    temperature: Literal[1.0] = 1.0
+    queue_size: int = Field(default=64, gt=0, le=4096)
+    max_request_tokens: int = Field(default=131072, gt=0)
+    shard_max_bytes: int = Field(default=4194304, ge=4)
+    spool_max_bytes: int = Field(default=1073741824, gt=0)
+    failure_policy: Literal["record_and_continue"] = "record_and_continue"
+
+
 class Capture(Strict):
     enabled: bool = False
     backend: Literal["easysteer"] = "easysteer"
@@ -369,6 +380,18 @@ class Capture(Strict):
     finalize_seconds: int = Field(default=120, gt=0)
     publication_seconds: int = Field(default=3600, gt=0)
     export: CaptureExport = Field(default_factory=CaptureExport)
+    logprobs: CaptureLogprobs = Field(default_factory=CaptureLogprobs)
+
+    @model_validator(mode="after")
+    def raw_logprob_capture(self):
+        if self.logprobs.enabled:
+            if not self.enabled or not self.export.enabled:
+                raise ValueError("capture.logprobs requires persisted native capture")
+            if self.logprobs.max_request_tokens * 4 > self.logprobs.shard_max_bytes:
+                raise ValueError("raw logprob request must fit its bounded shard")
+            if self.logprobs.shard_max_bytes * 2 >= self.logprobs.spool_max_bytes:
+                raise ValueError("raw logprob spool must accommodate atomic shard writes")
+        return self
 
 
 class Steering(Strict):
@@ -422,7 +445,7 @@ class Parallel(Strict):
     policy: Literal["first_step", "every_k_steps", "every_step"] = "first_step"
     every_k_steps: int | None = Field(default=None, gt=0)
     estimator_ref: str | None = None
-    max_inflight_branches: int = Field(default=16, gt=0)
+    max_inflight_branches: int = Field(default=16, gt=0, json_schema_extra={"readOnly": True})
     dynamic_branch_admission: bool = False
     admission_timeout_seconds: int = Field(default=1800, gt=0, le=28800)
     score_timeout_ms: int = Field(default=200, ge=1, le=30000)
@@ -580,6 +603,11 @@ class Config(Strict):
         if self.benchmark.backend in {"swebench_pro_v2", "terminalbench_2_1"} and self.harbor is None:
             raise ValueError("Harbor benchmarks require a pinned worker/runtime configuration")
         validate_generation_contract(self.model_dump())
+        if self.capture.logprobs.enabled:
+            if self.serving.management != "managed" or self.serving.tensor_parallel_size != 1:
+                raise ValueError("raw T=1 capture requires managed TP=1 serving")
+            if self.steering.enabled:
+                raise ValueError("raw T=1 capture currently requires an unsteered base model")
         if self.steering.enabled != bool(self.steering.payload):
             raise ValueError("Enabled steering requires a payload; disabled steering must not have one")
         if self.timeouts.bootstrap_seconds >= self.timeouts.container_lifetime_seconds:

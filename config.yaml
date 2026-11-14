@@ -11,7 +11,7 @@ paths:
   - /data3/wangtianyi/DyConGlobal
 benchmark:
   partition: null
-  snapshot_ref: catalog/snapshots/skillsbench-agent75-aliyun-cpufirst-v2-20261105/manifest.json
+  snapshot_ref: catalog/snapshots/skillsbench-agentops-py38-py312-candidate-v2-20261111/manifest.json
   backend: skillsbench
 sandbox:
   memory_mb: 16384
@@ -381,7 +381,7 @@ agent:
   # null: serving.max_model_len - generation.max_tokens - 1, frozen per run.
   condenser_max_tokens: null
   backend: openhands
-  profile_ref: runtime/agent-profiles/openhands-sdkv4-cpufirst-events-v2-qualified-20261105/manifest.json
+  profile_ref: runtime/agent-profiles/skillsbench-agentops-matrix-public-qualified-20261111/manifest.json
 environment:
   docker_host: unix:///run/user/1018/docker.sock
   docker_executable: /usr/bin/docker

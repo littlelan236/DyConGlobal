@@ -88,6 +88,54 @@ def safe_output_path(value):
     return str(path)
 
 
+def read_archive_members(path, expected_sha256, wanted, *, member_limit=2*1024*1024,
+                         total_limit=16*1024*1024, scan_limit=512*1024*1024):
+    """Read selected regular tar members without extracting or following links.
+
+    The caller supplies an authenticated subject output hash. All names/types
+    and expanded bytes are bounded, including members the caller does not need.
+    """
+    import hashlib
+    import tarfile
+
+    path = Path(path)
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > scan_limit:
+        raise ValueError('Invalid subject archive')
+    if sha256(path) != expected_sha256:
+        raise ValueError('Changed subject archive')
+    rows, names, expanded, consumed = [], set(), 0, 0
+    with tarfile.open(path, mode='r|*') as archive:
+        for index, member in enumerate(archive):
+            name = PurePosixPath(member.name)
+            if index >= 50000 or name.is_absolute() or '..' in name.parts:
+                raise ValueError('Unsafe subject archive member')
+            if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+                if wanted(name.as_posix()):
+                    raise ValueError('Requested subject member is not a regular file')
+                # Reject the member; never follow even a benign internal link.
+                continue
+            if member.name in names:
+                raise ValueError('Duplicate subject archive member')
+            names.add(member.name)
+            expanded += member.size
+            if expanded > scan_limit:
+                raise ValueError('Expanded archive budget exceeded')
+            if not member.isfile() or not wanted(name.as_posix()):
+                continue
+            if member.size > member_limit or consumed+member.size > total_limit:
+                raise ValueError('Subject member read budget exceeded')
+            stream = archive.extractfile(member)
+            data = stream.read(member_limit+1)
+            if len(data) != member.size:
+                raise ValueError('Incomplete archive member')
+            consumed += len(data)
+            rows.append({'name':member.name,'sha256':hashlib.sha256(data).hexdigest(),
+                         'archive_sha256':expected_sha256,'size':len(data),'data':data})
+    if sha256(path) != expected_sha256:
+        raise ValueError('Subject archive changed while reading')
+    return rows
+
+
 def journal(directory, stage, binding, **details):
     if stage not in STAGES:
         raise ValueError("Unknown finalization stage")

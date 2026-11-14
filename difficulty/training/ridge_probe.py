@@ -1,3 +1,4 @@
+from difficulty.storage import difficulty_path
 """Frozen task split, single-site Ridge grid, model selection and artifacts."""
 
 import json
@@ -86,6 +87,7 @@ def code_evidence(root):
              "difficulty/evaluation/holdout_config.py", "difficulty/evaluation/holdout_results.py",
              "difficulty/evaluation/holdout_verify.py",
              "difficulty/evaluation/visualize.py"]
+    names += ['difficulty/storage.py']
     names += ['difficulty/training/config.py', 'difficulty/training/entrypoint.py', 'difficulty/training/visualization.py']
     return {name: sha256(root / name) for name in names if (root / name).exists()}
 
@@ -156,7 +158,7 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
         settings_raw = dict(settings_raw)
         if dataset_id is not None:
             from core.io import identifier
-            source = Path(cfg['project_root']) / 'difficulty/datasets' / identifier(dataset_id)
+            source = difficulty_path(cfg['project_root'], 'datasets', identifier(dataset_id))
             rows = read_json(source / 'rollouts.json')['rollouts']
             n_samples = sum(bool(line.strip()) for line in (source / 'samples.jsonl').read_text().splitlines())
             settings_raw.update(dataset_id=dataset_id, dataset_receipt_sha256=sha256(source / 'receipt.json'),
@@ -194,7 +196,7 @@ def run_probe(cfg, experiment_id, *, mode="fit", split_id=None, dataset_id=None,
     width, native_sites = contract['width'], contract['native_sites']
     if any(layer >= len(native_sites) for layer in settings.layers):
         raise ValueError('Requested public layer is outside captured hidden sites')
-    split_path = root / "difficulty/datasets" / settings.dataset_id / "splits" / split_id
+    split_path = difficulty_path(root, 'datasets', settings.dataset_id) / "splits" / split_id
     if not split_path.exists():
         if explicit_split:
             raise FileNotFoundError(f"Create the dataset split with dycon difficulty-split first: {split_path}")

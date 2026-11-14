@@ -4,6 +4,13 @@ import math
 import statistics
 
 ADVANTAGE_VERSION = "historical_topk_zero_sum_v1"
+CONSENSUS_ADVANTAGE_VERSION = "consensus_top_half_zero_sum_v1"
+
+
+def validate_retained(retained, n):
+    if not isinstance(retained, (list, tuple)) or len(retained) != n or any(
+            type(flag) is not bool for flag in retained):
+        raise ValueError("Consensus advantages require one explicit boolean retained flag per branch")
 
 @dataclass(frozen=True)
 class AdvantageResult:
@@ -17,7 +24,14 @@ class AdvantageResult:
     metadata: dict
 
 def compute_advantages(scores, *, top_k=4, top_k_fraction=None, score_scale_floor=0.1,
-                       boundary_tie_sigma=0.05):
+                       boundary_tie_sigma=0.05, advantage_policy=ADVANTAGE_VERSION, retained=None):
+    if advantage_policy not in {ADVANTAGE_VERSION, CONSENSUS_ADVANTAGE_VERSION}:
+        raise ValueError("Unknown advantage policy")
+    consensus = advantage_policy == CONSENSUS_ADVANTAGE_VERSION
+    if consensus:
+        if top_k is not None or top_k_fraction != 0.5 or boundary_tie_sigma != 0:
+            raise ValueError("Consensus top-half requires top_k=null, top_k_fraction=0.5 and boundary_tie_sigma=0")
+        validate_retained(retained, len(scores))
     if (top_k is None) == (top_k_fraction is None):
         raise ValueError("Specify exactly one top-k policy")
     if (not math.isfinite(score_scale_floor) or score_scale_floor <= 0
@@ -42,26 +56,35 @@ def compute_advantages(scores, *, top_k=4, top_k_fraction=None, score_scale_floo
         values = []
     if len(values) != n or any(not math.isfinite(x) for x in values):
         return AdvantageResult([], [], [], 0, 0, 0.0, k,
-            {"version": ADVANTAGE_VERSION, "status": "skipped", "skip_reason": "missing_or_nonfinite_score"})
+            {"version": advantage_policy, "status": "skipped", "skip_reason": "missing_or_nonfinite_score"})
     order = list(sorted(range(n), key=lambda i: (values[i], i)))
     ranks = [sum(s < x for s in values) for x in values]
     center = sum(x / n for x in values)
     sigma = math.hypot(*(x - center for x in values)) / math.sqrt(n)
     gap = values[order[k]] - values[order[k - 1]]
-    info = {"version": ADVANTAGE_VERSION, "population_std": sigma, "boundary_gap": gap}
+    info = {"version": advantage_policy, "population_std": sigma, "boundary_gap": gap}
     reason = "all_scores_equal" if values[order[0]] == values[order[-1]] else (
-        "top_k_boundary_tie" if gap <= boundary_tie_sigma * sigma else None)
+        "top_k_boundary_tie" if boundary_tie_sigma > 0 and gap <= boundary_tie_sigma * sigma else None)
     if reason:
         return AdvantageResult([], order, ranks, 0, 0, 0.0, k,
             {**info, "status": "skipped", "skip_reason": reason})
+    positive = [i for i in order[:k] if retained[i]] if consensus else order[:k]
+    m = len(positive)
+    if consensus:
+        info.update(ranking_scope="all_branches", ranking_cutoff=k,
+                    consensus_field="retained", retained_count=sum(retained),
+                    positive_indices=positive, tie_break="frozen_native_branch_order")
+    if not positive:
+        return AdvantageResult([], order, ranks, 0, 0, 0.0, k,
+            {**info, "status": "skipped", "skip_reason": "no_consensus_in_top_half"})
     boundary = values[order[k - 1]]
     scale = max(boundary - values[order[0]], score_scale_floor * sigma, 1e-6)
     if not math.isfinite(scale) or not math.isfinite(sigma):
         raise ValueError("Nonfinite advantage scale")
-    weights = [.5 + .5 * (boundary - values[i]) / scale for i in order[:k]]
+    weights = [.5 + .5 * (boundary - values[i]) / scale for i in positive]
     mean_weight = statistics.fmean(weights)
-    result = [-k / (n - k)] * n
-    for i, weight in zip(order[:k], weights):
+    result = [-m / (n - m)] * n
+    for i, weight in zip(positive, weights):
         result[i] = weight / mean_weight
-    return AdvantageResult(result, order, ranks, k, n - k, math.fsum(result), k,
+    return AdvantageResult(result, order, ranks, m, n - m, math.fsum(result), k,
         {**info, "status": "ok", "scale": scale})

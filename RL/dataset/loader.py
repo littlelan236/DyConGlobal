@@ -8,7 +8,7 @@ from .build import iter_rows
 from .schema import spans, validate
 
 
-def native_tokens(row, *, audit=True):
+def native_tokens(row, *, audit=True, verify_hashes=None):
     evidence = row.get("native_evidence")
     if not evidence:
         raise ValueError("Branch has no exact native token evidence")
@@ -23,7 +23,7 @@ def native_tokens(row, *, audit=True):
         if audit and value.get(key) != expected:
             raise ValueError("Frozen native payload identity mismatch: " + key)
     p, c = value.get("prompt_token_ids"), value.get("output_token_ids")
-    validate(p, c, row["prompt_sha256"], row["completion_sha256"], verify_hashes=audit)
+    validate(p, c, row["prompt_sha256"], row["completion_sha256"], verify_hashes=audit if verify_hashes is None else verify_hashes)
     if (len(p), len(c)) != (row["prompt_count"], row["completion_count"]):
         raise ValueError("Frozen native payload lengths mismatch")
     if row["mask_spans"] != spans(len(p), len(c)):
@@ -32,9 +32,10 @@ def native_tokens(row, *, audit=True):
 
 
 def iter_groups(path, *, with_tokens=True, data_ready_only=True, max_sequence_length=None,
-                cache=None, replay=None, allow_replay_estimates=False, start_group=0):
+                cache=None, replay=None, allow_replay_estimates=False, start_group=0,
+                verify_identity=True):
     path = Path(path)
-    verify_local(path, "rl-dataset")
+    verify_local(path, "rl-dataset", verify_files=verify_identity)
     cached = None
     if cache is not None:
         from .materialize import CacheReader
@@ -103,14 +104,15 @@ def iter_ce_batches(path, **kwargs):
 
 
 def iter_grpo_groups(path, *, top_k=4, top_k_fraction=None, score_scale_floor=0.1,
-                     boundary_tie_sigma=0.05, **kwargs):
+                     boundary_tie_sigma=0.05, advantage_policy="historical_topk_zero_sum_v1", **kwargs):
     """Yield objective-ready frozen groups without changing native coordinates."""
     from RL.grpo.groups import GroupBatch
 
     for value in iter_groups(path, **kwargs):
         yield GroupBatch.from_dataset_group(
             value, top_k=top_k, top_k_fraction=top_k_fraction,
-            score_scale_floor=score_scale_floor, boundary_tie_sigma=boundary_tie_sigma)
+            score_scale_floor=score_scale_floor, boundary_tie_sigma=boundary_tie_sigma,
+            advantage_policy=advantage_policy)
 
 
 def iter_grpo_batches(path, group_batch_size=4, **kwargs):

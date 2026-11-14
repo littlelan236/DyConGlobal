@@ -36,21 +36,29 @@ def commit_receipt(directory, kind, **metadata):
     return receipt
 
 
-def verify_receipt(directory, kind=None):
+def read_receipt(directory, kind=None):
+    """Read the committed identity without rescanning artifact contents."""
     directory = Path(directory).resolve()
     if not (directory / "receipt.json").is_file():
         raise ValueError("Uncommitted or incomplete LoRA artifact: receipt.json missing")
     receipt = read_json(directory / "receipt.json")
     if receipt.get("schema_version") != 1 or (kind and receipt.get("kind") != kind):
         raise ValueError("LoRA receipt kind/schema mismatch")
-    if not receipt.get("files") or receipt["files"] != inventory(directory):
-        raise ValueError("LoRA receipt file inventory/hash mismatch")
+    if not isinstance(receipt.get("files"), dict) or not receipt["files"]:
+        raise ValueError("LoRA receipt file inventory missing")
     for name in receipt["files"]:
         owned_path(directory, name)
     return receipt
 
 
-def base_identity(path, project_root):
+def verify_receipt(directory, kind=None):
+    receipt = read_receipt(directory, kind)
+    if receipt["files"] != inventory(directory):
+        raise ValueError("LoRA receipt file inventory/hash mismatch")
+    return receipt
+
+
+def base_identity(path, project_root, verify_content=True):
     from core.model_identity import describe
 
     path = Path(path)
@@ -64,8 +72,25 @@ def base_identity(path, project_root):
         raise ValueError("Only the local Qwen3.5-9B conditional-generation checkpoint is supported")
     if not (path / "tokenizer.json").is_file() or not (path / "tokenizer_config.json").is_file():
         raise ValueError("Local tokenizer files are required")
-    identity = describe(path)  # Deep content hashes, including every weight shard and tokenizer file.
-    write_json(Path(project_root) / "runtime/model-identities" / (identity["fingerprint"] + ".json"), identity)
+    registry = Path(project_root) / "runtime/model-identities"
+    if verify_content:
+        identity = describe(path)  # Deep content hashes, including every weight shard and tokenizer file.
+        write_json(registry / (identity["fingerprint"] + ".json"), identity)
+    else:
+        from core.model_identity import verify_model
+        identities = []
+        for manifest in sorted(registry.glob("*.json")):
+            try:
+                identity = verify_model({"project_root": str(project_root),
+                    "model": {"path": str(path), "fingerprint": manifest.stem,
+                              "served_name": path.name}}, deep=False)
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            identities.append(identity)
+        if len(identities) != 1:
+            raise ValueError("Unchecked startup needs one registered model identity matching file names/sizes; "
+                             "set preflight.verify_identity=true to register/verify contents")
+        identity = identities[0]
     return {**identity, "path": str(path)}
 
 
@@ -79,6 +104,15 @@ def dependency_versions():
         except importlib.metadata.PackageNotFoundError:
             result[name] = None
     return result
+
+
+def resume_contract_matches(expected, actual):
+    """Project code hashes are audit metadata; all other training pins still match."""
+    expected = dict(expected)
+    actual = dict(actual)
+    expected.pop("source_fingerprint", None)
+    actual.pop("source_fingerprint", None)
+    return expected == actual
 
 
 def source_identity(root):
@@ -158,8 +192,16 @@ def verify(cfg_or_root, scope, artifact_id, *, storage_root=None, dataset_id=Non
         extra = receipt_metadata(contract, validation["state"])
         if any(receipt.get(k) != v for k, v in extra.items()):
             raise ValueError("GRPO attempt receipt objective/cursor mismatch")
-        required_grpo = {"grpo-report.json", "grpo-contract.json", "frozen-groups.json",
+        required_grpo = {"grpo-report.json", "grpo-contract.json",
                          "input-identity.json", "selection.json"}
+        from RL.grpo.stream_resume import checkpoint_kind
+        kind = checkpoint_kind(contract)
+        if kind == "streaming":
+            from RL.grpo.stream_resume import resolve_checkpoint
+            resolve_checkpoint(directory, contract)
+            required_grpo.add("grpo/stream-resume.json")
+        else:
+            required_grpo.add("grpo/prepared-binding.json" if kind == "prepared" else "frozen-groups.json")
         if not required_grpo.issubset(receipt["files"]):
             raise ValueError("GRPO objective/report evidence missing")
         if (read_json(directory / "grpo-contract.json") != contract or
@@ -168,10 +210,16 @@ def verify(cfg_or_root, scope, artifact_id, *, storage_root=None, dataset_id=Non
         history = read_metric_history(directory / "metrics.jsonl")
         report = read_json(directory / "grpo-report.json")
         if (len(history) != validation["state"]["global_step"] or not history
-                or report != {"status": attempt["status"], "input": contract["input"],
+                or {k:v for k,v in report.items() if k not in {"preparation", "extension"}} != {"status": attempt["status"], "input": contract["input"],
                               "reference": contract["grpo"], "state": validation["state"], "updates": history}
                 or any(history[-1].get(k) != v for k, v in validation["state"].items())):
             raise ValueError("GRPO report/metrics/cursor cannot be reconstructed")
+        if "prepared" in contract:
+            from RL.grpo.prepared import PreparedReader, resolve
+            prepared = PreparedReader(resolve(contract["prepared"]))
+            prepared.validate_state(validation["state"])
+            if report.get("extension") != contract.get("extension") or "preparation" not in report:
+                raise ValueError("GRPO prepared reuse/extension report missing")
     verify_adapter(directory / "adapter", contract["adapter"], verify_owner=False)
     count = len(receipt["files"])
     for checkpoint in sorted((directory / "checkpoints").glob("step-*")):

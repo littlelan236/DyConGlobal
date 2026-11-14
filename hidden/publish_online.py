@@ -237,7 +237,17 @@ def publish_online_service(cfg, run_id, *, repair_id, publication_id, resolved_o
             path = owned_path(root, evaluation['report_path'])
             if sha256(path) != evaluation['report_sha256']:
                 raise ValueError('Harness report checksum mismatch')
-            outcome = read_json(path)['outcomes'][rid]
+            evaluation_report = read_json(path)
+            if 'outcomes' in evaluation_report:
+                outcome = evaluation_report['outcomes'].get(rid, {})
+            else:
+                # Live benchmark evaluations persist one subject/attempt per report.
+                if (row.get('evaluation_subject', {}).get('kind') not in
+                        {'workspace', 'web_trace', 'live_state'}
+                        or evaluation_report.get('evaluation_id') != row['selected_evaluation_id']
+                        or evaluation_report.get('attempt_id') != row.get('attempt_id')):
+                    raise ValueError('Official evaluation report identity mismatch')
+                outcome = {**evaluation_report, 'status': evaluation_report.get('evaluation_status')}
             from application.execution.subject import subject_digest
             digest_key, digest = subject_digest(row)
             if (outcome.get('resolved') != row.get('resolved')

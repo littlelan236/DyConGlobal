@@ -158,7 +158,14 @@ def execution_context(cfg, tasks):
             raise ValueError("Task does not belong to frozen benchmark snapshot")
     compatibility = profile.get('verifier_index_compatibility')
     if compatibility != snapshot.get('verifier_index_compatibility'):
-        raise ValueError('Frozen SkillsBench profile and task index compatibility policies differ')
+        resources=dependency_manifest.get('verifier_resources',{}) if profile.get('dependency_snapshot') else {}
+        local=(profile.get('verifier_resource_policy')=='skillsbench-verifier-resources-v1'
+            and resources.get('policy')=='skillsbench-verifier-resources-v1'
+            and snapshot.get('verifier_correction',{}).get('policy')=='skillsbench-verifier-repair-v1'
+            and bool(tasks) and all(resources.get('tasks',{}).get(t['instance_id'],{}).get('package_sha256')
+                ==t['instance']['package_sha256'] for t in tasks.values()))
+        if not local:
+            raise ValueError('Frozen SkillsBench profile and task index compatibility policies differ')
     context = {"schema_version": 1, "benchmark": benchmark, "agent": agent,
                "revision": snapshot["revision"], "snapshot_sha256": sha256(snapshot_path),
                "profile_sha256": sha256(profile_path), "profile": profile,

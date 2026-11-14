@@ -60,6 +60,7 @@ class OpenHandsProfile(OpenHandsDriverProfile):
     # Explicit verifier package index frozen in public SkillsBench profiles.
     verifier_python_index: str | None = None
     verifier_index_compatibility: Literal['generic-pypi-v1', 'generic-pypi-cpu-first-v2'] | None = None
+    verifier_resource_policy: Literal['skillsbench-verifier-resources-v1'] | None = None
     use_host_proxy: bool = False
     cpu_quota: Literal["strict", "unenforced_with_receipt"] = "strict"
     skip_agent_install: bool = False
@@ -118,7 +119,7 @@ class OpenHandsProfile(OpenHandsDriverProfile):
         value = handler(self)
         # Older run contexts compare normalized profiles. Do not add absent
         # optional fields to their serialized identity.
-        for key in ('verifier_python_index', 'verifier_index_compatibility'):
+        for key in ('verifier_python_index', 'verifier_index_compatibility', 'verifier_resource_policy'):
             if value.get(key) is None:
                 value.pop(key, None)
         return value

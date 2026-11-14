@@ -1,0 +1,28 @@
+# Online-only export. Replace IDs and physical roots with sealed source bindings.
+# For missing-only replay, see ../PROBABILITY_ARTIFACTS.md before freezing a plan.
+schema_version: 1
+dataset:
+  id: DATASET_ID
+  root: /data3/wangtianyi/DyConGlobal
+output:
+  id: PROBABILITY_ID
+  root: /data3/wangtianyi/DyConGlobal
+  max_shard_bytes: 268435456
+  memory_budget_gib: 4.0
+plan:
+  id: COVERAGE_PLAN_ID
+  root: /data3/wangtianyi/DyConGlobal
+sources:
+  - kind: dataset_stream
+    id: DATASET_ID
+    root: /data3/wangtianyi/DyConGlobal
+    stream: raw_t1_output_tokens
+    role: existing
+group_ids: []
+allowed_missing_reasons: [absent]
+cohort_policy:
+  # A single factual source cohort is accepted. Multiple cohorts require exact hashes.
+  allowed_execution_cohorts: []
+deduplicate_identical: false
+allow_partial: false
+merge_policy: existing_valid_then_backfill

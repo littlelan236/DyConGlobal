@@ -14,7 +14,7 @@ def values():
 
 @pytest.mark.parametrize("section,key,value", [
     ("lora", "rank", 0), ("lora", "rank", True), ("lora", "dropout", float("nan")),
-    ("runtime", "gpu", -1), ("runtime", "gpu", "0"), ("model", "dtype", "float32"),
+    ("runtime", "gpu", -1), ("runtime", "gpu", "0"), ("model", "dtype", "float64"),
     ("training", "learning_rate", float("inf")), ("lora", "target_scope", "mlp_only"),
     ("validation", "max_sequence_length", 262144), ("run", "unexpected", 1),
     ("model", "gradient_checkpointing", False),
@@ -71,3 +71,13 @@ def test_resume_whitelist(values):
     assert schedule_contract(first) == schedule_contract(second)
     second.training.learning_rate *= 2
     assert schedule_contract(first) != schedule_contract(second)
+
+
+def test_grpo_defaults_to_frozen_prefix_length_pool_shuffle(values):
+    from RL.config import load
+    root=Path(__file__).parents[1]
+    config,_=load(root/"RL/experiments/grpo-offline-k3-smoke.yaml",root)
+    assert config.grpo.shuffle_algorithm=="prefix_length_pool128_v1"
+    assert "shuffle_algorithm" not in schedule_contract(config)["grpo"]
+    config.grpo.shuffle_algorithm="stable_random_v1"
+    assert schedule_contract(config)["grpo"].get("shuffle_algorithm") is None

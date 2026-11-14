@@ -1,0 +1,20 @@
+[
+  {
+    "package": "langchain",
+    "version": "0.0.352",
+    "requires_python": ">=3.8.1,<4.0",
+    "url": "https://pypi.org/pypi/langchain/0.0.352/json",
+    "response_sha256": "24d4da9a3ee1c73f7795de82eafa33b7917c4f9dd45bc838b65dfca5d6669697",
+    "read_at": "2026-11-10T06:26:13.837212+00:00",
+    "role": "published release metadata supporting fixed version Python compatibility; not runtime byte attestation"
+  },
+  {
+    "package": "langchain-core",
+    "version": "0.1.23",
+    "requires_python": ">=3.8.1,<4.0",
+    "url": "https://pypi.org/pypi/langchain-core/0.1.23/json",
+    "response_sha256": "a9edb10a670d1323b509ba38362e3c0932016d67e7431b8c019dc0402d7d27c8",
+    "read_at": "2026-11-10T06:26:14.175993+00:00",
+    "role": "published release metadata supporting fixed version Python compatibility; not runtime byte attestation"
+  }
+]

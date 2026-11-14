@@ -11,9 +11,14 @@ from enrichment.online_trace import publication_directory, verify_publication
 
 
 @exclusive_artifact("difficulty-dataset", "index_id")
-def build_published_index(cfg, run_id, index_id, rollout_ids=(), rollout_list=None, publication_id=None):
+def build_published_index(cfg, run_id, index_id, rollout_ids=(), rollout_list=None, publication_id=None, storage_root=None):
     """Reference published shards directly; no implicit packed tensor copy."""
     from core.config import load_snapshot
+
+    if storage_root is not None:
+        cfg = {**cfg, 'paths': {**cfg.get('paths', {}), 'artifact_roots': {
+            **cfg.get('paths', {}).get('artifact_roots', {}),
+            'difficulty_dataset': str(storage_root)}}}
 
     frozen = load_snapshot(cfg["project_root"], run_id)
     trace = publication_directory(cfg["project_root"], run_id, publication_id)

@@ -1,19 +1,45 @@
-schema_version: 1
-replay_id: swebench-step-logprobs-20261110-v3
+schema_version: 2
+replay_id: swebench-resolved169-raw-t1-fp16-gpu0-v1
+probability_semantics: raw_t1_output_tokens_v1
+preflight:
+  enabled: false
 dataset:
-  id: swebench-consensus-step-20261110-v3
+  id: swebench-consensus32-resolved169-four-runs-20261110-v1
+  root: /data3/wangtianyi/DyConGlobal
+token_cache:
+  id: tokens-21e519fed885d5359243eb88cd47ab56ca312dc60b509cdc
   root: /data3/wangtianyi/DyConGlobal
 runtime:
   backend: native_vllm_trace_v1
   python: .venvs/latent-vllm/bin/python
   gpus: [0]
   tensor_parallel_size: 1
-  max_num_seqs: 2
-  max_num_batched_tokens: 4096
-  max_model_len: 32768
-  kv_cache_memory_bytes: 8589934592
-  enable_prefix_caching: false
+  max_num_seqs: 32
+  max_num_batched_tokens: 16384
+  max_model_len: 81920
+  kv_cache_memory_bytes: 51539607552
+  enable_prefix_caching: true
   enable_chunked_prefill: true
+  enforce_eager: false
+  cudagraph_mode: FULL
+  cudagraph_capture_sizes: null
+  mamba_cache_mode: align
+  subprocess_seconds: 1209600
+scheduling:
+  mode: continuous
+  order: group_locality
+  max_active_groups: 2
+  max_inflight_requests: 32
+  max_inflight_tokens: 2621440
+  prefix_strategy: concurrent
+io:
+  ledger_read_workers: 8
+  prefetch_groups: 2
+  prefetch_memory_budget_gib: 2
+selection:
+  group_ids: []
 storage:
   output_root: /data3/wangtianyi/DyConGlobal
   max_shard_bytes: 268435456
+  commit_every_branches: 32
+  commit_interval_seconds: 5

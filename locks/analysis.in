@@ -14,3 +14,4 @@ tree-sitter==0.26.0
 tree-sitter-bash==0.25.1
 
 tensorboard==2.20.0
+ijson==3.5.1

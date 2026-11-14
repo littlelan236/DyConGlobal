@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 import torch
 
+from .k3_diagnostics import token_statistics
+
 
 @dataclass
 class ObjectiveResult:
@@ -41,8 +43,11 @@ def _masked_branch_mean(values, mask):
 
 
 def grpo_objective(logp_theta, logp_reference, advantages, loss_mask, *, clip_epsilon=0.1,
-                   kl_beta=0.02, group_slices=None):
+                   kl_beta=0.02, group_slices=None, ratio_guard_enabled=False, ratio_guard_threshold=1e-3):
     """Compute one or more groups with branch-then-group mean reduction."""
+    import math
+    if not math.isfinite(ratio_guard_threshold) or not 0 < ratio_guard_threshold < 1:
+        raise ValueError("ratio_guard_threshold must be finite and between 0 and 1")
     if logp_theta.shape != logp_reference.shape or logp_theta.ndim != 2:
         raise ValueError("logprob tensors must have equal [branch,token] shapes")
     mask = loss_mask.to(device=logp_theta.device, dtype=torch.bool)
@@ -55,17 +60,25 @@ def grpo_objective(logp_theta, logp_reference, advantages, loss_mask, *, clip_ep
         raise ValueError("Nonfinite advantages")
     theta = logp_theta.float().masked_fill(~mask, 0)
     ref = logp_reference.to(logp_theta.device).float().detach().masked_fill(~mask, 0)
-    ratio = torch.exp(theta - ref)
+    # Mask BEFORE exponentiating the K3 inverse ratio: multiplying an
+    # already-overflowed K3 by zero can still yield NaN gradients.
+    raw_log_ratio = theta - ref
+    if not torch.isfinite(raw_log_ratio).all():
+        raise ValueError("Nonfinite GRPO logprob difference")
+    raw_ratio = torch.exp(raw_log_ratio.detach())
+    rejected = mask & (raw_ratio < ratio_guard_threshold) if ratio_guard_enabled else torch.zeros_like(mask)
+    objective_log_ratio = raw_log_ratio.masked_fill(rejected, 0)
+    ratio = torch.exp(objective_log_ratio)
     weighted = ratio * adv[:, None]
     clipped = ratio.clamp(1 - clip_epsilon, 1 + clip_epsilon) * adv[:, None]
     surrogate = torch.minimum(weighted, clipped)
-    branch_policy = _masked_branch_mean(surrogate, mask)
-    delta = ref - theta
+    branch_policy = _masked_branch_mean(surrogate.masked_fill(rejected, 0), mask)
+    delta = -objective_log_ratio
     k3 = torch.expm1(delta) - delta
-    branch_k3 = _masked_branch_mean(k3, mask)
+    branch_k3 = _masked_branch_mean(k3.masked_fill(rejected, 0), mask)
     if group_slices is None:
         group_slices = [slice(0, logp_theta.shape[0])]
-    policy_values = []; k3_values = []
+    policy_values = []; k3_values = []; group_indices = []
     for span in group_slices:
         if isinstance(span, slice):
             indices = range(*span.indices(logp_theta.shape[0]))
@@ -74,6 +87,7 @@ def grpo_objective(logp_theta, logp_reference, advantages, loss_mask, *, clip_ep
         indices = list(indices)
         if not indices:
             raise ValueError("Empty group in objective reduction")
+        group_indices.append(indices)
         policy_values.append(branch_policy[indices].mean())
         k3_values.append(branch_k3[indices].mean())
     policy_loss = -torch.stack(policy_values).mean()
@@ -82,8 +96,21 @@ def grpo_objective(logp_theta, logp_reference, advantages, loss_mask, *, clip_ep
     finite = (torch.isfinite(ratio) & torch.isfinite(delta) & torch.isfinite(k3))
     if not torch.all(finite) or not torch.isfinite(loss):
         raise ValueError("Nonfinite GRPO ratio, delta, or K3")
+    # Diagnostics retain the original ratios, including excluded tokens.
+    ratio = raw_ratio
+    positive_tokens = mask & (adv[:, None] > 0)
+    negative_tokens = mask & (adv[:, None] < 0)
     return ObjectiveResult(loss, policy_loss, k3_penalty, {
+        "ratio_guard_enabled": ratio_guard_enabled,
+        "ratio_guard_threshold": ratio_guard_threshold,
+        "ratio_guard_excluded_tokens": int(rejected.sum()),
+        "ratio_guard_eligible_tokens": int(mask.sum()),
         "ratio_mean": float(ratio[mask].mean().detach()),
+        # Keep the denominator at valid completion tokens and partition it by
+        # the branch advantage sign.  None means that the update had no branch
+        # with that sign; consumers must not turn it into a zero datapoint.
+        "positive_ratio_mean": float(ratio[positive_tokens].mean().detach()) if positive_tokens.any() else None,
+        "negative_ratio_mean": float(ratio[negative_tokens].mean().detach()) if negative_tokens.any() else None,
         "ratio_min": float(ratio[mask].min().detach()),
         "ratio_max": float(ratio[mask].max().detach()),
         "clip_fraction": float(((ratio < 1 - clip_epsilon) | (ratio > 1 + clip_epsilon))[mask].float().mean().detach()),
@@ -95,4 +122,5 @@ def grpo_objective(logp_theta, logp_reference, advantages, loss_mask, *, clip_ep
         "negative_logprob_change": float((theta-ref)[mask & (adv[:, None] < 0)].mean().detach()) if (adv < 0).any() else None,
         "positive_branches": int((adv > 0).sum()), "negative_branches": int((adv < 0).sum()),
         "branch_count": int(logp_theta.shape[0]), "token_count": int(mask.sum()),
+        **token_statistics(k3, mask, rejected, group_indices),
     }, len(group_slices), int(logp_theta.shape[0]), int(mask.sum()))

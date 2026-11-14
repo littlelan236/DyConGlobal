@@ -23,7 +23,8 @@ from difficulty.datasets.eligibility import verify_positive_report
 def load_selection(cfg, settings):
     # Training datasets are explicit shared input artifacts bound by the settings receipt.
     # Run scoping changes output locations; it must not reinterpret this dataset ID.
-    source = owned_path(cfg["project_root"], f"difficulty/datasets/{settings.dataset_id}")
+    from difficulty.datasets.paths import dataset_directory
+    source = dataset_directory(cfg, settings.dataset_id)
     receipt_path = source / "receipt.json"
     if sha256(receipt_path) != settings.dataset_receipt_sha256:
         raise ValueError("Frozen dataset receipt SHA mismatch")
@@ -77,6 +78,12 @@ def load_selection(cfg, settings):
             if len(reports) != 1:
                 raise ValueError('Positive reward selection requires one bound official evaluation report')
             verify_positive_report(row, reports[0])
+        if receipt.get('eligibility') == 'accepted_terminal' or row.get('training_eligibility') == 'accepted_terminal':
+            from difficulty.datasets.eligibility import verify_terminal_report
+            reports = [read_json(path) for path in row.get('source_files', {}) if Path(path).suffix == '.json']
+            if len(reports) != 1:
+                raise ValueError('Accepted terminal selection requires one bound official evaluation report')
+            verify_terminal_report(row, reports[0])
         if cfg.get('model', {}).get('fingerprint') and row['model_fingerprint'] != cfg['model']['fingerprint']:
             raise ValueError('Training input hidden model differs from configured model fingerprint')
         expected_terminal = "AgentCompleted" if is_workspace else "Submitted"
@@ -134,8 +141,12 @@ def load_selection(cfg, settings):
                 raise ValueError("Missing/nonfinite/negative submission label")
         if sample["remaining_steps_to_submission"] != row["canonical_valid_assistant_steps"] - step:
             raise ValueError("Step label does not match canonical step count")
-        sample.setdefault("remaining_steps_to_success", sample["remaining_steps_to_submission"])
-        sample.setdefault("remaining_reasoning_tokens_to_success", sample["remaining_reasoning_tokens_to_submission"])
+        if row.get('training_eligibility') == 'accepted_terminal' and row.get('resolved') is not True:
+            sample['remaining_steps_to_success'] = None
+            sample['remaining_reasoning_tokens_to_success'] = None
+        else:
+            sample.setdefault("remaining_steps_to_success", sample["remaining_steps_to_submission"])
+            sample.setdefault("remaining_reasoning_tokens_to_success", sample["remaining_reasoning_tokens_to_submission"])
         if fraction_labels:
             for key in ("remaining_steps_fraction", "remaining_reasoning_tokens_fraction"):
                 value = sample.get(key)

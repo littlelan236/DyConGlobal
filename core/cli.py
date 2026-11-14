@@ -68,6 +68,12 @@ def main(argv=None):
     wa.add_argument("--site", action="append", default=[])
     skillsbench = sub.add_parser("skillsbench", help="SkillsBench task import and OpenHands profile checks")
     sb_sub = skillsbench.add_subparsers(dest="skillsbench_command", required=True)
+    sb = sb_sub.add_parser('job-start', help='Detach a bounded SkillsBench CLI operation with durable status/logs')
+    sb.add_argument('job_id')
+    sb.add_argument('--seconds', type=int, default=21600)
+    sb.add_argument('args', nargs=argparse.REMAINDER)
+    sb = sb_sub.add_parser('job-status', help='Read one detached validation/build status')
+    sb.add_argument('job_id')
     sb = sb_sub.add_parser("import", help="Freeze explicit tasks from the pinned official checkout")
     sb.add_argument("snapshot_id")
 
@@ -89,12 +95,32 @@ def main(argv=None):
     sb.add_argument("--from-profile", type=Path,
                     help="Copy an existing profile before applying explicit verifier settings")
     sb.add_argument('--verifier-index-compatibility', choices=['generic-pypi-v1', 'generic-pypi-cpu-first-v2'])
+    sb.add_argument('--verifier-resource-policy', choices=['skillsbench-verifier-resources-v1'])
     sb.add_argument('--verifier-timeout', action='append', default=[], metavar='TASK_ID:SECONDS')
     proxy = sb.add_mutually_exclusive_group()
     proxy.add_argument("--use-host-proxy", dest="use_host_proxy", action="store_true")
     proxy.add_argument("--no-use-host-proxy", dest="use_host_proxy", action="store_false")
     sb.set_defaults(use_host_proxy=None)
     sb.add_argument("--condenser-max-tokens", type=int)
+    sb = sb_sub.add_parser('regrade-pddl', help='Full airport verifier replay; explicit backed-up receipt replacement')
+    sb.add_argument('run_id')
+    sb.add_argument('regrading_id')
+    sb.add_argument('--snapshot', type=Path, required=True)
+    sb.add_argument('--samples', type=Path, required=True)
+    sb.add_argument('--workers', type=int, default=2)
+    sb.add_argument('--replace-original-with-backup', action='store_true')
+    sb.add_argument('--apply-only', action='store_true')
+    sb = sb_sub.add_parser('verifier-variant', help='Publish an immutable, hash-guarded airport verifier correction')
+    sb.add_argument('snapshot_id')
+    sb.add_argument('--source-snapshot', type=Path, required=True)
+    sb.add_argument('--policy', choices=['pddl-airport-plan-v1','skillsbench-verifier-repair-v1','agentops-py38-py312-v1'], default='pddl-airport-plan-v1')
+    sb = sb_sub.add_parser('revalidate-pddl', help='Separately validate explicit historical airport plans; no run mutation')
+    sb.add_argument('run_id')
+    sb.add_argument('--snapshot', type=Path, required=True)
+    sb.add_argument('--samples', type=Path, required=True)
+    sb.add_argument('--output', type=Path, required=True)
+    sb.add_argument('--validator-python', type=Path, required=True)
+    sb.add_argument('--timeout', type=int, default=60)
     sb = sb_sub.add_parser('index-variant', help='Publish hash-guarded verifier index task variants')
     sb.add_argument('snapshot_id')
     sb.add_argument('--source-snapshot', type=Path, required=True)
@@ -107,6 +133,7 @@ def main(argv=None):
     sb.add_argument("--from-snapshot", type=Path,
                     help="Derive a new condenser-capable publication from a verified closure")
     sb.add_argument("--python-runtime", type=Path, help="Bind an existing portable CPython 3.12 prefix into this new publication")
+    sb.add_argument("--verifier-resources", type=Path, help="Extend an unchanged agent closure with a versioned verifier resource specification")
     sb = sb_sub.add_parser("dependencies-verify", help="Verify every published dependency byte")
     sb.add_argument("snapshot", type=Path)
     sb = sb_sub.add_parser("preflight", help="Verify the frozen benchmark/profile/runtime contract")
@@ -115,6 +142,16 @@ def main(argv=None):
     sb = sb_sub.add_parser('environment-check', help='Audit frozen task environments without model requests')
     sb.add_argument('run_id')
     sb.add_argument('--workers', type=int, default=1)
+    sb.add_argument('--capture-resources', action='store_true', help='Archive image-owned verifier build inputs with provenance')
+    sb = sb_sub.add_parser('regrade-submissions', help='Replay historical submissions; optionally replace valid canonical outcomes with backups')
+    sb.add_argument('run_id')
+    sb.add_argument('--source-run', required=True)
+    sb.add_argument('--audit-report', type=Path, required=True)
+    sb.add_argument('--output', type=Path, required=True)
+    sb.add_argument('--workers', type=int, default=3)
+    sb.add_argument('--plan-only', action='store_true')
+    sb.add_argument('--replace-original-with-backup', action='store_true',
+                    help='Replace only valid replay scores in the source run after backup; preserve unavailable/error samples')
     sb = sb_sub.add_parser('audit-rewards', help='Read-only audit of accepted SkillsBench rewards below one')
     sb.add_argument('run_id')
     sb.add_argument('--output', type=Path, required=True, help='New report directory; existing paths are rejected')
@@ -143,6 +180,10 @@ def main(argv=None):
     sb = sb_sub.add_parser("auxiliary-probe", help="Validate real condenser isolation on the run-owned live model")
     sb.add_argument("run_id")
     sb.add_argument("--probe-id", required=True)
+    sb = sb_sub.add_parser('verifier-control', help='Execute provenance-bound correct/incorrect submissions through the official verifier')
+    sb.add_argument('run_id')
+    sb.add_argument('--case', required=True, choices=['all','simpo-correct','simpo-wrong-output','simpo-missing-output','simpo-missing-env','simpo-wrong-rerun','latex-correct','latex-wrong-output','latex-missing-resource','latex-compatibility-correct','google-auto-correct','agentops-upstream-blocked','agentops-correct','agentops-wrong','agentops-missing-dependency','agentops-missing-interpreter','fuzz-drivers'])
+    sb.add_argument('--retry-failed', action='store_true')
     sb = sb_sub.add_parser("oracle", help="Run the official task oracle and verifier as validation evidence")
 
     sb.add_argument("run_id")
@@ -245,10 +286,11 @@ def main(argv=None):
                    help="Select one repetition per run (zero-based index or rep-000); repeat for each multi-repetition run")
     q.add_argument("--format", choices=["json", "markdown"], default="json")
     q.add_argument("--output", type=Path, help="Optional new report file; refuses overwrite")
-    q = run_sub.add_parser("diff-config", help="Compare complete frozen configurations from two runs")
+    q = run_sub.add_parser("diff-config", help="Compare configurable frozen values in grouped tables")
     q.add_argument("left_run", metavar="LEFT_RUN")
     q.add_argument("right_run", metavar="RIGHT_RUN")
     q.add_argument("--format", choices=["json", "markdown"], default="markdown")
+    q.add_argument("--only-changed", action="store_true", help="Show changed configurable fields only")
     q.add_argument("--output", type=Path, help="Optional new report file; refuses overwrite")
     q = run_sub.add_parser("merge", help="Merge accepted samples from SOURCE_RUN into DESTINATION_RUN")
     q.add_argument("source_run", metavar="SOURCE_RUN")
@@ -280,6 +322,10 @@ def main(argv=None):
     q.add_argument("run_id")
     capture = sub.add_parser("capture", help="Inspect or recover online capture")
     capture_sub = capture.add_subparsers(dest="capture_command", required=True)
+    q = capture_sub.add_parser("spool-usage", help="Read capture spool quota, local bytes and filesystem free space")
+    q.add_argument("run_id", nargs="?", help="Filter local bytes and reservations to one frozen run")
+    q.add_argument("--ledger-only", action="store_true", help="Skip recursive local file scan")
+    q.add_argument("--scan-seconds", type=float, default=10, help="Local scan time budget (default: 10 seconds)")
     q = capture_sub.add_parser("status")
     q.add_argument("run_id")
     q = capture_sub.add_parser("recover")
@@ -293,6 +339,7 @@ def main(argv=None):
     q.add_argument("--pointwise", action="store_true",
                    help="Recover all integrity-checked points, including incomplete sessions")
     q = capture_sub.add_parser("finalize", help="Retry immutable run-end capture publication without model replay")
+    q.add_argument("--no-deadline", action="store_true", help="Disable the publication workflow time budget for this invocation")
     q.add_argument("run_id")
     q = capture_sub.add_parser("archive", help="Archive inactive capture spool to NAS and release local storage")
     q.add_argument("run_id")
@@ -307,13 +354,13 @@ def main(argv=None):
     artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
     q = artifact_sub.add_parser("show")
     q.add_argument("run_id", nargs="?")
-    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-dataset", "rl-cache", "rl-replay"], default="run")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-dataset", "rl-cache", "rl-replay", "rl-probability", "rl-probability-plan", "rl-prepared", "rl-reference", "rl-extension"], default="run")
     q.add_argument("--storage-root", type=Path)
     q.add_argument("--with-tensors", action="store_true")
     q.add_argument("--dataset-id")
     q = artifact_sub.add_parser("verify")
     q.add_argument("run_id", nargs="?")
-    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-dataset", "rl-cache", "rl-replay"], default="run")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-dataset", "rl-cache", "rl-replay", "rl-probability", "rl-probability-plan", "rl-prepared", "rl-reference", "rl-extension"], default="run")
     q.add_argument("--storage-root", type=Path)
     q.add_argument("--with-tensors", action="store_true")
     q.add_argument("--dataset-id")
@@ -348,6 +395,7 @@ def main(argv=None):
     p.add_argument("--coverage-scope", choices=["all_branches", "canonical_native"], default="all_branches",
                    help="canonical_native requires complete selected native coverage; unselected branch gaps remain recorded")
     p = sub.add_parser("online-index")
+    p.add_argument("--storage-root", type=Path, help="Root for new dataset/index artifacts; source run stays frozen")
     p.add_argument("--publication-id")
     p.add_argument("run_id")
     p.add_argument("index_id")
@@ -359,13 +407,14 @@ def main(argv=None):
     q.add_argument("dataset_id")
     q.add_argument("--source-dataset", required=True, action="append")
     q = dataset_sub.add_parser("resolved")
+    q.add_argument("--storage-root", type=Path, help="Root for dataset/index artifacts")
     q.add_argument("dataset_id")
     q.add_argument("--source-run", required=True)
     q.add_argument("--index-id", required=True)
     q.add_argument("--rollout-id", action="append", default=[])
     q.add_argument("--rollout-list", type=Path)
     q.add_argument("--label-normalization", choices=["raw", "trajectory_fraction"], default="raw")
-    q.add_argument("--eligibility", choices=["resolved_only", "positive_reward"], default="resolved_only")
+    q.add_argument("--eligibility", choices=["resolved_only", "positive_reward", "accepted_terminal"], default="resolved_only")
     p = sub.add_parser("difficulty-split", help="Freeze a reusable dataset split")
     p.add_argument("dataset_id")
     p.add_argument("split_id")
@@ -574,8 +623,13 @@ def main(argv=None):
     p.add_argument("--sites", type=int, nargs="+")
     p.add_argument("--hidden-size", type=int)
     p.add_argument("--endpoint", default="submission")
+    p = sub.add_parser("difficulty-ridge-test", help="Evaluate frozen Ridge on accepted held-out tasks")
+    p.add_argument("evaluation_id")
+    p.add_argument("--attempt-id", required=True)
+    p.add_argument("--dataset-id", required=True)
+    p.add_argument("--task-partitions", required=True, type=Path)
     a = parser.parse_args(argv)
-    if a.command == "lora-train" or (a.command == "artifact" and a.scope == "lora-attempt"):
+    if a.command in {"lora-train", "lora-prepare", "lora-status", "lora-tensorboard", "lora-advantages", "lora-memory"} or (a.command == "artifact" and a.scope == "lora-attempt"):
         if a.set or a.analysis_run_id:
             parser.error("LoRA uses an independent training YAML; do not pass --set or --run-id")
         from RL.cli import execute as execute_lora
@@ -583,17 +637,19 @@ def main(argv=None):
             result = execute_lora(a, resolve(a.config))
         except (ValueError, OSError, KeyError, RuntimeError) as exc:
             parser.error(str(exc))
-        print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
+        if result is not None:
+            print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
         return
 
-    if a.command == "rl-dataset" or (a.command == "artifact" and a.scope in {"rl-dataset", "rl-cache", "rl-replay"}):
+    if a.command == "rl-dataset" or (a.command == "artifact" and a.scope in {"rl-dataset", "rl-cache", "rl-replay", "rl-probability", "rl-probability-plan", "rl-prepared", "rl-reference", "rl-extension"}):
         if a.set or a.analysis_run_id:
             parser.error("RL datasets use explicit frozen YAML/source bindings; do not pass --set or --run-id")
         try:
             if a.command == "artifact":
                 if a.run_id is None: raise ValueError("Artifact scope requires an artifact ID")
                 from RL.dataset.artifacts import execute_artifact
-                result = execute_artifact(resolve(a.config), a.scope, a.run_id, a.storage_root)
+                result = execute_artifact(resolve(a.config), a.scope, a.run_id, a.storage_root,
+                                          deep=a.artifact_command == "verify")
             else:
                 from RL.dataset.cli import execute as execute_rl_dataset
                 result = execute_rl_dataset(a, resolve(a.config))
@@ -716,7 +772,8 @@ def main(argv=None):
             parser.error("run diff-config takes two explicit run IDs and reads only their frozen snapshots")
         from application.execution.config_diff import compare_run_configs, format_config_diff_markdown
         try:
-            report = compare_run_configs(Path(a.config).resolve().parent, a.left_run, a.right_run)
+            report = compare_run_configs(Path(a.config).resolve().parent, a.left_run, a.right_run,
+                                         only_changed=a.only_changed)
             rendered = (format_config_diff_markdown(report) if a.format == "markdown"
                         else json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False))
             if a.output:
@@ -735,6 +792,53 @@ def main(argv=None):
         except (ValueError, OSError) as exc:
             parser.error(str(exc))
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if a.command == "skillsbench" and a.skillsbench_command == "regrade-pddl":
+        if a.set or a.analysis_run_id:
+            parser.error("regrade-pddl reads the frozen run and explicit verifier correction")
+        from runtime.agents.pddl_regrading import regrade
+        result = regrade(Path(a.config).resolve().parent, a.run_id, a.regrading_id,
+                         a.snapshot, a.samples, workers=a.workers,
+                         replace=a.replace_original_with_backup, apply_only=a.apply_only)
+        print(json.dumps(result, ensure_ascii=False))
+        if result['valid_executions'] != result['sample_count']:
+            raise SystemExit(3)
+        return
+    if a.command == "skillsbench" and a.skillsbench_command == "revalidate-pddl":
+        if a.set or a.analysis_run_id:
+            parser.error("revalidate-pddl reads the explicit frozen run without overrides")
+        if a.timeout <= 0 or a.timeout > 600:
+            parser.error("--timeout must be in 1..600 seconds per submitted sample")
+        from runtime.agents.pddl_revalidation import revalidate
+        result = revalidate(Path(a.config).resolve().parent, a.run_id, a.snapshot,
+                            a.samples, a.output, a.validator_python, timeout=a.timeout)
+        print(json.dumps(result, ensure_ascii=False))
+        if not result["complete"]:
+            raise SystemExit(3)
+        return
+    if a.command == "skillsbench" and a.skillsbench_command == "audit-rewards":
+        if a.set or a.analysis_run_id:
+            parser.error("audit-rewards uses the explicit frozen run; do not pass --set or --run-id")
+        from runtime.agents.accepted_reward_audit import audit_accepted_rewards
+        try:
+            result = audit_accepted_rewards(Path(a.config).resolve().parent, a.run_id, a.output)
+        except (ValueError, OSError, KeyError, RuntimeError) as exc:
+            print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=__import__('sys').stderr)
+            raise SystemExit(1)
+        print(json.dumps(result, ensure_ascii=False))
+        if not result.get("complete", False):
+            raise SystemExit(3)
+        return
+    if a.command == "skillsbench" and a.skillsbench_command == "regrade-submissions":
+        if a.set or a.analysis_run_id:
+            parser.error("Regrading uses explicit frozen source and target runs without overrides")
+        from runtime.agents.submission_regrading import regrade
+        result = regrade(Path(a.config).resolve().parent, a.run_id, a.source_run,
+                         a.audit_report, a.output, workers=a.workers, plan_only=a.plan_only,
+                         replace_original=a.replace_original_with_backup)
+        print(json.dumps(result, ensure_ascii=False))
+        if not a.plan_only and not result.get("complete"):
+            raise SystemExit(3)
         return
     explicit_run = a.analysis_run_id or getattr(a, "run_id", None)
     if a.command == "harness" and a.harness_command == "metadata-prefetch":
@@ -757,6 +861,22 @@ def main(argv=None):
             result = inventory(root, root / a.manifest)
         else:
             result = apply_migration(root, root / a.manifest, archive_root=a.archive_root)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if a.command == "capture" and a.capture_command == "spool-usage":
+        if a.set or a.analysis_run_id:
+            parser.error("spool-usage uses root config or its positional frozen run; do not pass --set or --run-id")
+        from hidden.spool_usage import spool_usage
+        try:
+            if a.run_id:
+                from application.execution.run_plan import load_plan
+                usage_cfg = load_plan(Path(a.config).resolve().parent, a.run_id)["config"]
+            else:
+                usage_cfg = resolve(a.config)
+            result = spool_usage(usage_cfg, a.run_id, ledger_only=a.ledger_only, scan_seconds=a.scan_seconds)
+        except (ValueError, OSError, RuntimeError, __import__('sqlite3').Error) as exc:
+            print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=__import__('sys').stderr)
+            raise SystemExit(1)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     if a.command == "capture" and a.capture_command == "relocate-spool":
@@ -847,23 +967,16 @@ def main(argv=None):
             raise SystemExit(2)
         return
     if a.command == "skillsbench":
-        if a.skillsbench_command == "audit-rewards":
-            if a.set or a.analysis_run_id:
-                parser.error("audit-rewards uses the explicit frozen run; do not pass --set or --run-id")
-            from runtime.agents.accepted_reward_audit import audit_accepted_rewards
-            try:
-                result = audit_accepted_rewards(Path(a.config).resolve().parent, a.run_id, a.output)
-            except (ValueError, OSError, KeyError, RuntimeError) as exc:
-                print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=__import__('sys').stderr)
-                raise SystemExit(1)
-            print(json.dumps(result, ensure_ascii=False))
-            if not result.get("complete", False):
-                raise SystemExit(3)
-            return
         if a.set or a.analysis_run_id:
             parser.error("skillsbench registry commands read the editable root config; no run override")
         from core.backends import capabilities
-        if a.skillsbench_command == "profile":
+        if a.skillsbench_command == 'job-start':
+            from runtime.agents.validation_jobs import start
+            print(json.dumps(start(cfg['project_root'], a.job_id, a.args, a.seconds)))
+        elif a.skillsbench_command == 'job-status':
+            from runtime.agents.validation_jobs import status
+            print(json.dumps(status(cfg['project_root'], a.job_id)))
+        elif a.skillsbench_command == "profile":
             from runtime.agents.openhands import OpenHandsProfile, validate_profile
             from core.io import identifier
             identifier(a.profile_id)
@@ -875,7 +988,7 @@ def main(argv=None):
             if not source.get('bridge_advertise'):
                 parser.error('--bridge-advertise or --from-profile is required')
             for key in ('skill_mode', 'network', 'cpu_quota', 'use_host_proxy',
-                        'condenser_max_tokens', 'verifier_python_index', 'verifier_index_compatibility'):
+                        'condenser_max_tokens', 'verifier_python_index', 'verifier_index_compatibility', 'verifier_resource_policy'):
                 value = getattr(a, key)
                 if value is not None:
                     source[key] = value
@@ -883,6 +996,9 @@ def main(argv=None):
                 source['use_host_proxy'] = source.get('network', 'public') == 'public'
             if a.network == 'none' and a.use_host_proxy is None:
                 source['use_host_proxy'] = False
+            if a.network == 'none' and a.verifier_python_index is None:
+                source['verifier_python_index']=None
+                source['verifier_index_compatibility']=None
             outputs = {key: list(value) for key, value in source.get('output_paths', {}).items()}
             for value in a.output:
                 if ':' not in value:
@@ -932,12 +1048,26 @@ def main(argv=None):
                 "cpu_quota_policy": profile["cpu_quota"],
                 "request_roles_qualified": False, "capture_parallel_eligible": False},
                 ensure_ascii=False, indent=2))
+        elif a.skillsbench_command == 'verifier-variant':
+            if a.set or a.analysis_run_id:
+                parser.error("verifier-variant does not accept configuration overrides")
+            if a.policy == 'agentops-py38-py312-v1':
+                from catalog.verifier_repairs import publish_variant
+                result=publish_variant(cfg,a.snapshot_id,a.source_snapshot,
+                    rules_path=Path(cfg['project_root'])/'catalog/verifier_patches/agentops-py38-py312-v1.json')
+                print(json.dumps(result,indent=2))
+                return
+            if a.policy == 'skillsbench-verifier-repair-v1':
+                from catalog.verifier_repairs import publish_variant
+            else:
+                from catalog.skillsbench_verifier import publish_variant
+            print(json.dumps(publish_variant(cfg, a.snapshot_id, a.source_snapshot), indent=2))
         elif a.skillsbench_command == 'index-variant':
             from catalog.skillsbench_index import publish_variant
             print(json.dumps(publish_variant(cfg, a.snapshot_id, a.source_snapshot, a.policy), indent=2))
         elif a.skillsbench_command == "dependencies-build":
             from runtime.agents.dependencies import build_snapshot
-            result = build_snapshot(cfg, a.snapshot_id, a.wheelhouse, a.cli_archive, a.uv, a.python_runtime, from_snapshot=a.from_snapshot)
+            result = build_snapshot(cfg, a.snapshot_id, a.wheelhouse, a.cli_archive, a.uv, a.python_runtime, from_snapshot=a.from_snapshot, verifier_resources=a.verifier_resources)
             print(json.dumps({"path": result["path"], "receipt_sha256": result["manifest"]["receipt_sha256"]}))
         elif a.skillsbench_command == "dependencies-verify":
             from runtime.agents.dependencies import verify_snapshot
@@ -946,6 +1076,24 @@ def main(argv=None):
         elif a.skillsbench_command == "import":
             from catalog.skillsbench import import_tasks
             print(json.dumps(import_tasks(cfg, a.snapshot_id, a.task_id, a.partition, oracle_only=a.oracle_only), ensure_ascii=False, indent=2))
+        elif a.skillsbench_command == 'verifier-control':
+            from runtime.agents.skillsbench import run_oracles
+            from runtime.agents.verifier_controls import task_for_case
+            if a.case=='all':
+                from runtime.agents.verifier_controls import CASES
+                results=[]
+                for case in sorted(CASES):
+                    result=run_oracles(cfg,a.run_id,task_ids=[task_for_case(case)],
+                        retry_failed=a.retry_failed,control_case=case)
+                    results.append({'case':case,'verified':result['verified']})
+                print(json.dumps({'controls':results,'verified':all(r['verified'] for r in results)}))
+                if not all(r['verified'] for r in results):raise SystemExit(2)
+                return
+            result = run_oracles(cfg, a.run_id, task_ids=[task_for_case(a.case)],
+                retry_failed=a.retry_failed, control_case=a.case)
+            print(json.dumps({k:v for k,v in result.items() if k!='results'}, indent=2))
+            if not result['verified']:
+                raise SystemExit(2)
         elif a.skillsbench_command == "preflight":
             from runtime.agents.skillsbench import preflight
             result = preflight(cfg["project_root"], a.run_id, workers=a.workers)
@@ -959,7 +1107,7 @@ def main(argv=None):
             frozen = loaded['config']
             if frozen.get('execution_context', {}).get('benchmark') != 'skillsbench':
                 raise ValueError('Environment audit requires a frozen SkillsBench run')
-            result = audit_task_environments(frozen, a.run_id, workers=a.workers)
+            result = audit_task_environments(frozen, a.run_id, workers=a.workers, capture_resources=a.capture_resources)
             print(json.dumps({'run_id': a.run_id, 'task_count': result['task_count'],
                               'verified': result['verified'], 'failed_tasks': result['failed_tasks']}, indent=2))
             if not result['verified']:
@@ -1065,7 +1213,7 @@ def main(argv=None):
                       else run_status(cfg["project_root"], a.run_id))
         elif a.capture_command == "finalize":
             from application.execution.capture_publication import retry_capture_publication
-            result = retry_capture_publication(cfg, a.run_id)
+            result = retry_capture_publication(cfg, a.run_id, no_deadline=a.no_deadline)
         elif a.capture_command == "archive":
             from hidden.archive_online import archive_online
             result = archive_online(cfg, a.run_id, archive_id=a.archive_id,
@@ -1236,7 +1384,7 @@ def main(argv=None):
     elif a.command == "online-index":
         from difficulty.datasets.online import build_published_index
 
-        result = str(build_published_index(cfg, a.run_id, a.index_id, a.rollout_id, a.rollout_list, publication_id=a.publication_id))
+        result = str(build_published_index(cfg, a.run_id, a.index_id, a.rollout_id, a.rollout_list, publication_id=a.publication_id, storage_root=a.storage_root))
     elif a.command == "difficulty-dataset":
         if a.dataset_command == "compose":
             from difficulty.datasets.compose import compose_datasets
@@ -1244,7 +1392,8 @@ def main(argv=None):
         else:
             from difficulty.datasets.resolved import build_resolved_selection
             result = build_resolved_selection(cfg["project_root"], a.source_run, a.index_id, a.dataset_id,
-                                              a.rollout_id, a.rollout_list, a.label_normalization, eligibility=a.eligibility)
+                                              a.rollout_id, a.rollout_list, a.label_normalization, eligibility=a.eligibility,
+                                              storage_root=a.storage_root or cfg.get("paths", {}).get("artifact_roots", {}).get("difficulty_dataset"))
     elif a.command == "difficulty-split":
         from difficulty.training.splits import create_split
         result = create_split(cfg["project_root"], a.dataset_id, a.split_id,
@@ -1453,6 +1602,10 @@ def main(argv=None):
         from difficulty.evaluation.run import evaluate_predictions
 
         result = str(evaluate_predictions(cfg, a.index_id, a.predictions, a.evaluation_id))
+    elif a.command == "difficulty-ridge-test":
+        from difficulty.evaluation.accepted_test import run
+        result = run(cfg, a.evaluation_id, attempt_id=a.attempt_id, dataset_id=a.dataset_id,
+                     task_partitions=a.task_partitions)
     elif a.command == "difficulty-ridge-holdout":
         from difficulty.evaluation.holdout import run
         result = run(cfg, a.evaluation_id, workflow_config=a.workflow_config, reuse_attempt_id=a.reuse_attempt_id)

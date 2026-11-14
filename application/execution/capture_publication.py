@@ -98,7 +98,7 @@ def recover_spool(cfg, run_id):
         raise PendingRecovery('Unacknowledged spool uploads remain; use dycon capture recover')
 
 
-def finalize_capture_publication(cfg, run_id, *, items=None, producers=()):
+def finalize_capture_publication(cfg, run_id, *, items=None, producers=(), no_deadline=False):
     """Caller owns the run lock; failures affect only the publication summary."""
     capture = cfg.get('capture', {})
     if not capture.get('enabled') or not capture.get('export', {}).get('enabled'):
@@ -109,11 +109,11 @@ def finalize_capture_publication(cfg, run_id, *, items=None, producers=()):
     summary_path = run / 'capture-publication.json'
     stamp = time.monotonic()
     summary = {'schema_version': 1, 'run_id': run_id, 'status': 'pending',
-               'updated_at': now(), 'stage_seconds': {},
+               'updated_at': now(), 'stage_seconds': {}, 'deadline_disabled': no_deadline,
                'recovery_command': f'dycon capture finalize {run_id}'}
     phase = 'selection'
     def checkpoint():
-        if time.monotonic() - stamp > capture.get('publication_seconds', 3600):
+        if not no_deadline and time.monotonic() - stamp > capture.get('publication_seconds', 3600):
             raise PendingRecovery('Capture publication deadline reached; retry the same selection')
     try:
         previous = read_json(summary_path) if summary_path.exists() else {}
@@ -256,6 +256,6 @@ def finalize_capture_publication(cfg, run_id, *, items=None, producers=()):
 
 
 @exclusive_run
-def retry_capture_publication(cfg, run_id):
+def retry_capture_publication(cfg, run_id, *, no_deadline=False):
     loaded = load_plan(cfg['project_root'], run_id)
-    return finalize_capture_publication(loaded['config'], run_id, items=loaded['work_items']['items'])
+    return finalize_capture_publication(loaded['config'], run_id, items=loaded['work_items']['items'], no_deadline=no_deadline)

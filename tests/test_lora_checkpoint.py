@@ -129,6 +129,22 @@ def test_checkpoint_requires_cleared_gradients(tmp_path):
         save_checkpoint(model, opt, sched, {"global_step": 1}, Path(tmp_path) / "step-000001", {}, contract(targets))
 
 
+def test_restore_accepts_legacy_code_hash_but_still_rejects_input_changes(tmp_path):
+    model,targets=model_and_targets()
+    opt,sched=optimizer_and_scheduler(model,settings(1))
+    state={"global_step":1,"consumed_microbatches":0,"consumed_tokens":0}
+    cp=tmp_path/"step-000001"
+    old={"source_fingerprint":"old-source","schedule":{"updates":1},"input":{"id":"same"}}
+    save_checkpoint(model,opt,sched,state,cp,old,contract(targets))
+    before=(cp/"receipt.json").read_bytes()
+    current={"schedule":{"updates":1},"input":{"id":"same"}}
+    assert restore_checkpoint(cp,opt,sched,current,contract(targets))==state
+    assert (cp/"receipt.json").read_bytes()==before
+    current["input"]={"id":"changed"}
+    with pytest.raises(ValueError,match="contract mismatch"):
+        restore_checkpoint(cp,opt,sched,current,contract(targets))
+
+
 def test_large_target_set_retains_exact_paths_across_peft_export_and_reload(tmp_path):
     model, targets = inject(raw_model(layers=4), LORA)
     assert len(targets) > 20

@@ -179,6 +179,14 @@ def task_package_path(cfg, task):
     """Authorize official packages or receipt-bound project variant packages."""
     path = Path(task['instance']['task_path']).resolve()
     official = (Path(cfg['project_root']) / cfg['skillsbench_images']['source_root'] / 'tasks').resolve()
+    correction = task['instance'].get('verifier_adaptation')
+    if correction:
+        from catalog.skillsbench_verifier import verify_adaptation as verify_correction
+        variants = (Path(cfg['project_root']) / 'catalog/task-variants').resolve()
+        if not path.is_relative_to(variants) or path.name != task['instance_id']:
+            raise ValueError('Verifier correction escaped the task variant root')
+        verify_correction(task)
+        return path
     adaptation = task['instance'].get('verifier_index_adaptation')
     if adaptation:
         policy = cfg['execution_context']['profile'].get('verifier_index_compatibility')

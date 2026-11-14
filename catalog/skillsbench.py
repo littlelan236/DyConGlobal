@@ -24,7 +24,7 @@ def package_manifest(path):
 
 def validate_payload(payload, instance_id, revision):
     required = {"instance_id", "task_path", "package_sha256", "files", "metadata", "images"}
-    if set(payload) - {"verifier_index_adaptation"} != required or payload["instance_id"] != instance_id:
+    if set(payload) - {"verifier_index_adaptation", "verifier_adaptation"} != required or payload["instance_id"] != instance_id:
         raise ValueError("Invalid SkillsBench task payload")
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("SkillsBench requires a full immutable source revision")
@@ -73,6 +73,9 @@ def verify_package(task, *, deep=True):
     if payload.get('verifier_index_adaptation'):
         from catalog.skillsbench_index import verify_adaptation
         verify_adaptation(task)
+    if payload.get("verifier_adaptation"):
+        from catalog.skillsbench_verifier import verify_adaptation as verify_correction
+        verify_correction(task)
     return inspect_capabilities(task)
 
 

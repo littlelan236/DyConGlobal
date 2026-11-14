@@ -2,6 +2,8 @@
 import hashlib
 import os
 from pathlib import Path
+import sys
+from collections import OrderedDict
 import numpy as np
 
 from core.io import hash_json, read_json, sha256, write_json
@@ -36,7 +38,7 @@ class ShardWriter:
             self.stream.flush(); os.fsync(self.stream.fileno()); self.stream.close(); self.stream = None
 
 
-def read_array(root, ref):
+def read_array(root, ref, *, verify=True):
     path = Path(root) / ref["shard"]
     if not path.resolve().is_relative_to(Path(root).resolve()):
         raise ValueError("Shard reference escapes artifact")
@@ -48,7 +50,7 @@ def read_array(root, ref):
     if (ref["offset"] + ref["count"]) * dtype.itemsize > path.stat().st_size:
         raise ValueError("Array extends past shard boundary")
     array = np.memmap(path, mode="r", dtype=dtype, offset=ref["offset"] * dtype.itemsize, shape=(ref["count"],))
-    if hashlib.sha256(array.tobytes()).hexdigest() != ref["sha256"]:
+    if verify and hashlib.sha256(array.tobytes()).hexdigest() != ref["sha256"]:
         raise ValueError("Array content checksum mismatch")
     return array
 
@@ -93,11 +95,17 @@ def materialize(dataset_path, cache_root, *, max_shard_bytes=None):
 
 
 class CacheReader:
-    def __init__(self, path, dataset_receipt):
+    def __init__(self, path, dataset_receipt, *, prompt_budget_bytes=64*1024**2):
         self.path = Path(path); verify_local(path, "rl-cache")
         identity = read_json(self.path / "cache.json")["identity"]
         if identity["dataset_receipt"] != dataset_receipt:
             raise ValueError("Cache belongs to another dataset receipt")
+        if identity.get("dtype") != "<u4": raise ValueError("Token cache requires uint32")
+        self.prompt_budget = prompt_budget_bytes; self.prompt_bytes = 0
+        self.prompts = OrderedDict()
+        if identity.get("dtype") != "<u4": raise ValueError("Token cache requires uint32")
+        self.prompt_budget = prompt_budget_bytes; self.prompt_bytes = 0
+        self.prompts = OrderedDict()
         self.audit = identity["audit_enabled"]
         self.rows = iter(iter_rows(self.path / "branches.jsonl"))
 
@@ -108,7 +116,26 @@ class CacheReader:
             row = next(self.rows, None)
         if row is None:
             raise ValueError("Cache branch order mismatch")
-        p = read_array(self.path, row["prompt_ref"]).astype(np.int64).tolist()
-        c = read_array(self.path, row["completion_ref"]).astype(np.int64).tolist()
-        validate(p, c, branch["prompt_sha256"], branch["completion_sha256"], verify_hashes=self.audit)
+        if row["group_id"] != branch["group_id"]: raise ValueError("Cache group mismatch")
+        pref, cref = row["prompt_ref"], row["completion_ref"]
+        if pref["dtype"] != "<u4" or cref["dtype"] != "<u4": raise ValueError("Token cache requires uint32 arrays")
+        file = self.path / pref["shard"]
+        stat = file.stat()
+        key = (hash_json(pref), branch["prompt_sha256"], stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        saved = self.prompts.pop(key, None)
+        if saved is None:
+            p = read_array(self.path, pref).tolist()
+            # Validate shared prompt once; completion remains checked for every branch.
+            if self.audit and hash_json(p) != branch["prompt_sha256"]: raise ValueError("Prompt token checksum mismatch")
+            size = sys.getsizeof(p) + sum(map(sys.getsizeof, p))
+            if size <= self.prompt_budget:
+                while self.prompts and self.prompt_bytes + size > self.prompt_budget:
+                    _, (_, old_size) = self.prompts.popitem(last=False); self.prompt_bytes -= old_size
+                self.prompts[key] = (p, size); self.prompt_bytes += size
+        else:
+            p, size = saved; self.prompts[key] = saved
+        c = read_array(self.path, cref).tolist()
+        if self.audit and hash_json(c) != branch["completion_sha256"]: raise ValueError("Completion token checksum mismatch")
+        validate(p, c, branch["prompt_sha256"], branch["completion_sha256"], verify_hashes=False)
+        if (len(p), len(c)) != (branch["prompt_count"], branch["completion_count"]): raise ValueError("Cache token count mismatch")
         return p, c

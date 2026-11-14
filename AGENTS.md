@@ -25,7 +25,9 @@
 
 ## LoRA foundation
 
-- `.venvs/rl` is the dedicated single-GPU Qwen3.5-9B LoRA training environment. Its dependencies and cache may live on `/data3`; source stays in the original uppercase `RL/` package.
+- `.venvs/rl` is the dedicated Qwen3.5-9B LoRA/GRPO training environment (single GPU, 1/2/4-GPU whole-parent GRPO, and experimental 8-GPU distinct-parent 8x16). Its dependencies and cache may live on `/data3`; source stays in the original uppercase `RL/` package.
 - `dycon lora-train --training-config YAML` is the formal CLI. `RL/experiments/lora-smoke.yaml` and explicit task training YAMLs are authorized standalone LoRA configuration exceptions, read by `RL/config.py`, with paths relative to the project root. Do not import rollout model/serving settings, change root `config.yaml`, or pass `--set`/`--run-id` to train.
 - `fresh`, complete-checkpoint `resume`, and adapter `warm_start` share `RL.service.run`; no alternate launcher, third-party adapter fallback, implicit latest checkpoint or silent fresh restart. A new attempt ID is required for every invocation.
 - `dycon artifact show/verify ID --scope lora-attempt --storage-root ROOT` uses the existing artifact interface. Outputs belong to `ROOT/RL/checkpoints/ID`; LoRA resolution does not relax global `owned_path`. See `RL/README.md` for identities, recovery and engineering-only validation boundaries.
+
+- Eight-GPU GRPO requires the explicit 16-branch `distinct_parent_two_pass_v1` protocol and `boundary_grad`. Full 32-branch parents retain scoring identity; each regular update uses eight different parents. Use the same formal CLI and new attempt IDs; do not wrap it in torchrun. Exact resume preserves the frozen execution plan/world size and cannot directly convert v10/1/2/4-GPU checkpoints. See `RL/DATA_PARALLEL_8X16.md` and `RL/DATA_PARALLEL_8X16_VALIDATION.md`; GPU capacity, throughput and training quality remain unverified.

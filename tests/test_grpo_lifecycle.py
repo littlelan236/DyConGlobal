@@ -17,7 +17,11 @@ from tests.lora_helpers import LORA, model_and_targets
 def run_tiny(tmp_path, name, *, mode="fresh", source=None, stop=None):
     root = Path(__file__).parents[1]
     config, _ = load(root / "RL/experiments/grpo-offline-k3-smoke.yaml", root)
+    config.preflight.verify_checkpoint = True
+    config.preflight.verify_identity = True
+    config.preflight.verify_model_state = True
     config.lora = LORA.model_copy()
+    config.runtime.output_root = str(tmp_path / "artifacts")
     config.run.attempt_id = name
     config.run.start.mode = mode
     config.run.start.checkpoint = str(source) if source else None
@@ -101,6 +105,9 @@ def test_changed_input_refuses_resume(field, tmp_path):
 def test_reference_cache_tamper_refuses_resume(tmp_path):
     _, directory, _, _ = run_tiny(tmp_path, "paused", stop=1)
     cp = directory / "checkpoints/step-000001"
-    (cp / "grpo/reference-logprobs.pt").write_bytes(b"tampered")
+    from RL.grpo.prepared import resolve
+    reference = read_json(cp / "state.json")["contract"]["grpo"]["reference_artifact"]
+    cache = next(resolve(reference, "rl-reference").glob("chunks/*/grpo/reference-logprobs.pt"))
+    cache.write_bytes(b"tampered")
     with pytest.raises(ValueError, match="inventory/hash"):
         run_tiny(tmp_path, "bad", mode="resume", source=cp)

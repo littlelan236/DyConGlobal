@@ -1,3 +1,4 @@
+from difficulty.storage import difficulty_path
 """Formal dataset task-holdout workflow over the shared Ridge training service."""
 from pathlib import Path
 from contextlib import contextmanager
@@ -5,6 +6,7 @@ import os
 
 import yaml
 
+from difficulty.storage import scoped_storage
 from core.config import assert_frozen
 from core.io import hash_json, identifier, now, owned_path, read_json, sha256, write_json
 from core.locking import exclusive_artifact
@@ -16,6 +18,7 @@ def child_id(evaluation_id, kind):
     return identifier(evaluation_id[:100] + '-' + kind + '-' + hash_json([evaluation_id, kind])[:16])
 
 
+@scoped_storage
 @exclusive_artifact('difficulty-evaluation', 'evaluation_id')
 def run(cfg, evaluation_id, *, workflow_config, reuse_attempt_id=None):
     """Python and CLI share this service; every invocation requires a fresh ID."""
@@ -37,7 +40,7 @@ def run(cfg, evaluation_id, *, workflow_config, reuse_attempt_id=None):
     from difficulty.training.entrypoint import run_config
     from difficulty.evaluation.holdout_results import build_cohort, evaluate, draw_test_trajectories
 
-    output = root / 'difficulty/evaluations' / evaluation_id
+    output = difficulty_path(root, 'evaluations', evaluation_id)
     if output.exists():
         raise FileExistsError(output)
     output.mkdir(parents=True)
@@ -64,7 +67,7 @@ def run(cfg, evaluation_id, *, workflow_config, reuse_attempt_id=None):
         code = code_evidence(root)
         with stage('preflight'):
             dataset_id = config.data.dataset_id
-            dataset_dir = root / 'difficulty/datasets' / dataset_id
+            dataset_dir = difficulty_path(root, 'datasets', dataset_id)
             digest = sha256(dataset_dir / 'receipt.json')
             if config.data.expected_receipt_sha256 and digest != config.data.expected_receipt_sha256:
                 raise ValueError('Expected dataset receipt SHA mismatch')
@@ -94,7 +97,7 @@ def run(cfg, evaluation_id, *, workflow_config, reuse_attempt_id=None):
 
         with stage('split'):
             attempt_id = identifier(reuse_attempt_id) if reuse_attempt_id else child_id(evaluation_id, 'ridge')
-            attempt_dir = root / 'difficulty/checkpoints' / attempt_id
+            attempt_dir = difficulty_path(root, 'checkpoints', attempt_id)
             if reuse_attempt_id:
                 if config.run.mode != 'fit':
                     raise ValueError('reuse-attempt-id requires fit mode')
@@ -191,7 +194,7 @@ def run(cfg, evaluation_id, *, workflow_config, reuse_attempt_id=None):
                 'state': 'complete', 'mode': config.run.mode, 'evaluation_id': evaluation_id,
                 'dataset_id': dataset_id, 'split_id': split_id, 'attempt_id': attempt_id,
                 'completed_at': now(), 'code': code,
-                'parents': [{'path': str(p.relative_to(root)), 'receipt_sha256': sha256(p / 'receipt.json')} for p in parents],
+                'parents': [{'path': str(p.relative_to(root)) if p.is_relative_to(root) else str(p), 'receipt_sha256': sha256(p / 'receipt.json')} for p in parents],
                 'files': {str(p.relative_to(output)): sha256(p) for p in sorted(output.rglob('*')) if p.is_file()}})
             verify(root, 'difficulty-evaluation', evaluation_id)
         return summary

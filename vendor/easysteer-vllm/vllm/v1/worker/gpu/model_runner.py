@@ -1484,6 +1484,10 @@ class GPUModelRunner(
         if self.steer_vector_manager is not None:
             self.steer_vector_manager.write_consumer_checks()
 
+        dycon_raw_t1_state = None
+        if self.sampler is not None and self.sampler.dycon_raw_t1 is not None:
+            dycon_raw_t1_state = self.sampler.dycon_raw_t1.prepare(logits, input_batch)
+
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
@@ -1501,7 +1505,8 @@ class GPUModelRunner(
             sampler_output = None
         elif input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             assert self.sampler is not None
-            sampler_output = self.sampler(logits, input_batch)
+            sampler_output = self.sampler(
+                logits, input_batch, dycon_raw_t1_state=dycon_raw_t1_state)
         else:
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None

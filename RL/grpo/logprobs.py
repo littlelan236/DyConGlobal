@@ -56,6 +56,14 @@ def model_target_logprobs(model, batch, block_size=0):
         raise ValueError("No native completion targets")
     hidden = text_backbone(model)(input_ids=batch["input_ids"],
         attention_mask=batch["attention_mask"], use_cache=False).last_hidden_state
+    return hidden_target_logprobs(model, hidden, labels, block_size)
+
+
+def hidden_target_logprobs(model, hidden, labels, block_size=0):
+    """Shared frozen projection for full branches and boundary-aligned hidden."""
+    valid = target_coordinates(labels)
+    if not len(valid):
+        raise ValueError("No native completion targets")
     head = model.get_output_embeddings()
     if not isinstance(head, torch.nn.Linear):
         raise ValueError("Expected linear frozen output projection")

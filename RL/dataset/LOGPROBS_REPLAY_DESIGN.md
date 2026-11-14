@@ -2,6 +2,25 @@
 
 日期：2026-11-10。所属计划：[PLAN.md](PLAN.md)。状态：设计，尚未实现新 CLI、启动 GPU 或提取真实数据。
 
+## 当前阅读入口（2026-11-11）
+
+本文件保留 2026-11-10 的 processed 历史设计，不能据此配置当前 raw 提取或训练。
+当前 raw replay schema 2、在线 dataset stream 及生产限制见 [README.md](README.md)；
+中性概率合同见 [PROBABILITY_STREAM.md](../PROBABILITY_STREAM.md)。训练侧已通过
+`grpo.reference_cache` 显式选择封存 raw 产物/stream，由一份冻结 anchor 同时承担
+ratio 分母和 K3，current 实时计算；旧 processed 产物只能诊断，不能作为训练 anchor。
+配置与恢复见 [GRPO.md](../GRPO.md)，工程验收及真实 FP16/BF16 待验收边界见
+[GRPO_BINDING_VALIDATION.md](../GRPO_BINDING_VALIDATION.md)。
+
+### 统一产物与 missing-only 补评已实现
+
+当前最终消费格式为 schema 3 `rl-probability`，独立于来源 replay 的 schema 2。
+`probability-plan` 冻结 coverage，既有 `replay-logprobs` 的 coverage-plan selector
+只补缺失分支，`probability-build` 复用在线 bytes 并统一封存。
+配置/迁移见 [PROBABILITY_ARTIFACTS.md](PROBABILITY_ARTIFACTS.md)，348 项 CPU 回归
+与真实模型待验收边界见 [PROBABILITY_ALIGNMENT_VALIDATION.md](../PROBABILITY_ALIGNMENT_VALIDATION.md)。
+以下 processed 设计仍作为历史记录保留。
+
 ## 1. 已确定的输出口径
 
 用户确定：重放历史 token，提取**考虑 temperature、top-p、top-k 的采样分布 logprobs**。这些参数在项目根配置中设置且一直不变，可以直接使用。这里将用户表述的 logp/logk 对应到工程字段 `top_p/top_k`。

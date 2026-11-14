@@ -38,14 +38,19 @@ def trajectory_fraction_labels(*, total_steps, step, remaining_reasoning_tokens,
 
 
 def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids=(), rollout_list=None,
-                             label_normalization='raw', *, eligibility='resolved_only'):
+                             label_normalization='raw', *, eligibility='resolved_only', storage_root=None):
     validate_policy(eligibility)
     root = Path(root).resolve()
     source_run, dataset_id = map(identifier, (source_run, dataset_id))
     if label_normalization not in {'raw', 'trajectory_fraction'}:
         raise ValueError('Unknown label normalization')
     run = root / 'runs' / source_run
-    index_path = dataset_directory({'project_root': str(root)}, index_id) / 'index.json'
+    dataset_cfg = {'project_root': str(root)}
+    if storage_root is not None:
+        dataset_cfg['paths'] = {'artifact_roots': {'difficulty_dataset': str(storage_root)}}
+    if eligibility == 'accepted_terminal' and not (rollout_ids or rollout_list):
+        raise ValueError('Accepted terminal datasets require an explicit accepted rollout selection')
+    index_path = dataset_directory(dataset_cfg, index_id) / 'index.json'
     index = read_json(index_path)
     trace = publication_directory(root, source_run, index.get('publication_id'))
     if owned_path(root, index.get('label_root', artifact_reference(root, trace))) != trace:
@@ -81,7 +86,7 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
                 )
                 if request.get('is_action_response') is True:
                     complete_reasoning.setdefault(rid, set()).add(request.get('message_index'))
-    destination = root / 'difficulty/datasets' / dataset_id
+    destination = dataset_directory(dataset_cfg, dataset_id)
     with file_lock(root / 'state' / f'resolved-selection-{dataset_id}.lock', nonblocking=True):
         if destination.exists():
             raise FileExistsError(destination)
@@ -120,6 +125,9 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
             if eligibility == 'positive_reward':
                 from difficulty.datasets.eligibility import verify_positive_report
                 verify_positive_report(row, read_json(report))
+            elif eligibility == 'accepted_terminal':
+                from difficulty.datasets.eligibility import verify_terminal_report
+                verify_terminal_report(row, read_json(report))
             descriptor = task_descriptor({**task, **row,
                 'benchmark_revision': task.get('revision') or row.get('revision'),
                 'task_package_sha256': task.get('instance', {}).get('package_sha256')})
@@ -148,7 +156,7 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
                 raise ValueError('Online index evaluation is stale; rebuild under a new index ID')
             if event['trajectory_sha256'] != row['trajectory_sha256']:
                 raise ValueError('Online event/canonical identity mismatch')
-            if eligibility == 'positive_reward':
+            if eligibility in {'positive_reward', 'accepted_terminal'}:
                 # Raw finalized suffix labels describe this actual endpoint;
                 # success-only online labels intentionally remain null.
                 event = {**event, 'labels': {
@@ -224,7 +232,9 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
             'resolved_rollouts': sorted(rid for rid, row in chosen.items() if row['resolved'] is True),
             'omitted_no_usable_samples': omitted,
             'endpoint': ('successful final submission of a harness-resolved canonical trajectory'
-                         if eligibility == 'resolved_only' else 'actual terminal endpoint of an officially evaluated positive-reward canonical trajectory')})
+                         if eligibility == 'resolved_only' else ('actual terminal endpoint of an officially evaluated positive-reward canonical trajectory'
+                         if eligibility == 'positive_reward' else
+                         'actual terminal endpoint of an officially evaluated accepted canonical trajectory'))})
         summary = {'dataset_id': dataset_id, 'resolved_rollouts': sum(row['resolved'] is True for row in chosen.values()),
             'eligible_rollouts': len(chosen), 'eligibility': eligibility,
             'rollouts': len(selected), 'tasks': len({r['task_key'] for r in selected}),
@@ -262,7 +272,7 @@ def main():
     p.add_argument('--rollout-id', action='append', default=[])
     p.add_argument('--rollout-list', type=Path)
     p.add_argument('--label-normalization', choices=['raw', 'trajectory_fraction'], default='raw')
-    p.add_argument('--eligibility', choices=['resolved_only', 'positive_reward'], default='resolved_only')
+    p.add_argument('--eligibility', choices=['resolved_only', 'positive_reward', 'accepted_terminal'], default='resolved_only')
     a = p.parse_args()
     print(json.dumps(build_resolved_selection(a.root, a.source_run, a.index_id, a.dataset_id,
                                               a.rollout_id, a.rollout_list, a.label_normalization, eligibility=a.eligibility), indent=2))

@@ -50,8 +50,13 @@ class UpdateTelemetry:
             attention = layer.self_attn if hasattr(layer, "self_attn") else layer.linear_attn
             def inspect_mask(module, args, kwargs, layer_index=index):
                 mask = kwargs.get("attention_mask")
-                shape = list(mask.shape) if mask is not None else None
+                from torch.nn.attention.bias import CausalBias
+                symbolic = isinstance(mask, CausalBias)
+                shape = ([mask.seq_len_q, mask.seq_len_kv] if symbolic else
+                         list(mask.shape) if mask is not None else None)
                 record = {"layer": layer_index, "type": type(module).__name__, "mask_shape": shape}
+                if symbolic:
+                    record["mask_type"] = "symbolic_causal_lower_right"
                 if record not in self.attention_masks:
                     self.attention_masks.append(record)
                 if self.require_flash and shape is not None and len(shape) == 4:
@@ -59,6 +64,10 @@ class UpdateTelemetry:
             self.handles.append(attention.register_forward_pre_hook(inspect_mask, with_kwargs=True))
 
     def start(self):
+        # Retry/start begins a fresh bounded record. A failed attempt must not
+        # leave a profiler active or grow mask shapes across the whole run.
+        self.abort()
+        self.attention_masks = []
         self.loss.reset()
         for mlp in self.mlps:
             mlp.forward_blocks = mlp.backward_blocks = 0
@@ -102,6 +111,11 @@ class UpdateTelemetry:
         values["attention_masks"] = self.attention_masks
         self.first = False
         return values
+
+    def abort(self):
+        if self.profiler:
+            self.profiler.__exit__(None, None, None)
+            self.profiler = None
 
     def close(self):
         if self.profiler:

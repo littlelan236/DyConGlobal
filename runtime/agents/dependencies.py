@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tarfile
 import zipfile
+import weakref
 from pathlib import Path
 
 from core.io import hash_json, identifier, now, read_json, sha256, write_json
@@ -39,6 +40,8 @@ def verify_snapshot(directory, *, deep=True):
     expected = {r['path'] for r in manifest['files']} | {'manifest.json'}
     if actual != expected:
         raise ValueError('Dependency snapshot contains unregistered files')
+    from runtime.agents.verifier_dependencies import validate_resources
+    validate_resources(manifest)
     return manifest
 
 
@@ -74,8 +77,13 @@ def adapt_sdk_transport(wheels):
 
 
 def build_snapshot(cfg, snapshot_id, wheelhouse=None, cli_archive=None, uv=None,
-                   python_runtime=None, from_snapshot=None):
+                   python_runtime=None, from_snapshot=None, verifier_resources=None):
     """Build pinned CLI source, or derive a verified offline condenser publication."""
+    if verifier_resources is not None:
+        if from_snapshot is None or any(v is not None for v in (wheelhouse, cli_archive, uv, python_runtime)):
+            raise ValueError('Verifier resources require --from-snapshot without raw agent build inputs')
+        from runtime.agents.verifier_dependencies import build
+        return build(cfg, snapshot_id, from_snapshot, verifier_resources)
     if from_snapshot is not None:
         if any(value is not None for value in (wheelhouse, cli_archive, uv, python_runtime)):
             raise ValueError("--from-snapshot cannot be combined with raw build inputs")
@@ -323,11 +331,49 @@ def install_command(wheelhouse="/opt/dycon-wheels"):
         '/opt/dycon-openhands/bin/python -c ' + shlex.quote(probe) + ' && openhands --help >/dev/null')
 
 
+_runtime_snapshot_inflight = weakref.WeakKeyDictionary()
+
+
+async def verify_runtime_snapshot(profile):
+    """Share only an in-progress full byte check; never cache its completion."""
+    import asyncio
+    directory = Path(profile['dependency_snapshot']).resolve()
+    expected = profile.get('dependency_snapshot_sha256')
+    pending = _runtime_snapshot_inflight.setdefault(asyncio.get_running_loop(), {})
+    key = (str(directory), expected)
+    check = pending.get(key)
+    if check is None:
+        check = asyncio.create_task(asyncio.to_thread(verify_snapshot, directory))
+        pending[key] = check
+
+        def completed(task):
+            if pending.get(key) is task:
+                pending.pop(key)
+            # A cancelled waiter must neither cancel another consumer's check
+            # nor leave an unobserved failure if all waiters have gone away.
+            if not task.cancelled():
+                task.exception()
+
+        check.add_done_callback(completed)
+    manifest = await asyncio.shield(check)
+    if expected and sha256(directory / 'manifest.json') != expected:
+        raise ValueError('OpenHands dependency snapshot differs from frozen execution context')
+    return manifest
+
+
 async def install_runtime(env, cfg, output, ownership):
     """The same private offline installation hook for startup audits and attempts."""
     output = Path(output)
     profile = cfg['execution_context']['profile']
-    result = await env.exec(install_command(), user='root', timeout_sec=900)
+    if profile.get('verifier_resource_policy'):
+        await verify_runtime_snapshot(profile)
+    command = install_command()
+    if profile.get('verifier_resource_policy'):
+        # Oracle sandboxes inherit the verifier's ABI-specific constraints.
+        # The private agent has its own independent, hash-locked closure.
+        command = ('unset UV_CONSTRAINT PIP_CONSTRAINT UV_BUILD_CONSTRAINT PIP_BUILD_CONSTRAINT; '
+                   + command)
+    result = await env.exec(command, user='root', timeout_sec=900)
     write_json(output / 'dependency-install.json', {
         'schema_version': 2, 'return_code': result.return_code, 'stdout': result.stdout,
         'stderr': getattr(result, 'stderr', ''), 'network_install': False, 'ownership': ownership,

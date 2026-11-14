@@ -4,6 +4,44 @@
 
 代码阶段 Phase 0–3 已完成。已额外完成真实 Qwen3.5-9B 单卡 synthetic smoke 和独立进程暂停/恢复验收。真实历史数据的 Phase 4 尚未执行。
 
+## 2026-11-14 native streaming resume 追加验收
+
+Native streaming 已支持单卡与原 world size 的完整 checkpoint resume，继承原
+冻结 plan/advantage/reference anchor，并恢复 optimizer/scheduler/各 rank RNG
+及已提交 cursor。新 checkpoint 包含完整恢复元数据；历史 v10 使用只读父证据
+兼容路径。Streaming 仍依赖剩余 native ledger 和所选 raw 概率文件。
+
+CPU 主回归为 160 passed、5 skipped；补齐 TensorBoard 后 observability
+34 项全通过，概率 reader/replay 额外回归 72 项通过。真实 Qwen3.5-9B
+单卡/双卡短 native 数据正式 CLI 验收 2 项通过，覆盖连续训练与两次独立
+进程恢复。测试集合有重叠，不累加为独立总数。v10 本身没有执行 update 61；
+原长上下文 OOM 不属于已通过结论。详见
+[恢复指南](STREAMING_RESUME.md) 和 [验收证据](STREAMING_RESUME_VALIDATION.md)。
+
+以下保留各日期的历史验收结果，不代表新增 streaming 训练输入已自包含
+在 checkpoint，也不将早期 synthetic/cache 测试当成 v10 实际续训。
+
+## 2026-11-11 外部 shared-anchor 追加验收
+
+原有 objective 与训练循环保持 `offline_grpo_k3_v1`。训练现已支持默认
+`model_forward`、封存 `probability_artifact` 和明确的 `dataset_probability` stream。
+source receipt、dtype 相容规则及同一 cache 的 ratio/K3 用途纳入独立版本的合同。
+
+追加验收为 203 项 CPU/联调通过，以及真实 Qwen3.5-9B 同精度合成数据的正式 CLI
+两次更新、暂停、来源离线后的恢复和 artifact verify 通过；最终 adapter、
+optimizer/scheduler/RNG 与基线一致。具体证据、性能口径、失败材料和真实 FP16/BF16
+验收边界见 [GRPO_BINDING_VALIDATION.md](GRPO_BINDING_VALIDATION.md)。
+下文保留 2026-11-10 原始验收记录，其测试数量和 GPU attempt 属于当日版本。
+
+## 2026-11-11 概率产物对齐追加验收
+
+schema-3 `rl-probability`、冻结 coverage plan、missing-only native replay、统一
+封存和既有训练 cache 导入已完成 CPU 合同验收。联合回归为 **348 passed，6 skipped**；
+覆盖在线 bytes 保留、32 分支仅补 1 条、交错缺失、错误拒绝、partial eligibility、
+来源离线可移植读取及 cache 恢复。此结果不追加任何 GPU 或业务 run 通过结论，
+与上节 203 项和历史 synthetic GPU 记录分别归档。命令、证据和限制见
+[PROBABILITY_ALIGNMENT_VALIDATION.md](PROBABILITY_ALIGNMENT_VALIDATION.md)。
+
 ## 已实现
 
 - 使用现有 `dycon lora-train`、`RL.service.run`、单 GPU bf16 Qwen3.5-9B 和全部 text-backbone linear LoRA；保留 CE 与稀疏监督路径。
@@ -60,15 +98,28 @@ GRPO 测试覆盖纯函数和严格 schema、N=2/3/9/17/32、分数异常与 tie
 - 峰值 allocated 19,763,780,096 bytes，峰值 reserved 19,866,320,896 bytes；此容量仅适用于长度 6–8 的 synthetic 序列。
 - update 2：`k3_penalty_mean=0.02374385545651118`，`clip_fraction=0.7166666686534882`。
 
-第一次暂停 attempt `grpo-offline-k3-pause-20261110-gpu0` 也成功封存，但其 resume 因另一个任务修改 `core/cli.py` 导致 source fingerprint 改变，在预检阶段被正确拒绝；未创建该 resume 的训练 attempt，也未覆盖旧 checkpoint。随后使用上述 pause2/resume2 完成验收。
+Historical validation: the first paused attempt was rejected when its source fingerprint changed. Since 2026-11-13, source fingerprints remain audit metadata and do not block resume; the later pause2/resume2 validation remains historical evidence.
 
 本地证据位于 `execution/evidence/`，含三项 receipt、metrics、attempt、validation、report 和 `gpu-equivalence.json`。远程比较结果另存于 `temp/grpo-objective-20261110/gpu-equivalence.json`。执行配置在 `RL/experiments/grpo-objective-20261110/`；模板默认仍为 dry-run。
 
+## 2026-11-13 shuffle 与 resume 变更
+
+新 prepared GRPO schedule 默认使用 `prefix_length_pool128_v1`：每 128 个候选
+group 按 prompt token 长度排序，相邻完整 group 组成 optimizer window，再打乱
+window 顺序，以服务四卡每卡一组的执行。旧 sealed schedule 继续使用其记录的
+顺序。project source fingerprint 保留为审计信息，不再阻止 checkpoint resume；
+配置、依赖、模型、数据、reference 和 artifact 内容校验继续执行。
+
 ## 边界与后续
+
+2026-11-13 起，LoRA/GRPO checkpoint 不再把 project source fingerprint 作为
+resume compatibility gate；旧 fingerprint 仍可留在历史 attempt/environment
+记录供审计。配置与数据 schedule、模型/tokenizer、adapter、reference、依赖及
+checkpoint/receipt 内容校验仍按对应合同执行。
 
 Phase 4 尚未完成：未构建或启动真实历史 dataset 训练，未验收真实长序列显存容量、业务 resolved rate 或 estimator 校准。synthetic 工程验收不能代表这些指标。
 
-checkpoint 绑定实现源码和依赖身份；并发编辑 `core/cli.py` 等绑定源码后，旧 checkpoint 的精确 resume 会拒绝，这是现有工程契约的延续。
+旧验收记录中源码变更曾使精确 resume 被拒绝；自 2026-11-13 起，project source fingerprint 只作审计元数据，不再阻止 resume。配置、依赖、模型、数据、reference 与 checkpoint/receipt 内容校验继续有效。
 
 验收阶段保留远程仓库原有未提交修改，未执行 reset/revert 或变更已有 rollout run 的冻结证据。代码、文档与必要 RL 依赖按用户要求整理为 `feat：RL - GRPO` 提交；其他任务改动保留在工作区。所有 SSH 为带超时、有限输出的非交互命令；训练命令已结束。验收后 GPU 0 显存使用为 0 MiB。
 

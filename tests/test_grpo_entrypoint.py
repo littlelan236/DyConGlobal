@@ -29,7 +29,7 @@ def test_grpo_smoke_template_is_explicit_and_strict():
         bad.unlink()
 
 
-@pytest.mark.parametrize("field,value", [("max_epochs",2), ("clip_epsilon",.2), ("kl_beta",0.),
+@pytest.mark.parametrize("field,value", [("max_epochs",2), ("clip_epsilon",.2), ("kl_beta",-.1),
     ("probability_mode","processed_sampling_v1"), ("reference","latest_policy"),
     ("top_k",0), ("unknown",1)])
 def test_grpo_schema_rejects_unsupported_objective(field,value):
@@ -47,3 +47,10 @@ def test_missing_dataset_algorithm_binding_rejected(missing):
     del raw["algorithm"][missing]
     with pytest.raises(ValueError):
         Config.model_validate(raw)
+
+
+def test_kl_off_is_a_supported_explicit_objective():
+    root = Path(__file__).parents[1]
+    raw = yaml.safe_load((root / "RL/experiments/grpo-offline-k3-smoke.yaml").read_text())
+    raw["grpo"]["kl_beta"] = 0.0
+    assert Config.model_validate(raw).grpo.kl_beta == 0.0

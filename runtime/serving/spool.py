@@ -181,6 +181,23 @@ class CaptureSpool:
         self.budget.acquire(self.key(relative), path.stat().st_size)
         return path
 
+    def write_bytes(self, relative, data, *, immutable=False):
+        path = owned_path(self.root, relative)
+        if immutable and path.exists():
+            if path.read_bytes() != data:
+                raise ValueError("Immutable capture bytes changed")
+            return path
+        self.budget.acquire(self.key(relative), len(data) * 2 + 4096)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        part = path.with_suffix(path.suffix + ".part")
+        with part.open("wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(part, path)
+        self.budget.acquire(self.key(relative), path.stat().st_size)
+        return path
+
     def add(self, row):
         with self.lock:
             sid = row["session_id"]
@@ -280,6 +297,13 @@ class CaptureSpool:
             if (self.root / relative).exists():
                 published.add(relative)
                 cleanup.add(relative)
+                probability = read_json(self.root / relative).get("raw_t1_probability")
+                if probability and probability.get("status") == "sealed":
+                    from runtime.serving.raw_logprobs import read_values
+                    record = read_json(self.root / relative)
+                    read_values(self.root, probability, output_ids=record["output_token_ids"], record=record)
+                    published.add(probability["locator"])
+                    cleanup.add(probability["locator"])
         for sid in sample_ids:
             relative = 'index/' + sid + '.json'
             path = self.root / relative
@@ -326,6 +350,14 @@ class CaptureSpool:
                         cleanup.add(relative)
                         if pattern != 'index/*.json' or isinstance(value, list):
                             files[relative] = sha256(path)
+                            if isinstance(value, dict):
+                                probability = value.get("raw_t1_probability") or {}
+                                if probability.get("status") == "sealed":
+                                    from runtime.serving.raw_logprobs import read_values
+                                    read_values(self.root, probability, output_ids=value["output_token_ids"], record=value)
+                                    raw_path = owned_path(self.root, probability["locator"])
+                                    files[probability["locator"]] = sha256(raw_path)
+                                    cleanup.add(probability["locator"])
         session_path = self.root / 'sessions' / session / 'session.json'
         if session_path.exists():
             info = read_json(session_path)
@@ -420,6 +452,11 @@ class CaptureSpool:
         for relative in paths:
             (self.root / relative).unlink(missing_ok=True)
             self.budget.release(self.key(relative))
+            if relative.endswith(".raw_t1.f32"):
+                from core.disk_budget import DiskBudget
+                quota_root = self.root / "raw-logprob-budget"
+                quota = DiskBudget(quota_root, quota_root, 1)
+                quota.release("raw-t1:" + str(self.root / relative))
 
     def close(self, timeout):
         try:

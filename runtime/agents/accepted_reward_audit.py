@@ -3,21 +3,20 @@ from __future__ import annotations
 
 import csv
 import json
-import math
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 from application.execution.run_plan import load_plan
 from application.execution.status import _sample_status_projection
-from core.io import read_json, sha256, write_json
+from core.io import hash_json, read_json, run_path, sha256, write_json
 from runtime.agents.verifier_audit import (
-    _verifier_files,
-    classify_verifier_logs,
-    frozen_verifier_contract,
+    POLICY,
+    classify_attempt,
+    finite_reward,
 )
+from runtime.agents.verifier_evidence import verifier_files
 
-POLICY = "skillsbench_accepted_reward_audit_v1"
 CLASSES = ("VerifierError", "ValidOutcome", "Review")
 
 
@@ -39,7 +38,7 @@ def _hash(path):
 def _reward(row):
     raw = row.get("raw_reward")
     value = raw.get("reward") if isinstance(raw, dict) else None
-    if type(value) not in (int, float) or not math.isfinite(value):
+    if not finite_reward(value):
         return value, False
     return value, True
 
@@ -48,121 +47,28 @@ def _sample_key(item):
     return item.get("sample_key") or item.get("key")
 
 
-def _python_runtime_download_failed(logs):
-    recovery_markers = ("successfully installed python", "installed cpython", "pytest session starts", "collected ")
-    combined = "\n".join(log.lower() for log in logs)
-    has_archive = "python-build-standalone" in combined or "cpython-3.10" in combined
-    failed = "failed to download" in combined or "request failed after" in combined
-    return has_archive and failed and not any(marker in combined for marker in recovery_markers)
-
-
 def _audit_candidate(root, run_id, row, task):
-    run = Path(root) / "runs" / run_id
+    run = run_path(root, run_id)
     task_id, rep, attempt_id = row.get("instance_id"), row.get("repetition_id"), row.get("attempt_id")
     relative = Path("rollout/tasks") / str(task_id) / "repetitions" / str(rep) / "attempts" / str(attempt_id)
+    if any(Path(str(v)).name != str(v) or str(v) in {".",".."} for v in (task_id,rep,attempt_id)):
+        raise ValueError("Unsafe attempt identity")
     attempt = run / relative
-    record = {
-        "run_id": run_id, "task_key": row.get("task_key"), "instance_id": task_id,
-        "sample_key": _sample_key(row), "repetition_id": rep,
-        "attempt_id": attempt_id, "execution_attempt_id": (row.get("serving_assignment") or {}).get("execution_attempt_id"),
-        "attempt_path": relative.as_posix(), "observed_exit_status": row.get("exit_status"),
-        "observed_disposition": row.get("disposition"), "raw_reward": row.get("raw_reward"),
-        "evaluation_status": row.get("evaluation_status"),
-        "recorded_audit_classification": (row.get("verifier_zero_audit") or {}).get("classification"),
-        "classification": "Review", "primary_rule": "R6", "reason_code": "insufficient_evidence",
-        "reason": "Evidence was not sufficient to classify this accepted below-one reward.",
-        "verifier_phase": None, "test_framework": None, "test_execution_state": "unknown",
-        "evidence": [], "missing_evidence": [], "integrity_errors": [],
-        "source_changed": False, "truncated": False, "processed": False,
-    }
-    before = {}
-    paths = ["attempt.json", "attempt-started.json", "benchflow/result.json", "evaluation-raw.json",
-             "evaluation-report.json", "diagnostics/verifier-execution.json",
-             "diagnostics/verifier-zero-audit.json", "verifier-environment.json", "subject/subject.json"]
-    docs = {}
-    for name in paths:
-        path = attempt / name
-        before[name] = _hash(path)
-        if not path.exists():
-            record["missing_evidence"].append(name)
-            continue
-        value, error = _json(path) if name.endswith(".json") else (None, None)
-        if error:
-            record["integrity_errors"].append({"path": name, "error": error})
-        elif name.endswith(".json"):
-            docs[name] = value
-            record["evidence"].append({"path": name, "sha256": before[name], "field": "document"})
-    execution = docs.get("diagnostics/verifier-execution.json")
-    if isinstance(execution, dict):
-        commands = execution.get("commands") or []
-        record["verifier_phase"] = commands[-1].get("phase") if commands and isinstance(commands[-1], dict) else None
-        tests = [x for x in commands if isinstance(x, dict) and x.get("phase") in {"task_test", "verifier_test"}]
-        record["test_execution_state"] = (tests[-1].get("status", "unknown") if tests else "not_recorded")
-        record["test_framework"] = "pytest" if any("pytest" in str(x.get("command_summary", "")).lower() for x in tests) else None
-        if tests and tests[-1].get("status") == "completed":
-            record["test_execution_state"] = "completed"
-    files = _verifier_files(attempt)
-    logs, unreadable = [], False
-    for path in files:
-        rel = path.relative_to(attempt).as_posix()
-        if path.name in {"test-stdout.txt", "test-stderr.txt"}:
-            try:
-                content = path.read_text(encoding="utf-8", errors="replace")
-                logs.append(content)
-                record["evidence"].append({"path": rel, "sha256": _hash(path), "excerpt": content[-1200:]})
-            except OSError as exc:
-                unreadable = True
-                record["integrity_errors"].append({"path": rel, "error": str(exc)})
-        elif path.suffix == ".json" and "ctrf" in path.name.lower():
-            h = _hash(path)
-            record["evidence"].append({"path": rel, "sha256": h})
-    task_contract = frozen_verifier_contract(task)
-    record["task_contract"] = task_contract
-    execution_result = classify_verifier_logs(logs, unreadable=unreadable)
-    python_archive_failure = _python_runtime_download_failed(logs)
-    if python_archive_failure:
-        record.update(classification="VerifierError", primary_rule="R2", reason_code="python_runtime_download_failed",
-                      reason="The verifier could not download its required CPython runtime after retries; no later test run or recovery evidence was found.")
-    elif execution_result[0] == "VerifierError":
-        record.update(classification="VerifierError", primary_rule="R2", reason_code="dependency_install_failed",
-                      reason=execution_result[1])
-    elif not python_archive_failure:
-        from runtime.agents.verifier_audit import PYTEST_SUMMARY, inspect_ctrf
-        ctrf_executed, ctrf_present = inspect_ctrf(attempt)
-        pytest_complete = any(PYTEST_SUMMARY.search(log) for log in logs)
-        missing_reference = next((log for log in logs if "missing ground truth: /root/loss.npz" in log.lower()), None)
-        raw = docs.get("evaluation-raw.json")
-        if isinstance(raw, dict) and (raw.get("completed") is False and raw.get("error")):
-            record.update(classification="VerifierError", primary_rule="R1", reason_code="verifier_incomplete",
-                          reason="Structured evaluation evidence reports completed=false with an error.")
-        elif missing_reference is not None:
-            record.update(reason_code="missing_reference_input", reason="Verifier output reports a missing ground-truth input; input ownership is not proven by the attempt evidence, so this remains Review.")
-        elif ctrf_executed or pytest_complete:
-            record.update(classification="ValidOutcome", primary_rule="R5", reason_code="tests_completed",
-                          reason="CTRF or pytest summary proves tests ran and completed; the sub-one reward is from the recorded task evaluation.")
-            record["test_execution_state"] = "completed"
-            record["test_framework"] = "pytest"
-        elif task_contract.get("ctrf_expected") is None or not task_contract.get("verified"):
-            record.update(reason_code="frozen_verifier_contract_unknown",
-                          reason="Frozen verifier path/hash could not be verified and test completion is unproven.")
-        elif task_contract.get("ctrf_expected") and not ctrf_present:
-            record.update(reason_code="ctrf_missing", reason="Frozen verifier expects CTRF, but no readable report proves completed tests.")
-        elif unreadable or record["integrity_errors"]:
-            record.update(reason_code="evidence_read_failed", reason="Required verifier evidence could not be read reliably.")
-    value, numeric = _reward(row)
-    if numeric and value < 0:
-        record.update(classification="Review", primary_rule="R6", reason_code="invalid_reward_range",
-                      reason="Reward is below zero; it is a candidate but outside the valid reward range.")
-    record["processed"] = not bool(record["integrity_errors"])
-    for name, old in before.items():
-        path = attempt / name
-        if old != _hash(path):
-            record["source_changed"] = True
-    if record["source_changed"]:
-        record.update(classification="Review", primary_rule="R6", reason_code="source_changed",
-                      reason="Attempt evidence changed during the audit scan.")
-        record["processed"] = False
-    return record
+    if not attempt.resolve().is_relative_to(run.resolve()):
+        raise ValueError("Attempt outside run")
+    value, _ = _reward(row)
+    result = classify_attempt(attempt, task, reward=value)
+    execution = (row.get("serving_assignment") or {}).get("execution_attempt_id")
+    started_path = attempt / "attempt-started.json"
+    if started_path.exists():
+        started = read_json(started_path)
+        execution = execution or started.get("execution_attempt_id")
+    return {**result, "run_id":run_id, "task_key":row.get("task_key"), "instance_id":task_id,
+            "sample_key":_sample_key(row), "repetition_id":rep, "attempt_id":attempt_id,
+            "execution_attempt_id":execution, "attempt_path":relative.as_posix(),
+            "observed_exit_status":row.get("exit_status"), "observed_disposition":row.get("disposition"),
+            "raw_reward":row.get("raw_reward"), "evaluation_status":row.get("evaluation_status"),
+            "recorded_audit_classification":(row.get("verifier_zero_audit") or {}).get("classification")}
 
 
 def _csv_value(value):
@@ -172,18 +78,35 @@ def _csv_value(value):
 
 
 def audit_accepted_rewards(root, run_id, output_dir):
-    output = Path(output_dir).expanduser().resolve()
+    requested = Path(output_dir).expanduser()
+    output = requested.resolve()
+    root_path = Path(root).resolve()
+    loaded = load_plan(root, run_id)
+    run = loaded["run"].resolve()
+    allowed_roots = [root_path, run]
+    if requested.is_symlink() or not any(output.is_relative_to(allowed) for allowed in allowed_roots):
+        raise ValueError("Audit output must be a new owned project directory")
+    owned_root = next(allowed for allowed in allowed_roots if output.is_relative_to(allowed))
+    if any(part in {"rollout", "execution", "subject", "capture", "benchflow"} for part in output.relative_to(owned_root).parts):
+        raise ValueError("Audit output must not overlap execution/evidence paths")
+    if any(p.is_symlink() for p in [requested, *requested.parents] if p.exists() and p != Path(root)):
+        # Project root itself may resolve through the supported /data3 layout.
+        if not output.is_relative_to(run):
+            raise ValueError("Unsafe symbolic output parent")
     if output.exists():
         raise FileExistsError(f"Output directory already exists: {output}")
     started = datetime.now(timezone.utc).isoformat()
-    loaded = load_plan(root, run_id)
     if loaded["config"].get("execution_context", {}).get("benchmark") != "skillsbench":
         raise ValueError("Run is not a frozen SkillsBench run")
     run = loaded["run"]
     progress_path = run / "progress.json"
+    frozen_names = ('plan.json', 'selection.json', 'config.yaml', 'resolved-config.json',
+                    'work-items.json', 'tasks.json')
+    frozen_before = {name: _hash(run/name) for name in frozen_names}
     progress_before = _hash(progress_path)
     progress = read_json(progress_path) if progress_path.exists() else {}
     rows, projection = _sample_status_projection(loaded, progress)
+    projection_before = hash_json(rows)
     task_map = loaded["config"]["selection"]["tasks"]
     candidates, anomalies = [], Counter()
     for row in rows.values():
@@ -194,6 +117,10 @@ def audit_accepted_rewards(root, run_id, output_dir):
             anomalies["missing_or_non_finite_reward"] += 1
         elif value < 1:
             candidates.append(row)
+        elif value > 1:
+            anomalies["reward_above_one"] += 1
+        else:
+            anomalies["reward_equal_one"] += 1
     scanned = []
     for row in candidates:
         try:
@@ -209,10 +136,31 @@ def audit_accepted_rewards(root, run_id, output_dir):
                 "test_execution_state": "unknown", "evidence": [], "missing_evidence": [],
                 "integrity_errors": [{"error": str(exc)}], "source_changed": False, "truncated": False, "processed": False})
     progress_after = _hash(progress_path)
-    if progress_before != progress_after:
+    frozen_after = {name: _hash(run/name) for name in frozen_names}
+    try:
+        end_loaded = load_plan(root, run_id)
+        end_progress = read_json(progress_path) if progress_path.exists() else {}
+        end_rows, _ = _sample_status_projection(end_loaded, end_progress)
+        projection_after = hash_json(end_rows)
+    except (OSError, ValueError, KeyError):
+        projection_after = None
+    scope_changed = (progress_before != progress_after or frozen_before != frozen_after
+                     or projection_before != projection_after)
+    for record in scanned:
+        for item in record.get('source_manifest', []):
+            if _hash(Path(item['path'])) != item['sha256']:
+                record.update(source_changed=True, processed=False, classification='Review', primary_rule='R6',
+                              reason_code='source_changed', reason='Consumed evidence changed before report completion.')
+        if record.get('attempt_path') and 'verifier_listing' in record:
+            attempt_path = run / record['attempt_path']
+            listing = [p.relative_to(attempt_path).as_posix() for p in verifier_files(attempt_path)]
+            if listing != record['verifier_listing']:
+                record.update(source_changed=True, processed=False, classification='Review', primary_rule='R6',
+                              reason_code='source_changed', reason='Verifier artifacts changed before report completion.')
+    if scope_changed:
         for row in scanned:
             row.update(source_changed=True, processed=False, classification="Review", primary_rule="R6",
-                       reason_code="source_changed", reason="Run progress changed during the audit scan.")
+                       reason_code="source_changed", reason="Frozen run inputs or current sample projection changed during the audit scan.")
     counts = Counter(row["classification"] for row in scanned)
     task_counts = {}
     rule_counts = Counter()
@@ -227,13 +175,15 @@ def audit_accepted_rewards(root, run_id, output_dir):
         "current_sample_count": len(rows), "candidate_definition": "current disposition=accepted and finite numeric raw_reward.reward < 1",
         "current_sample_projection": "application.execution.status._sample_status_projection"},
         "source_identity": {"plan_sha256": _hash(run/"plan.json"), "selection_sha256": _hash(run/"selection.json"),
-        "progress_sha256_before": progress_before, "progress_sha256_after": progress_after},
+        "progress_sha256_before": progress_before, "progress_sha256_after": progress_after,
+        "frozen_inputs_before": frozen_before, "frozen_inputs_after": frozen_after,
+        "projection_sha256_before": projection_before, "projection_sha256_after": projection_after},
         "scanned_sample_count": len(rows), "non_candidate_accepted_reward_anomalies": dict(anomalies),
         "candidate_count": len(scanned), "processed_count": sum(x["processed"] for x in scanned),
         "unprocessed_count": sum(not x["processed"] for x in scanned), "classification_counts": dict(counts),
         "per_task": dict(sorted(task_counts.items())), "per_rule": dict(sorted(rule_counts.items())),
-        "source_changed": progress_before != progress_after or any(x["source_changed"] for x in scanned),
-        "complete": progress_before == progress_after and all(x["processed"] for x in scanned)}
+        "source_changed": scope_changed or any(x["source_changed"] for x in scanned),
+        "complete": not scope_changed and all(x["processed"] for x in scanned)}
     if sum(counts[c] for c in CLASSES) != len(scanned) or sum(x["candidate_count"] for x in task_counts.values()) != len(scanned):
         raise AssertionError("Audit count conservation failed")
     output.mkdir(parents=True)

@@ -1,3 +1,4 @@
+from difficulty.storage import difficulty_path
 """Strict standalone training configuration and legacy adapter."""
 from pathlib import Path
 from typing import Literal
@@ -191,7 +192,7 @@ def read_config(path):
 def resolve_settings(root, config):
     """Resolve dataset identity without ever consulting root-config training defaults."""
     root = Path(root)
-    source = root / 'difficulty/datasets' / config.data.dataset_id
+    source = difficulty_path(root, 'datasets', config.data.dataset_id)
     digest = sha256(source / 'receipt.json')
     if config.data.expected_receipt_sha256 and config.data.expected_receipt_sha256 != digest:
         raise ValueError('Expected dataset receipt SHA mismatch')

@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "policy": "skillsbench-verifier-repair-v1",
+  "tasks": {
+    "fix-build-agentops": {
+      "source_package_sha256": "112b6e065dc46568692dfc15818c98629fd4e13dc577b20af62551e8ac409c53",
+      "files": {
+        "verifier/test.sh": {
+          "source_sha256": "2314a4addf7d5bebfe1db7681704dd62dabb8b9e617155e50bdf2536d72bbb29",
+          "patch": "fix-build-agentops/verifier/test.sh",
+          "effective_sha256": "0a0c419912f572ba38809b71611c2551112110bc99b24d070ac481476fefe52f"
+        },
+        "verifier/run_passed.sh": {
+          "source_sha256": "837776dc5221c16dd50f0f1ddfe0cd9e6333aa5be5dc356de3448f911900b59c",
+          "patch": "fix-build-agentops/verifier/run_passed.sh",
+          "effective_sha256": "b1b671356392f48416c5980928276cf0b20c962bdb7c19f396a699f81bfc47a9"
+        },
+        "verifier/test_outputs.py": {
+          "source_sha256": "88a760014605f111a71ad132a59cb769dc9ed0e455cc76b5463032809f7022ed",
+          "patch": "fix-build-agentops/verifier/test_outputs.py",
+          "effective_sha256": "0fdc2fbf3b5e6aea3d5db234616feeaa8c3573577cee3d39fdd105ab12ac1bdc"
+        }
+      }
+    },
+    "fix-build-google-auto": {
+      "source_package_sha256": "d703c82c42c1c57348c61179a3d24fe742ba3b1f5f2977af18ca0ec12c0eea6b",
+      "files": {
+        "verifier/test.sh": {
+          "source_sha256": "ffb143a46a59ab6e46d4f374b77503580581a5be17a16341621e11768d0a2d45",
+          "patch": "fix-build-google-auto/verifier/test.sh",
+          "effective_sha256": "cfa09e597cb2290ddd490319a18b7be67a960bd6207c9f6457a021662a630b92"
+        }
+      }
+    },
+    "latex-formula-extraction": {
+      "source_package_sha256": "c5d644578e8a5aac042e1bb9f595ec5eacfcae2fb60bdee56a8f0e822912916e",
+      "files": {
+        "verifier/test.sh": {
+          "source_sha256": "3099d125be6772aab900335982a6c649a58a08591ea3f3a4130ad31fb3ac85f8",
+          "patch": "latex-formula-extraction/verifier/test.sh",
+          "effective_sha256": "2d66ce230d580e854b4164a018fad6ae51974fa51f3351d693f55fd44e64f6cb"
+        },
+        "verifier/test_outputs.py": {
+          "source_sha256": "857e670f1813bed43129e73fef31a4f472cdd50e5c73087a6e63821eaedb38c7",
+          "patch": "latex-formula-extraction/verifier/test_outputs.py",
+          "effective_sha256": "b79d5528bd711be16405a0bf62ac403f508a0df0d753c810aa91df5b37e70e8d"
+        }
+      }
+    },
+    "lean4-proof": {
+      "source_package_sha256": "6ef67eb655abc1a52c8e089158ae384bdc26572cc12c506c1551c892fd5e3650",
+      "files": {
+        "verifier/test.sh": {
+          "source_sha256": "fe7195562321b71ace6e1f6858994939238cc7ce0ec2d0ae3b610278489a42b7",
+          "patch": "lean4-proof/verifier/test.sh",
+          "effective_sha256": "a531a83a160d5bc5f418d56f94c66b9afc61ac79cad55ff580f6fd89e6ae9fbf"
+        }
+      }
+    },
+    "paper-anonymizer": {
+      "source_package_sha256": "ce383981b1590b4ebb1b4e758301d320105d7ba157fbed73c21a26d0406cf76e",
+      "files": {
+        "verifier/test.sh": {
+          "source_sha256": "3c80578d76c68fd4634e92f7e95c01f6e7baab88e58f6b9483cc93c33c95b5ba",
+          "patch": "paper-anonymizer/verifier/test.sh",
+          "effective_sha256": "32bbee51769892fabe17d027b3f7e946640e5daad46e0b0f607efb2a3e8c4b7e"
+        }
+      }
+    },
+    "setup-fuzzing-py": {
+      "source_package_sha256": "b9c79578178f7b95e18e2be65bf45256b0d27bcdbccbeb066c540c7de1794e22",
+      "files": {
+        "verifier/test.sh": {
+          "source_sha256": "814c426cb146118933647dfa8b852eb584ec08c125b1d2e6455308e94b6f5e43",
+          "patch": "setup-fuzzing-py/verifier/test.sh",
+          "effective_sha256": "19d88861341790f401a0b2c1a981a9a288a1c5e0753ec1cd0a1695de31f35dfa"
+        },
+        "verifier/testing_utils.py": {
+          "source_sha256": "f74bbb3ae6a427368938f69682d6545ad426f3fa78ac1804b24cc685df81ca19",
+          "patch": "setup-fuzzing-py/verifier/testing_utils.py",
+          "effective_sha256": "fd04ac143ab5edfb67c7ceafeb88e302be70719de27592c42f2ab7a36da1f44d"
+        }
+      }
+    },
+    "simpo-code-reproduction": {
+      "source_package_sha256": "33d417dee98481574b8dbd178099156d109b995c4da2dee1ef55364f2074df2e",
+      "files": {
+        "verifier/test.sh": {
+          "source_sha256": "6a54950bdb42dff5ed3a0f738add5507bce1696a09e05f2dd41735c78d1180d9",
+          "patch": "simpo-code-reproduction/verifier/test.sh",
+          "effective_sha256": "d49448446157ab51482cb43c0a9c3011c383f433d658f9e51de601940267294e"
+        },
+        "verifier/test_outputs.py": {
+          "source_sha256": "05590869057aeaac1032f2177b0b2bf80f56828af3dba66f100e4d1346b2e62f",
+          "patch": "simpo-code-reproduction/verifier/test_outputs.py",
+          "effective_sha256": "8d3d4a5301818069436d22d0012318029e0fa8e50258cf676a078b587f4f4040"
+        }
+      }
+    },
+    "spring-boot-jakarta-migration": {
+      "source_package_sha256": "035007aa19be6ed17d6930016df322199da3fe50bff65fae337cbe29c0ffffad",
+      "files": {
+        "verifier/test.sh": {
+          "source_sha256": "b588a9d9a690da244472fd5259f72ada9d766564973689354dea69767e8a6c0c",
+          "patch": "spring-boot-jakarta-migration/verifier/test.sh",
+          "effective_sha256": "e2b0255f5b1a815cfd2c1dc333db25c50aa60769532858154517d5a20197d210"
+        }
+      }
+    },
+    "syzkaller-ppdev-syzlang": {
+      "source_package_sha256": "133a3c4d578424c51885fcd310c3d29452cbf25fedaccd708309e5c5097da61c",
+      "files": {
+        "verifier/test.sh": {
+          "source_sha256": "d2d75666dfc7166e4298fd9014fcaeb19f6b6d32e5fcef16dfbfd5a9332de0a5",
+          "patch": "syzkaller-ppdev-syzlang/verifier/test.sh",
+          "effective_sha256": "99b02d8f442134c70a17f97fe6623af074e0a99998c331d20e0a2825e1f79647"
+        }
+      }
+    },
+    "xlsx-recover-data": {
+      "source_package_sha256": "a8d703e07a510a2af3f5890fe68e7a90b4f63244374f60d7b961291b2f9a4531",
+      "files": {
+        "verifier/test.sh": {
+          "source_sha256": "98c0db99d835fa80e2c748233e71aa9b7bd6d1969fed615707181013b5a5b244",
+          "patch": "xlsx-recover-data/verifier/test.sh",
+          "effective_sha256": "e23180b090dc2a290f0803950755f01529f7501ba54302aac7f30cf86707217f"
+        }
+      }
+    }
+  }
+}

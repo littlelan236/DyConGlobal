@@ -4,7 +4,9 @@ import pytest
 
 from core.io import hash_json, sha256
 from runtime.agents.verifier_audit import (
+    POLICY,
     audit_zero_evaluation,
+    classify_attempt,
     classify_zero_reward_trajectory,
     frozen_verifier_contract,
 )
@@ -50,8 +52,8 @@ def classify(root, **kwargs):
     ('× Failed to download `pytest`\n', 'Review'),
     ('ERROR: No matching distribution found for pytest\nSuccessfully installed pytest\n', 'Review'),
     ('Successfully installed unrelated\nERROR: No matching distribution found for pytest\n', 'VerifierError'),
-    ('Failed to fetch https://example.org\nSuccessfully installed pytest\n=== 2 failed in 1.2s ===\n', 'ValidZero'),
-    ('=== 2 passed, 1 failed, 3 warnings in 1.2s ===\n', 'ValidZero'),
+    ('Failed to fetch https://example.org\nSuccessfully installed pytest\n=== 2 failed in 1.2s ===\n', 'Review'),
+    ('=== 2 passed, 1 failed, 3 warnings in 1.2s ===\n', 'Review'),
     ('=== 2 errors in 0.5s ===\n', 'Review'),
     ('=== 3 skipped in 0.5s ===\n', 'Review'),
     ('=== 0 passed in 0.5s ===\n', 'Review'),
@@ -60,7 +62,8 @@ def classify(root, **kwargs):
 ])
 def test_final_failure_recovery_and_execution(tmp_path, log, expected):
     put(tmp_path / 'benchflow/a/session/verifier/test-stdout.txt', log)
-    assert classify(tmp_path) == expected
+    # A log-only legacy call lacks a frozen identity and cannot authorize a v2 verdict.
+    assert classify(tmp_path) == 'Review'
 
 
 def test_trainer_install_failures_are_never_verifier_evidence(tmp_path):
@@ -76,14 +79,10 @@ def test_cross_stream_recovery_has_no_reliable_chronology(tmp_path):
     assert classify(tmp_path) == 'Review'
 
 
-@pytest.mark.parametrize('summary', [
-    {'tests': 3, 'passed': 0, 'failed': 3},
-    {'tests': 3},
-])
-def test_executed_ctrf_overrides_dependency_log(tmp_path, summary):
-    put(tmp_path / 'benchflow/a/verifier/ctrf.json', {'results': {'summary': summary}})
+def test_legacy_log_only_api_is_explicitly_conservative(tmp_path):
+    put(tmp_path / 'benchflow/a/verifier/ctrf.json', {'results': {'summary': {'tests':3,'failed':3}}})
     put(tmp_path / 'benchflow/a/verifier/test-stderr.txt', 'ERROR: No matching distribution found for pytest')
-    assert classify(tmp_path) == 'ValidZero'
+    assert classify(tmp_path) == 'Review'
 
 
 @pytest.mark.parametrize('report', [
@@ -98,7 +97,7 @@ def test_empty_skipped_or_broken_ctrf_does_not_prove_execution(tmp_path, report)
 
 def test_ctrf_tests_without_summary(tmp_path):
     put(tmp_path / 'benchflow/a/verifier/ctrf.json', {'results': {'tests': [{'status': 'failed'}]}})
-    assert classify(tmp_path) == 'ValidZero'
+    assert classify(tmp_path) == 'Review'
 
 
 @pytest.mark.parametrize('expected', [True, False, None])
@@ -110,7 +109,7 @@ def test_non_ctrf_requires_task_completion_contract(tmp_path):
     put(tmp_path / 'benchflow/a/verifier/test-stdout.txt', 'SCORECARD COMPLETE: 0/10\n')
     assert classify(tmp_path, ctrf_expected=False) == 'Review'
     assert classify(tmp_path, ctrf_expected=False,
-                    task_completion_patterns=(r'^SCORECARD COMPLETE: \d+/\d+\s*$',)) == 'ValidZero'
+                    task_completion_patterns=(r'^SCORECARD COMPLETE: \d+/\d+\s*$',)) == 'Review'
 
 
 @pytest.mark.parametrize(('raw', 'report'), [
@@ -121,9 +120,12 @@ def test_non_ctrf_requires_task_completion_contract(tmp_path):
     ({}, {'evaluation_status': 'verifier_incomplete'}),
     ({}, {'success_policy': 'verifier_incomplete'}),
 ])
-def test_explicit_incomplete_overrides_test_artifacts(tmp_path, raw, report):
+def test_derived_evaluation_report_is_not_execution_failure_evidence(tmp_path, raw, report):
     put(tmp_path / 'benchflow/a/verifier/test-stdout.txt', '=== 2 failed in 1s ===\n')
-    assert classify(tmp_path, evaluation_raw=raw, evaluation_report=report) == 'VerifierError'
+    put(tmp_path / 'evaluation-raw.json', raw)
+    result = classify_attempt(tmp_path, {}, reward=0, evaluation_raw=raw)
+    assert result['classification'] == 'Review'
+    assert result['policy'] == POLICY
 
 
 def test_bare_completed_false_and_malformed_structured_files_need_review(tmp_path):
@@ -174,36 +176,17 @@ def test_frozen_verifier_directory_contract_is_hash_guarded(tmp_path):
     assert contract['ctrf_expected'] is True
 
 
-def test_settlement_only_reclassifies_proven_fault_and_preserves_reward(tmp_path):
+def test_settlement_unknown_identity_retains_original_reward(tmp_path):
     from rollout.retry import disposition
 
     raw = {'completed': True, 'rewards': {'reward': 0}}
     put(tmp_path / 'benchflow/a/verifier/test-stdout.txt', 'pytest: command not found\n')
     status, resolved, policy, receipt = audit_zero_evaluation(tmp_path, {}, 'AgentCompleted', False, 'normalized', raw)
-    assert (status, resolved, policy) == ('VerifierError', None, 'verifier_incomplete')
-    assert disposition({}, status) == 'failed'
-    assert receipt['classification'] == 'VerifierError'
-    assert raw['rewards'] == {'reward': 0}
-    put(tmp_path / 'benchflow/a/verifier/test-stdout.txt', 'Failed to fetch https://example.org\n')
-    status, resolved, policy, receipt = audit_zero_evaluation(tmp_path, {}, 'AgentCompleted', False, 'normalized', raw)
     assert (status, resolved, policy) == ('AgentCompleted', False, 'normalized')
     assert disposition({}, status) == 'accepted'
     assert receipt['classification'] == 'Review'
-    put(tmp_path / 'benchflow/a/verifier/test-stdout.txt', '=== 2 failed in 1s ===\n')
-    assert audit_zero_evaluation(tmp_path, {}, 'AgentCompleted', False, 'normalized', raw)[3]['classification'] == 'ValidZero'
+    assert raw['rewards'] == {'reward': 0}
     assert audit_zero_evaluation(tmp_path, {}, 'LimitsExceeded', False, 'normalized', raw)[3] is None
-
-
-def test_accepted_reward_policy_distinguishes_terminal_download_failure():
-    from runtime.agents.accepted_reward_audit import _python_runtime_download_failed
-
-    log = ('Downloading https://github.com/astral-sh/python-build-standalone/releases/download/ '
-           'cpython-3.10.22-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz\n'
-           'error: Request failed after 3 retries\n'
-           'Caused by: tls handshake eof\n')
-    assert _python_runtime_download_failed([log]) is True
-    recovered = log + 'Successfully installed pytest\n================ pytest session starts ================\n=== 2 failed in 1s ===\n'
-    assert _python_runtime_download_failed([recovered]) is False
 
 
 def test_python_runtime_download_failure_is_not_a_package_install_failure(tmp_path):
@@ -216,8 +199,8 @@ def test_python_runtime_download_failure_is_not_a_package_install_failure(tmp_pa
     row = {'instance_id': 'simpo', 'repetition_id': 'rep-000', 'attempt_id': 'rep-000-attempt-000',
            'sample_key': 's1', 'disposition': 'accepted', 'raw_reward': {'reward': 0}}
     result = _audit_candidate(tmp_path, 'r', row, {})
-    assert result['classification'] == 'VerifierError'
-    assert result['reason_code'] == 'python_runtime_download_failed'
+    assert result['classification'] == 'Review'
+    assert result['reason_code'] == 'evidence_read_failed'
 
 
 @pytest.mark.parametrize('evidence', ['pytest', 'earlier_summary', 'ctrf', 'recovered_stderr', 'nonzero'])
@@ -247,6 +230,9 @@ def test_existing_bootstrap_guard_respects_execution_and_recovery(tmp_path, evid
         async def verify(self):
             return SimpleNamespace(rewards={'reward': 1 if evidence == 'nonzero' else 0})
 
-    owner = SimpleNamespace(output=tmp_path, ownership={'attempt_id': 'a'})
+    owner = SimpleNamespace(output=tmp_path, ownership={'attempt_id': 'a'},
+        sample=SimpleNamespace(task_key='task',instance_id='task'),
+        cfg={'selection':{'tasks':{'task':{'instance':{'package_sha256':'a'*64}}}},
+             'execution_context':{'profile':{}}})
     result = asyncio.run(_run_verifier_with_evidence(Verifier(), owner))
     assert result.rewards['reward'] == (1 if evidence == 'nonzero' else 0)

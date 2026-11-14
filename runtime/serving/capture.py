@@ -711,6 +711,12 @@ class OnlineCaptureController:
         if not self.export_enabled:
             self.export_root = self.root / "runs" / config.get("run_id", "standalone") / "capture-diagnostics"
         self.queue = AsyncExportQueue(self.export_root, int(export.get("queue_size", 256)), self.spool)
+        self.raw_writer = None
+        if self.config.get("logprobs", {}).get("enabled"):
+            from runtime.serving.raw_logprobs import RawLogprobWriter
+            self.raw_writer = RawLogprobWriter(
+                self.root, self.export_root, self.config["logprobs"], spool=self.spool,
+                source_identity=self.config.get("raw_probability_source_identity", {}))
         self.sessions: dict[str, _Session] = {}
         self.request_outputs = {}
         self.request_bindings: dict[str, tuple[str, CaptureRequest]] = {}
@@ -771,10 +777,11 @@ class OnlineCaptureController:
 
     def storage_status(self):
         """Read-only effective settings from this live controller instance."""
+        raw_status = self.raw_writer.status() if self.raw_writer else None
         if self.spool is None:
-            return {"spool_enabled": False}
+            return {"spool_enabled": False, "raw_logprobs": raw_status}
         export = self.config["export"]
-        return {"spool_enabled": True, "spool_max_bytes": self.spool.budget.limit,
+        return {"raw_logprobs": raw_status, "spool_enabled": True, "spool_max_bytes": self.spool.budget.limit,
                 "spool_high_watermark": export["spool_high_watermark"],
                 "spool_low_watermark": export["spool_low_watermark"],
                 "project_capture_reserved_bytes": self.spool.budget.usage(),
@@ -1244,6 +1251,33 @@ class OnlineCaptureController:
                       "prompt_token_ids": list(value["prompt_token_ids"]),
                       "output_token_ids": list(value["output_token_ids"])}
             record.pop("metadata", None)
+            raw_generation_identity = record.pop("raw_t1_generation_identity", None)
+            raw_values = record.pop("raw_t1_logprobs", None)
+            raw_encoded = record.pop("raw_t1_logprobs_b64", None)
+            if raw_encoded is not None:
+                import base64
+                if raw_values is not None:
+                    raise ValueError("Duplicate raw probability transport payloads")
+                try:
+                    max_bytes = self.config.get("logprobs", {}).get("shard_max_bytes", 4194304)
+                    if not isinstance(raw_encoded, str) or len(raw_encoded) > 4 * ((max_bytes + 2) // 3):
+                        raise ValueError("Raw probability wire byte budget exceeded")
+                    raw_values = np.frombuffer(base64.b64decode(raw_encoded, validate=True), dtype="<f4")
+                except Exception:
+                    raw_values = None  # Preserve native output with failed probability evidence.
+            if self.raw_writer is not None:
+                if raw_generation_identity is not None:
+                    record["raw_t1_generation_identity"] = raw_generation_identity
+                try:
+                    record["raw_t1_probability"] = self.raw_writer.write(record, raw_values)
+                except Exception as exc:
+                    # Probability availability never changes native generation or
+                    # branch selection. Dataset/consumer reports explicit absence.
+                    record["raw_t1_probability"] = {
+                        "status": "failed", "probability_semantics": "raw_t1_sampled_token_v1",
+                        "reason": type(exc).__name__, "error": str(exc)[:256]}
+            elif raw_values is not None:
+                raise ValueError("raw T=1 values supplied while capture is disabled")
             if request.prompt_token_ids and list(request.prompt_token_ids) != record["prompt_token_ids"]:
                 self._receipt_failure(request, "output_prompt_conflict", raw_output=value)
                 raise ValueError("Native prompt differs from request binding")
@@ -1893,6 +1927,8 @@ class OnlineCaptureController:
     def close(self):
         errors = []
         try:
+            if self.raw_writer is not None:
+                self.raw_writer.close()
             self.queue.close(drain=True, timeout=self.config.get("finalize_seconds", 120))
         except Exception as exc:
             errors.append(repr(exc))

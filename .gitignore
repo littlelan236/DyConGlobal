@@ -227,3 +227,17 @@ desktop.ini
 /RL/profiles/
 /RL/tensorboard/
 /RL/exports/
+
+# Mutable RL progress, TensorBoard services and generated artifact publications
+/runtime/rl-observability/
+/RL/environment/
+/RL/prepared/
+/RL/references/
+/RL/extensions/
+/RL/probabilities/
+/RL/probability-plans/
+# Historical machine/GPU-bound attempts; reusable smoke/prefix templates stay visible
+/RL/experiments/grpo-data-parallel-*-20261113*.yaml
+/RL/experiments/observability-20261112/
+# Historical verifier execution evidence; catalog/verifier_patches remains source
+/analysis/pddl-airport-revalidation-*/

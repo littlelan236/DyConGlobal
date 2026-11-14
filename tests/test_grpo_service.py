@@ -21,6 +21,7 @@ def test_public_service_publishes_reconstructible_grpo_receipt(tmp_path, monkeyp
     raw["run"]["attempt_id"] = "public-grpo-tiny"
     raw["run"]["mode"] = "smoke"
     raw["runtime"]["output_root"] = str(tmp_path / "artifacts")
+    raw["runtime"]["gpu"] = 1  # CPU-injected test must not contend with a live GPU-0 attempt lock.
     raw["lora"] = LORA.model_dump()
     file = tmp_path / "config.yaml"; file.write_text(yaml.safe_dump(raw))
     base = {"files": {"tiny_fixture": True}}
@@ -51,6 +52,7 @@ def test_public_service_publishes_reconstructible_grpo_receipt(tmp_path, monkeyp
 def test_dry_run_imports_no_torch_and_creates_no_attempt(tmp_path):
     root = Path(__file__).parents[1]
     raw = yaml.safe_load((root / "RL/experiments/grpo-offline-k3-smoke.yaml").read_text())
+    raw["preflight"] = {"validate_dataset": True}
     raw["runtime"]["output_root"] = str(tmp_path)
     file = tmp_path / "dry.yaml"; file.write_text(yaml.safe_dump(raw))
     script = '''

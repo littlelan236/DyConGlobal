@@ -757,7 +757,7 @@
     "v1/attention/backends/rocm_aiter_fa.py": "b2edaed170c9f9d3c3266a944765dcff034a3a8ceab3f33d6c108e2dcf60c381",
     "v1/attention/backends/cpu_attn.py": "76fb02a6bd725125565d84bf04f627cf16da5f7ff8f31f87c01ed6a1439398c7",
     "v1/attention/backends/flash_attn.py": "5d9c676d8d03ec4e583183f9f42fac33c223768fdc3d6088dff97b5ac0cd4c3a",
-    "v1/attention/backends/gdn_attn.py": "c65552d9aad86472544033d44ad8a872221a83e6b60ba9918cc049ab0c580c7c",
+    "v1/attention/backends/gdn_attn.py": "3079657680fb8104404046c59de16fbfced44a12ca507947ee1695bef0246af0",
     "v1/attention/backends/triton_attn.py": "fe15ef175705a18203ff2c75eeb04d471b45beefd6b816f3b2358f3c834aaf9d",
     "v1/attention/backends/flash_attn_diffkv.py": "e4627c88c3ba8caee260540e994cc8137fd2ff7cd7813356b36387c6c88ce30a",
     "v1/attention/backends/rocm_aiter_unified_attn.py": "65a14627f8134b3e4b9a03eac68e6163b71c1bc8b5c3639f54b1b8f45ff3a378",
@@ -865,7 +865,7 @@
     "v1/worker/gpu/kv_connector.py": "99757f1032d07bb33a97a2d8b02e037b6da83e29fa9e569109a98592c6fa4080",
     "v1/worker/gpu/steer_vector_utils.py": "5dd6e2202fb20faf4e9838ee13695aa9e1ac1982ab3a9f699c1d3767507a22ca",
     "v1/worker/gpu/eplb_utils.py": "1829fac11464aed4649179b302df198de51b95d0589f4e56bea305a876a63e26",
-    "v1/worker/gpu/model_runner.py": "c2882744d2f14a301d0d570bd6bcbf7590ca4b66f4875e1e9d3bb99b1b9479ae",
+    "v1/worker/gpu/model_runner.py": "808ee2074cab7ad98b763bfd2fd9749d181b3ce5ec650c7be7de0e24ec85e316",
     "v1/worker/gpu/input_batch.py": "3929c92e42ae90e4410bb4537dcbdcd171a662e44afc1189a9a3e19037a84410",
     "v1/worker/gpu/model_hook_utils.py": "9d45e32c8651aed62537e6bee155cc220224bb3193aadb985307fb67f792c8d6",
     "v1/worker/sentinel/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -894,7 +894,7 @@
     "v1/worker/gpu/pool/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "v1/worker/gpu/pool/pooling_runner.py": "baebe6367a3345f2cb0defc22c925ca977ecd5a340f056eb23b8d05ce3bfefd0",
     "v1/worker/gpu/sample/states.py": "4e3671f93695ba5a48fad7d2d13beb231ac8741034904ed5a15d9f7b9b86662e",
-    "v1/worker/gpu/sample/sampler.py": "408b08c4ac66de271f476460490f360ef2a9b73528a346d132a22326e1674369",
+    "v1/worker/gpu/sample/sampler.py": "58c62218915aae8701095c6d7e795ea8375543097b98ba9101809dba4eba38e7",
     "v1/worker/gpu/sample/batch_shard.py": "c30274a3a04e6a03e89be9cd7c62de602b1aba4d412f64540ab6201036de3928",
     "v1/worker/gpu/sample/prompt_logprob.py": "4cf22d390e7bf59e44c458cff7180268db63e95d06af2f1e14d720a2d77c9663",
     "v1/worker/gpu/sample/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -907,6 +907,7 @@
     "v1/worker/gpu/sample/penalties.py": "46c29434caf5f415129ef4a9bb2b8d4f62d2765596e3e07f73ad2b198c7def1b",
     "v1/worker/gpu/sample/bad_words.py": "8d3cbd5613398260314d94739d8ee0e1ac0c22abf2f960f541d3c0d4e39d360b",
     "v1/worker/gpu/sample/gumbel.py": "3ec1df510bdad13e8b0a457b5b67c98affdf6e57369e56cb471246cc8f40dd34",
+    "v1/worker/gpu/sample/raw_t1.py": "504a6359268ea3e03a582cad1b056d5f4db04158a81d009e5e944afa95e5f80a",
     "v1/worker/gpu/metrics/logits.py": "ea058d7510a077a55f8ac7e4c3d596508346244e908cb372865d7159f62edc89",
     "v1/worker/gpu/metrics/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "v1/worker/gpu/spec_decode/mtp/speculator.py": "1fcffbf5e5a85e4c901bd71c65a73da814e7273627276dbdfebf367720a0bc1a",
@@ -2195,7 +2196,7 @@
     "model_executor/layers/mamba/linear/base.py": "26125cd427225954e1846ca361cdaf43f2b56f11b1e217cf26e91a80ef0edb6a",
     "model_executor/layers/mamba/linear/minimax_linear_attn.py": "e2999620293aedb0eeb2734a6980f16b8c2b1f02ac8f665d923a976bb09f84d8",
     "model_executor/layers/mamba/gdn/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py": "cb819264c1e791177d866f484ca0579a7d57141926705a1f75dd4a79de4d0125",
+    "model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py": "0cac8f5c740e9d944d7e677d49d9ff5247682a988da1044605a251aa55f1811c",
     "model_executor/layers/mamba/gdn/base.py": "7fec748fc74131f5a45bcaf2644b3fa3a0598fd437d7347f8207ea3644a951c5",
     "model_executor/layers/mamba/gdn/olmo_gdn_linear_attn.py": "42a0c79e0078f5a714615e3f980048b7240772b5c6bb754271cb7968102999ed",
     "model_executor/layers/mamba/gdn/kimi_gdn_linear_attn.py": "1cec4da5c9da73557e192bfb36cd540aae51d3e91283b554449c4a97f0f89bd9",
@@ -2383,7 +2384,8 @@
     "parser/engine/streaming_parser_engine.py": "d00aba98ad26a2593e022a1faf5d048348d892822f75be40d19cf1dd522570f2",
     "parser/engine/registered_adapters.py": "232b7730905b3a4259cb7cf3b2c7022acaea748095488076751d9517ca32237c",
     "parser/engine/adapters.py": "178636c162201685aac91cfc5e43abc98ea8275219a4a3a96e820581a77b014e",
-    "parser/engine/events.py": "fc094827b5444dd7ec986a430fc26615f0b1a5de4fcd132a4d4e210a4c1c552d"
+    "parser/engine/events.py": "fc094827b5444dd7ec986a430fc26615f0b1a5de4fcd132a4d4e210a4c1c552d",
+    "v1/attention/backends/gdn_fullgraph.py": "4ee2447822d8482e6bcafda72a64a9d3914cf77c0fd85ba13ee19cf732cc7fad"
   },
   "overlay_path": "/home/wangtianyi/DyConGlobal/.venvs/easysteer/lib/python3.12/site-packages/vllm"
 }

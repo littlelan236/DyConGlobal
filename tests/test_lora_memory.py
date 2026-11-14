@@ -222,6 +222,7 @@ def test_memory_schema_and_host_budget_reject_unsafe_configs(tmp_path):
     assert not plan["capacity_verified"]
     config.training.memory.activation_offload = "checkpoint_boundary"
     config.training.memory.host_budget_gib = 0.1
+    config.preflight.check_resources = True
     with pytest.raises(ValueError, match="budget"):
         memory_plan(config)
 

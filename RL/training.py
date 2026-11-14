@@ -32,9 +32,9 @@ def restore_rng(state):
     name, keys, pos, has_gauss, cached = state["numpy"]
     np.random.set_state((name, np.array(keys, dtype=np.uint32), pos, has_gauss, cached))
     torch.set_rng_state(state["torch_cpu"])
+    if len(state["torch_cuda"]) != torch.cuda.device_count():
+        raise ValueError("Checkpoint CUDA RNG topology differs from the current single-device runtime")
     if state["torch_cuda"]:
-        if not torch.cuda.is_available() or len(state["torch_cuda"]) != torch.cuda.device_count():
-            raise ValueError("Checkpoint CUDA RNG topology differs from the current single-device runtime")
         torch.cuda.set_rng_state_all(state["torch_cuda"])
 
 
@@ -135,101 +135,310 @@ def train(model, batches, loss_callback, optimizer, scheduler, *, max_updates,
     return state
 
 
-def train_grpo(model, groups, objective_callback, optimizer, scheduler, *,
-               group_batch_size=4, max_epochs=1, grad_clip=1.0, state=None,
-               max_updates=None, on_update=None, on_gradients=None, on_window_start=None):
-    """Consume frozen groups once, with group-preserving windows and resumable cursors."""
-    if max_epochs != 1:
-        raise ValueError("offline GRPO supports exactly one epoch")
-    from RL.grpo.groups import iter_group_batches
-    state = dict(state or {"global_step": 0, "group_cursor": 0,
-                           "consumed_groups": 0, "consumed_branches": 0,
-                           "consumed_tokens": 0})
-    if state["group_cursor"] != state["consumed_groups"] or state["group_cursor"] < 0:
-        raise ValueError("Invalid GRPO resume group cursor")
-    actual = [p for group in optimizer.param_groups for p in group["params"]]
-    expected = {id(p) for p in model.parameters() if p.requires_grad}
-    if not expected or len(actual) != len(expected) or {id(p) for p in actual} != expected:
-        raise ValueError("Optimizer must contain each trainable adapter parameter exactly once")
-    all_groups = list(groups)
-    expected_step = (state["group_cursor"] + group_batch_size - 1) // group_batch_size
-    if (state["global_step"] != expected_step or
-            (state["group_cursor"] != len(all_groups) and state["group_cursor"] % group_batch_size)):
-        raise ValueError("Resume cursor is not an optimizer update boundary")
-    if state["group_cursor"] > len(all_groups):
-        raise ValueError("Resume cursor is beyond the frozen dataset")
-    skipped = all_groups[:state["group_cursor"]]
-    if state["consumed_branches"] != sum(g.group_size for g in skipped):
-        raise ValueError("Resume branch cursor mismatch")
-    if state["consumed_tokens"] != sum(int(g.loss_mask.sum()) for g in skipped):
-        raise ValueError("Resume token cursor mismatch")
+def _grpo_local_attempt(model, window, objective, parameters, *, cursor, parallel,
+                        stage, memory, attempt, step, on_start, rng, execution_plan=None):
+    """Return only scalar evidence; no exception traceback escapes this scope."""
+    import traceback
+    from RL.memory import is_cuda_oom
     device = next(model.parameters()).device
-    model.train()
-    optimizer.zero_grad(set_to_none=True)
-    windows = iter(iter_group_batches(all_groups[state["group_cursor"]:], group_batch_size))
-    while max_updates is None or state["global_step"] < max_updates:
-        window = next(windows, None)
-        if window is None:
-            break
-        if on_window_start:
-            on_window_start()
-        if device.type == "cuda":
-            torch.cuda.synchronize(); torch.cuda.reset_peak_memory_stats()
-        started = time.monotonic(); forward_seconds = backward_seconds = 0.0
-        loss_value = 0.0; group_metrics = []; learning_rate = optimizer.param_groups[0]["lr"]
-        for group in window:
-            if hasattr(objective_callback, "iter_results"):
-                results = objective_callback.iter_results(model, group)
-            else:
-                results = (objective_callback(model, item) for item in (group,))
-            group_rows = []
-            while True:
-                phase_started = time.monotonic()
-                result = next(results, None)
-                if device.type == "cuda":
-                    torch.cuda.synchronize()
-                forward_seconds += time.monotonic() - phase_started
-                if result is None:
-                    break
-                loss = result.loss
-                if loss.ndim != 0 or not torch.isfinite(loss):
-                    raise ValueError("Nonfinite GRPO objective; optimizer update rejected")
-                loss_value += float(loss.detach()) / len(window)
-                started_backward = time.monotonic()
-                (loss / len(window)).backward()
-                if device.type == "cuda":
-                    torch.cuda.synchronize()
-                backward_seconds += time.monotonic() - started_backward
-                group_rows.append(result.metrics)
-                del loss, result
-            if not group_rows:
-                raise ValueError("Objective returned no group contribution")
-            group_metrics.append(group_rows)
-        for parameter in actual:
+    started = time.monotonic()
+    forward = backward = loss_value = 0.0
+    rows, phase = [], "step_start"
+    def enter(name, **fields):
+        nonlocal phase
+        phase = name
+        if memory: memory.phase(name, **fields)
+    try:
+        if rng is not None: restore_rng(rng)
+        if hasattr(objective, "reset"): objective.reset()
+        if on_start: on_start()
+        if execution_plan:
+            from RL.grpo.execution import validate_window
+            validate_window(execution_plan, step, window)
+        if memory: memory.begin_attempt(window, global_step=step, attempt_id=attempt)
+        elif device.type == "cuda":
+            torch.cuda.synchronize(device); torch.cuda.reset_peak_memory_stats(device)
+        for index, group in enumerate(window):
+            if parallel and index % parallel.world_size != parallel.rank: continue
+            fields = {"group_id": group.group_id, "group_ordinal": cursor + index,
+                      "window_ordinal": index, "branch_ordinal": None}
+            if execution_plan:
+                fields.update(group.metadata["execution_chunk"], execution_chunk_ordinal=cursor + index,
+                              group_ordinal_semantics="execution_chunk")
+            stage("group_forward", **{k:v for k,v in fields.items() if k != "window_ordinal"},
+                  branch_count=group.group_size)
+            results = None
+            try:
+                begin = getattr(objective, "begin_group", None)
+                if begin:
+                    enter("prefix_forward", **fields); stage("prefix_forward")
+                    before = time.monotonic(); begin(model, group)
+                    if device.type == "cuda": torch.cuda.synchronize(device)
+                    forward += time.monotonic() - before
+                results = (objective.iter_results(model, group) if hasattr(objective, "iter_results") else
+                           (objective(model, item) for item in (group,)))
+                group_rows = []
+                while True:
+                    enter("suffix_forward", branch_ordinal=len(group_rows), **{k:v for k,v in fields.items() if k != "branch_ordinal"})
+                    stage("group_forward", contribution_ordinal=len(group_rows))
+                    before = time.monotonic(); result = next(results, None)
+                    if device.type == "cuda": torch.cuda.synchronize(device)
+                    forward += time.monotonic() - before
+                    if result is None: break
+                    loss = result.loss
+                    if loss.ndim != 0 or not torch.isfinite(loss):
+                        raise ValueError("Nonfinite GRPO objective; optimizer update rejected")
+                    loss_value += float(loss.detach()) / len(window)
+                    enter("suffix_backward", branch_ordinal=len(group_rows))
+                    stage("group_backward", contribution_ordinal=len(group_rows))
+                    before = time.monotonic(); (loss / len(window)).backward()
+                    if device.type == "cuda": torch.cuda.synchronize(device)
+                    duration = time.monotonic() - before; backward += duration
+                    if hasattr(objective, "record_branch_backward"): objective.record_branch_backward(duration)
+                    group_rows.append(result.metrics)
+                    del loss, result
+                    enter("boundary_accumulate")
+                    if hasattr(objective, "after_branch_backward"): objective.after_branch_backward()
+                if not group_rows: raise ValueError("Objective returned no group contribution")
+                if execution_plan:
+                    chunk = group.metadata["execution_chunk"]
+                    if ([r.get("branch_id") for r in group_rows] != group.branch_ids
+                            or [r.get("native_branch_ordinal") for r in group_rows] != chunk["native_branch_ordinals"]):
+                        raise ValueError("8x16 missing/duplicate/misordered branch contributions")
+                if hasattr(objective, "finish_group"):
+                    enter("prefix_backward", branch_ordinal=None); stage("prefix_backward")
+                    before = time.monotonic(); objective.finish_group()
+                    if device.type == "cuda": torch.cuda.synchronize(device)
+                    backward += time.monotonic() - before
+                rows.append((index, group_rows))
+                stage("group_complete", completed_local_groups=len(rows),
+                      completed_groups_in_update=(None if parallel else
+                          (index + 1 if not execution_plan or group.metadata["execution_chunk"]["half_index"] == 1 else 0)),
+                      completed_local_execution_chunks=len(rows) if execution_plan else None)
+            except BaseException as exc:
+                if memory and is_cuda_oom(exc):
+                    memory.oom(f"{type(exc).__name__}: {exc}", phase=phase)
+                raise
+            finally:
+                result = loss = None
+                try:
+                    if results is not None and hasattr(results, "close"): results.close()
+                finally:
+                    if hasattr(objective, "close_group"): objective.close_group()
+        for parameter in parameters:
             if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
                 raise ValueError("Nonfinite GRPO gradient; optimizer update rejected")
-        if on_gradients:
-            on_gradients()
-        norm = torch.nn.utils.clip_grad_norm_(actual, grad_clip, error_if_nonfinite=True)
-        if not torch.isfinite(norm):
-            raise ValueError("Nonfinite GRPO gradient norm")
-        optimizer.step(); scheduler.step(); optimizer.zero_grad(set_to_none=True)
-        branches = sum(group.group_size for group in window)
-        tokens = sum(int(group.loss_mask.sum()) for group in window)
-        state["global_step"] += 1; state["group_cursor"] += len(window)
-        state["consumed_groups"] += len(window); state["consumed_branches"] += branches
-        state["consumed_tokens"] += tokens
-        from RL.grpo.metrics import summarize_update
-        metrics = {**summarize_update(group_metrics), **state,
-                   "loss": loss_value, "group_count": len(window), "branch_count": branches,
-                   "token_count": tokens, "gradient_norm": float(norm),
-                   "learning_rate": learning_rate, "next_learning_rate": optimizer.param_groups[0]["lr"],
-                   "seconds": time.monotonic() - started, "forward_seconds": forward_seconds,
-                   "backward_seconds": backward_seconds}
+        return {"status": {"state": "OK", "phase": phase}, "rows": rows, "loss": loss_value,
+                "prefixes": (objective.drain_prefix_metrics() if hasattr(objective, "drain_prefix_metrics")
+                             else list(getattr(objective, "prefix_metrics", []))),
+                "seconds": time.monotonic() - started, "forward_seconds": forward, "backward_seconds": backward}
+    except BaseException as exc:
+        if hasattr(objective, "drain_prefix_metrics"): objective.drain_prefix_metrics()
+        # The helper returns, dropping all loss/result/generator/exception frame
+        # references before the caller runs gc or allocator cleanup.
+        return {"status": {"state": "CUDA_OOM" if is_cuda_oom(exc) else "FATAL", "phase": phase,
+                           "error_type": type(exc).__name__, "error": str(exc)[:16384],
+                           "traceback": traceback.format_exc()[-16384:]},
+                "seconds": time.monotonic() - started}
+
+
+def _rollback_grpo(model, objective, optimizer, buffers, on_abort, memory):
+    """No optimizer update has run. Return cleanup status for the control group."""
+    import gc
+    try:
+        optimizer.zero_grad(set_to_none=True)
+        if hasattr(objective, "close_group"): objective.close_group()
+        if hasattr(objective, "reset"): objective.reset()
+        if on_abort: on_abort()
+        if buffers is not None:
+            modules = dict(model.named_modules())
+            with torch.no_grad():
+                for name, value in buffers.items():
+                    owner, _, leaf = name.rpartition(".")
+                    module = modules[owner]
+                    current = module._buffers[leaf]
+                    if current.shape != value.shape:
+                        module._buffers[leaf] = value.to(current.device).clone()
+                    else:
+                        current.copy_(value)
+        gc.collect()
+        device = next(model.parameters()).device
         if device.type == "cuda":
-            torch.cuda.synchronize(); free, total = torch.cuda.mem_get_info()
-            metrics.update(peak_allocated_bytes=torch.cuda.max_memory_allocated(),
-                           peak_reserved_bytes=torch.cuda.max_memory_reserved(), free_bytes=free, total_bytes=total)
-        if on_update:
-            on_update(dict(state), metrics)
+            # A poisoned context or an asynchronous error must become FATAL.
+            torch.cuda.synchronize(device)
+            torch.cuda.empty_cache()
+        if memory and memory.offloader and memory.offloader.live_bytes:
+            raise RuntimeError("Pinned checkpoint activations survived whole-step cleanup")
+        return {"state": "OK"}
+    except BaseException as exc:
+        return {"state": "FATAL", "error": f"Cleanup failed: {type(exc).__name__}: {exc}"}
+
+
+def train_grpo(model, groups, objective_callback, optimizer, scheduler, *,
+               group_batch_size=4, max_epochs=1, grad_clip=1.0, state=None,
+               max_updates=None, on_update=None, on_gradients=None, on_window_start=None,
+               on_stage=None, parallel=None, memory_controller=None, on_attempt_abort=None):
+    """Whole-group local attempts, Gloo acknowledgement, then one committed update."""
+    if max_epochs != 1: raise ValueError("offline GRPO supports exactly one epoch")
+    from RL.grpo.groups import iter_group_batches
+    def stage(name, **fields):
+        if on_stage:
+            try: on_stage(name, **fields)
+            except Exception as exc:
+                import warnings
+                warnings.warn("RL stage callback failed: " + str(exc))
+    execution_plan = getattr(groups, "execution_plan", None)
+    state = dict(state or {"global_step": 0, "group_cursor": 0,
+                           "consumed_groups": 0, "consumed_branches": 0, "consumed_tokens": 0})
+    if execution_plan and state["global_step"] == 0 and "cursor_schema" not in state:
+        state.update(groups.cursor(0))
+    def consumed():
+        return state["consumed_execution_chunks"] if execution_plan else state["group_cursor"]
+    if state["group_cursor"] != state["consumed_groups"] or state["group_cursor"] < 0:
+        raise ValueError("Invalid GRPO resume group cursor")
+    parameters = [p for group in optimizer.param_groups for p in group["params"]]
+    expected = {id(p) for p in model.parameters() if p.requires_grad}
+    if not expected or len(parameters) != len(expected) or {id(p) for p in parameters} != expected:
+        raise ValueError("Optimizer must contain each trainable adapter parameter exactly once")
+    prepared = hasattr(groups, "validate_state") and hasattr(groups, "windows")
+    all_groups = groups if prepared else list(groups)
+    expected_step = (state["group_cursor"] + group_batch_size - 1) // group_batch_size
+    if not prepared and (state["global_step"] != expected_step or
+            (state["group_cursor"] != len(all_groups) and state["group_cursor"] % group_batch_size)):
+        raise ValueError("Resume cursor is not an optimizer update boundary")
+    if consumed() > len(all_groups): raise ValueError("Resume cursor is beyond the frozen dataset")
+    if prepared: all_groups.validate_state(state)
+    else:
+        skipped = all_groups[:state["group_cursor"]]
+        if state["consumed_branches"] != sum(g.group_size for g in skipped): raise ValueError("Resume branch cursor mismatch")
+        if state["consumed_tokens"] != sum(int(g.loss_mask.sum()) for g in skipped): raise ValueError("Resume token cursor mismatch")
+    device = next(model.parameters()).device
+    memory = memory_controller
+    model.train(); optimizer.zero_grad(set_to_none=True)
+    windows = iter(all_groups.windows(consumed()) if prepared else
+                   iter_group_batches(all_groups[state["group_cursor"]:], group_batch_size))
+    try:
+        while max_updates is None or state["global_step"] < max_updates:
+            # The yielded CPU window/reference stays alive across both attempts.
+            step_started = time.monotonic()
+            window = next(windows, None)
+            if window is None: break
+            queue_wait_seconds = time.monotonic() - step_started
+            step = state["global_step"] + 1
+            stage("window", inflight_update=step,
+                  window_end_group_ordinal=None if execution_plan else state["group_cursor"] + len(window),
+                  execution_window_cursor=state.get("execution_window_cursor"),
+                  window_end_execution_chunk=consumed() + len(window) if execution_plan else None,
+                  completed_groups_in_update=0, group_id=None, branch_ordinal=None)
+            decision = (memory.decide(window, global_step=state["global_step"],
+                        group_cursor=consumed(), parallel=parallel) if memory else {"mode": "none"})
+            retry_limit = memory.max_retries if memory and decision["mode"] == "none" else 0
+            step_rng = capture_rng() if retry_limit else None
+            # Qwen's explicit cache facade is per-forward, not a model buffer.
+            # Snapshot registered rotary/other mutable buffers without copying weights.
+            buffers = {name: value.detach().clone() for name, value in model.named_buffers()} if retry_limit else None
+            failed_seconds = 0.
+            for attempt in range(retry_limit + 1):
+                if attempt: memory.retry(window, global_step=state["global_step"], attempt_id=attempt)
+                local = _grpo_local_attempt(model, window, objective_callback, parameters,
+                    cursor=consumed(), parallel=parallel, stage=stage, memory=memory,
+                    attempt=attempt, step=state["global_step"], on_start=on_window_start,
+                    rng=step_rng if attempt else None, execution_plan=execution_plan)
+                if memory: memory.pause()
+                status = {**local["status"], "rank": parallel.rank if parallel else 0}
+                statuses = parallel.control_step(step, attempt, "compute_result", status) if parallel else [status]
+                if memory: memory.result(statuses)
+                errors = [peer for peer in statuses if peer["state"] != "OK"]
+                if not errors: break
+                failed_seconds += local["seconds"]
+                # Discard successful local rows as well when another rank failed.
+                del local
+                if memory: memory.cleanup(before=True, statuses=statuses)
+                cleanup = _rollback_grpo(model, objective_callback, optimizer, buffers,
+                                         on_attempt_abort, memory)
+                cleanups = parallel.control_step(step, attempt, "cleanup", cleanup) if parallel else [cleanup]
+                if memory: memory.cleanup(before=False, statuses=cleanups)
+                fatals = [peer for peer in statuses + cleanups if peer["state"] == "FATAL"]
+                if not fatals and attempt < retry_limit: continue
+                detail = fatals[0] if fatals else errors[0]
+                if memory:
+                    memory.logger.write(event="retry_failed" if attempt else "step_failed", phase=detail.get("phase"),
+                        **memory.context, rank_results=statuses, cleanup_results=cleanups, reason=detail.get("error"))
+                exception_type = ValueError if detail.get("error_type") == "ValueError" else RuntimeError
+                raise exception_type("GRPO step failed: " + str(detail))
+            # All peers acknowledged OK. Nothing below this boundary is retried,
+            # including gradient synchronization, clipping, optimizer and scheduler.
+            learning_rate = optimizer.param_groups[0]["lr"]
+            rows, loss_value, prefixes = [row for _, row in local["rows"]], local["loss"], local["prefixes"]
+            parallel_metrics = None
+            if parallel:
+                stage("gradient_sync")
+                if memory:
+                    memory.phase("gradient_sync", group_id=None, group_ordinal=None, window_ordinal=None, branch_ordinal=None)
+                    parallel.attempt_peak_allocated_bytes = memory.peaks["peak_allocated_bytes"]
+                    parallel.attempt_peak_reserved_bytes = memory.peaks["peak_reserved_bytes"]
+                parallel.local_phase_seconds = {"forward_seconds": local["forward_seconds"],
+                    "backward_seconds": local["backward_seconds"], "queue_wait_seconds": queue_wait_seconds,
+                    **getattr(all_groups, "window_io", {})}
+                rows, loss_value, prefixes, parallel_metrics = parallel.finish_window(
+                    model, parameters, window, local["rows"], loss_value, prefixes, local["seconds"])
+                stage("gradient_sync_complete", completed_groups_in_update=len(window))
+            for parameter in parameters:
+                if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
+                    raise ValueError("Nonfinite GRPO gradient; optimizer update rejected")
+            if on_gradients: on_gradients()
+            norm = torch.nn.utils.clip_grad_norm_(parameters, grad_clip, error_if_nonfinite=True)
+            if not torch.isfinite(norm): raise ValueError("Nonfinite GRPO gradient norm")
+            stage("optimizer_update")
+            if memory: memory.phase("optimizer_update", group_id=None, group_ordinal=None, window_ordinal=None, branch_ordinal=None)
+            optimizer.step(); scheduler.step(); optimizer.zero_grad(set_to_none=True)
+            if parallel: parallel.after_step(model)
+            next_count = consumed() + len(window)
+            state["global_step"] += 1
+            if not execution_plan:
+                state["group_cursor"] += len(window)
+                state["consumed_groups"] += len(window)
+            branches = sum(group.group_size for group in window)
+            tokens = sum(int(group.loss_mask.sum()) for group in window)
+            state["consumed_branches"] += branches; state["consumed_tokens"] += tokens
+            if prepared: state.update(all_groups.cursor(next_count))
+            if hasattr(all_groups, "commit_window"): all_groups.commit_window(window)
+            from RL.grpo.metrics import summarize_update
+            metrics = {**summarize_update(rows), **state, "loss": loss_value,
+                "group_count": len(window), "branch_count": branches, "token_count": tokens,
+                "gradient_norm": float(norm), "learning_rate": learning_rate,
+                "next_learning_rate": optimizer.param_groups[0]["lr"],
+                "seconds": time.monotonic() - step_started, "queue_wait_seconds": queue_wait_seconds,
+                "forward_seconds": local["forward_seconds"],
+                "backward_seconds": local["backward_seconds"], "failed_attempt_seconds": failed_seconds,
+                "successful_attempt_seconds": local["seconds"], "step_attempt": attempt}
+            if device.type == "cuda":
+                torch.cuda.synchronize(device); free, total = torch.cuda.mem_get_info(device)
+                metrics.update(peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
+                               peak_reserved_bytes=torch.cuda.max_memory_reserved(device), free_bytes=free, total_bytes=total)
+            if memory:
+                memory.committed(global_step=state["global_step"], window=window, attempt_id=attempt)
+                metrics.update(memory.peaks)
+                metrics["offload_decision"] = memory.last_decision
+            if execution_plan:
+                metrics.update(parent_group_count=len(window), execution_chunk_count=len(window),
+                    parent_branch_count=32, completed_parent_groups_in_update=(
+                        len(window) if window[0].metadata["execution_chunk"]["half_index"] == 1 else 0),
+                    branch_loss_weight=1 / (16 * len(window)), metrics_schema_version=3)
+                metrics.update(getattr(all_groups, "window_io", {}))
+            if prefixes: metrics["prefix_reuse"] = prefixes
+            if parallel_metrics: metrics["parallel"] = parallel_metrics
+            if on_update: on_update(dict(state), metrics)
+    except BaseException as exc:
+        stage("exception")
+        if memory:
+            memory.logger.write(event="terminal_failure", phase=memory.phase_name,
+                **memory.context, error=f"{type(exc).__name__}: {exc}"[:16384],
+                **memory.logger.memory(), offload=memory.last_decision)
+        optimizer.zero_grad(set_to_none=True)
+        if hasattr(objective_callback, "drain_prefix_metrics"): objective_callback.drain_prefix_metrics()
+        if hasattr(objective_callback, "close_group"): objective_callback.close_group()
+        raise
+    finally:
+        if hasattr(windows, "close"): windows.close()
     return state

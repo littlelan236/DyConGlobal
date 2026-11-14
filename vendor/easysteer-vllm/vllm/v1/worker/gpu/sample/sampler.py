@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import numpy as np
 import torch
 
@@ -45,6 +47,10 @@ class Sampler:
         return_sampling_mask: bool = False,
     ):
         self.logprobs_mode = logprobs_mode
+        self.dycon_raw_t1 = None
+        if os.environ.get("DYCON_RAW_T1_ENABLED") == "1":
+            from vllm.v1.worker.gpu.sample.raw_t1 import RawT1Observer
+            self.dycon_raw_t1 = RawT1Observer(max_num_reqs)
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
         self.use_fp64_gumbel = use_fp64_gumbel
 
@@ -68,6 +74,10 @@ class Sampler:
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
     ) -> None:
+        if self.dycon_raw_t1 is not None:
+            self.dycon_raw_t1.add_request(req_idx, sampling_params)
+        elif (sampling_params.extra_args or {}).get("dycon_raw_t1_sampled_token_v1"):
+            raise ValueError("DyCon raw T=1 runtime is not enabled")
         self.sampling_states.add_request(req_idx, sampling_params)
         self.penalties_state.add_request(req_idx, sampling_params)
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
@@ -123,6 +133,7 @@ class Sampler:
         self,
         logits: torch.Tensor,
         input_batch: InputBatch,
+        dycon_raw_t1_state=None,
     ) -> SamplerOutput:
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         idx_mapping = input_batch.idx_mapping
@@ -154,7 +165,9 @@ class Sampler:
             # computed logprobs reflect the real distribution of the forced token.
             self.trace_replay_state.apply_trace(sampled, idx_mapping)
 
-        if logprobs_dims is not None:
+        regular_logprobs = (dycon_raw_t1_state is None or
+                            self.dycon_raw_t1.regular_logprobs_requested(self, idx_mapping_np))
+        if logprobs_dims is not None and regular_logprobs:
             num_logprobs, max_per_req_token_ids = logprobs_dims
             if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
                 logits = processed_logits
@@ -172,6 +185,10 @@ class Sampler:
             )
         else:
             logprobs_tensors = None
+
+        if dycon_raw_t1_state is not None:
+            logprobs_tensors = self.dycon_raw_t1.finish(
+                dycon_raw_t1_state, sampled, logprobs_tensors)
 
         # 1 sampled token per request, except chunked-prefill requests
         # (seq_len < prefill_len) which aren't done prefilling and produce no

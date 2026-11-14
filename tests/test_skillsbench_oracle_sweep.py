@@ -153,8 +153,8 @@ def test_oracle_dependency_index_survives_compose_proxy_without_changing_agent(t
 
 
 @pytest.mark.parametrize('text,expected', [
-    ('/verifier/test.sh: line 4: pytest: command not found\n', 'VerifierError'),
-    ('=================== 1 failed, 2 passed in 1.00s ===================\n', 'ValidZero'),
+    ('/verifier/test.sh: line 4: pytest: command not found\n', 'Review'),
+    ('=================== 1 failed, 2 passed in 1.00s ===================\n', 'Review'),
     ('Nothing was executed\n', 'Review'),
 ])
 def test_empty_control_requires_actual_test_execution(tmp_path, text, expected):

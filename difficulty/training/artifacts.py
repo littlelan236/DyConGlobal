@@ -1,3 +1,4 @@
+from difficulty.storage import difficulty_path
 """Shared completion gate for immutable difficulty training attempts."""
 
 from core.io import now, sha256, write_json
@@ -6,7 +7,7 @@ from core.io import now, sha256, write_json
 def finish_attempt(output, attempt, root, before_code, *, parents=()):
     if {name: sha256(root / name) for name in before_code} != before_code:
         raise ValueError('Implementation changed during experiment')
-    dataset = root / 'difficulty/datasets' / attempt['dataset_id']
+    dataset = difficulty_path(root, 'datasets', attempt['dataset_id'])
     if sha256(dataset / 'receipt.json') != attempt['dataset_receipt_sha256']:
         raise ValueError('Dataset changed during experiment')
     split = dataset / 'splits' / attempt['split_id']

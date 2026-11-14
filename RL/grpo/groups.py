@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 import math
 
-from .advantage import compute_advantages
+from .advantage import ADVANTAGE_VERSION, CONSENSUS_ADVANTAGE_VERSION, compute_advantages, validate_retained
 
 
 @dataclass(frozen=True)
@@ -28,10 +28,15 @@ class GroupBatch:
     @classmethod
     def from_dataset_group(cls, value, *, top_k=4, top_k_fraction=None,
                            score_scale_floor=0.1, boundary_tie_sigma=0.05,
-                           pad_token_id=0, as_tensors=True):
+                           advantage_policy=ADVANTAGE_VERSION, pad_token_id=0, as_tensors=True,
+                           collate=True):
         members = value.get("members", [])
         if not members:
             raise ValueError("Cannot construct an empty GRPO group")
+        retained = None
+        if advantage_policy == CONSENSUS_ADVANTAGE_VERSION:
+            retained = [row.get("retained") for row in members]
+            validate_retained(retained, len(members))
         inventory = value.get("group", {})
         if inventory.get("expected_branch_count", len(members)) != len(members):
             raise ValueError("Incomplete GRPO group inventory")
@@ -51,10 +56,12 @@ class GroupBatch:
         if any(not row.get("action") for row in members):
             raise ValueError("missing_action")
         from RL.dataset.loader import collate_group
-        tensors = collate_group({"members": members}, as_tensors=as_tensors, pad_token_id=pad_token_id)
+        tensors = (collate_group({"members": members}, as_tensors=as_tensors, pad_token_id=pad_token_id)
+                   if collate else dict.fromkeys(("input_ids", "attention_mask", "labels", "loss_mask")))
         adv = compute_advantages(scores, top_k=top_k, top_k_fraction=top_k_fraction,
                                  score_scale_floor=score_scale_floor,
-                                 boundary_tie_sigma=boundary_tie_sigma)
+                                 boundary_tie_sigma=boundary_tie_sigma,
+                                 advantage_policy=advantage_policy, retained=retained)
         if adv.metadata["status"] != "ok":
             raise ValueError(adv.metadata["skip_reason"])
         return cls(value.get("group", {}).get("group_id", members[0].get("group_id", "")),

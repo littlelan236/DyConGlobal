@@ -1,19 +1,40 @@
 """Resolve shared dataset IDs or explicit legacy dataset paths, without fallback."""
 from pathlib import Path
 
-from core.io import artifact_dir, owned_path
+from core.io import artifact_roots, identifier, owned_path
 
 
 def dataset_directory(cfg, reference):
+    """Resolve datasets only within the explicit difficulty_dataset root or legacy project."""
     reference = str(reference)
-    if "/" not in reference and "\\" not in reference:
-        return artifact_dir(cfg, "difficulty", reference, "datasets")
-    path = owned_path(cfg["project_root"], reference)
-    relative = path.relative_to(Path(cfg["project_root"]).resolve()).parts
-    shared = len(relative) == 3 and relative[:2] == ("difficulty", "datasets")
-    legacy = len(relative) == 5 and relative[0] == "runs" and relative[2:4] == ("difficulty", "datasets")
-    if not shared and not legacy:
-        raise ValueError("Dataset reference must name a shared dataset or an explicit legacy dataset directory")
+    project = Path(cfg['project_root']).resolve()
+    from difficulty.storage import active_root
+    scoped = active_root(project)
+    preferred = cfg.get('paths', {}).get('artifact_roots', {}).get('difficulty_dataset') or scoped
+    roots = [project]
+    if preferred:
+        physical = Path(preferred).resolve() if scoped and preferred == scoped else artifact_roots(cfg, 'difficulty_dataset')[0]
+        roots = list(dict.fromkeys([physical, project]))
+    if '/' not in reference and '\\' not in reference:
+        name = identifier(reference)
+        candidates = [owned_path(root, f'difficulty/datasets/{name}') for root in roots]
+        matches = list(dict.fromkeys(path for path in candidates if path.exists()))
+        if len(matches) > 1:
+            raise ValueError('Ambiguous dataset ID across configured roots: ' + name)
+        return matches[0] if matches else candidates[0]
+    raw = Path(reference)
+    absolute = raw.resolve() if raw.is_absolute() else (project/raw).resolve()
+    for root in roots:
+        if absolute.is_relative_to(root):
+            rel = absolute.relative_to(root).parts
+            if len(rel) == 3 and rel[:2] == ('difficulty', 'datasets'):
+                identifier(rel[2])
+                return owned_path(root, absolute)
+    path = owned_path(project, reference)
+    relative = path.relative_to(project).parts
+    legacy = len(relative) == 5 and relative[0] == 'runs' and relative[2:4] == ('difficulty', 'datasets')
+    if not legacy:
+        raise ValueError('Dataset reference must name a configured dataset or explicit legacy dataset directory')
     return path
 
 

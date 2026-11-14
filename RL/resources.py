@@ -28,18 +28,20 @@ def memory_plan(config):
     length = config.validation.max_sequence_length
     settings = config.training.memory
     logits_tokens = min(length, settings.loss_chunk_tokens) if settings.loss_chunk_tokens else length
-    boundary = length * text["hidden_size"] * 2 * (text["num_hidden_layers"] + 2)
-    world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
+    element_bytes = 4 if config.model.dtype == "float32" else 2
+    boundary = length * text["hidden_size"] * element_bytes * (text["num_hidden_layers"] + 2)
+    world_size = len(getattr(config.runtime, "gpus", None) or [config.runtime.gpu])
     budget = int(settings.host_budget_gib * 2**30)
     required = int(boundary * 1.5)  # Concurrent graphs are bounded to one microbatch per rank.
     host = host_memory()
-    if settings.activation_offload != "none":
+    if config.preflight.check_resources and (settings.activation_offload != "none" or settings.oom_retry.enabled):
         if required > budget:
             raise ValueError(f"Offload activation estimate {required} exceeds per-rank host budget {budget}")
         available = host.get("MemAvailable")
         if available is None or available < budget * world_size + max(8 * 2**30, available // 10):
             raise ValueError("Insufficient available host RAM for all local ranks' offload budgets and reserve")
     return {"strategy": settings.model_dump(), "checkpoint_policy": config.training.checkpoint_policy,
+            "model_dtype": config.model.dtype, "activation_element_bytes": element_bytes,
             "first_order_custom_autograd": bool(settings.loss_chunk_tokens or settings.mlp_chunk_tokens),
             "temporary_fp32_logits_bytes": logits_tokens * text["vocab_size"] * 4,
             "full_sequence_fp32_logits_bytes": length * text["vocab_size"] * 4,

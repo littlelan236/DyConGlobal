@@ -54,3 +54,26 @@ def test_tied_positive_scores_equal_and_fraction_rounds_up():
 def test_illegal_k_rejected(k):
     with pytest.raises(ValueError):
         compute_advantages([0.,1.,2.], top_k=k)
+
+
+@pytest.mark.parametrize("scores", [[0., 1., 1., 2.], [0., 1., 1.001, 2.]])
+def test_zero_tie_tolerance_disables_boundary_exclusion(scores):
+    assert compute_advantages(scores, top_k=2).metadata["status"] == "skipped"
+    result = compute_advantages(scores, top_k=2, boundary_tie_sigma=0.)
+    assert result.metadata["status"] == "ok"
+    assert result.order == [0, 1, 2, 3]
+    assert result.advantages[0] > result.advantages[1] > 0
+    assert result.advantages[2:] == [-1., -1.]
+    assert sum(result.advantages) == pytest.approx(0., abs=1e-12)
+
+
+@pytest.mark.parametrize("scores,reason", [
+    ([1., 1., 1., 1.], "all_scores_equal"),
+    ([0., None, 1., 2.], "missing_or_nonfinite_score"),
+    ([0., float("nan"), 1., 2.], "missing_or_nonfinite_score"),
+])
+def test_zero_tie_tolerance_keeps_uninformative_score_exclusions(scores, reason):
+    result = compute_advantages(scores, top_k=2, boundary_tie_sigma=0.)
+    assert result.metadata["status"] == "skipped"
+    assert result.metadata["skip_reason"] == reason
+    assert result.advantages == []

@@ -137,3 +137,64 @@ The capacity ladder stops before moving higher if measured reserved-memory margi
 is below 15 GiB. 64K/128K exploration is opt-in via `DYCON_LORA_EXTENDED_CAPACITY=1`;
 262144 is not part of automatic acceptance. See the validation report for measured
 lengths, memory and throughput. Synthetic results do not measure business quality.
+
+## Adaptive activation offload
+
+`training.memory.activation_offload: auto` enables boundary offload only when a
+window reaches the configured prompt or sequence threshold. `oom_retry` permits
+one same-window retry after a local CUDA allocation failure. The policy never
+moves model weights or changes attention semantics; host budget exhaustion is a
+failure rather than a silent fallback.
+
+## OOM recovery configuration (2026-11-14)
+
+Implementation and CPU regressions pass; the v11 fresh configuration validates
+through the formal CLI. GPU acceptance is deferred until GPU0/1 are free, keeping
+existing workloads. Actual allocator effects, pinned transfers, memory savings,
+the original step-64 workload and natural CUDA OOM recovery remain unverified.
+See [OOM validation and evidence](OOM_RECOVERY_VALIDATION.md).
+
+The production training interface remains `dycon lora-train --training-config YAML`.
+The following fields are strictly validated and included in resolved configuration:
+
+```yaml
+runtime:
+  cuda_allocator:
+    expandable_segments: true
+training:
+  memory:
+    activation_offload: auto  # none / checkpoint_boundary / auto
+    host_budget_gib: 64.0     # per rank
+    auto_offload:
+      prompt_tokens_threshold: 49152
+      sequence_tokens_threshold: 49152
+      device_headroom_gib: 8.0
+    oom_retry:
+      enabled: true
+      max_retries: 1
+    memory_telemetry:
+      enabled: true
+      granularity: phase     # phase or step
+```
+
+The two thresholds are conservative candidates, not validated capacity limits.
+Headroom is recorded for analysis; no capacity formula or free-memory-only predictor
+is claimed. `auto` uses the current yielded window and ORs local risk across Gloo
+ranks before any forward. An OOM retry enables boundary offload globally for that
+attempt only. The next step reevaluates its initial policy.
+
+The native CUDA allocator receives merged `PYTORCH_ALLOC_CONF` settings before
+CUDA initialization in both the parent and spawned workers. The legacy alias is
+merged with conflict detection. Other settings, including bracketed size classes,
+are retained. `expandable_segments` with a non-native backend is rejected. Logs
+separate requested options, actual backend, and support that still needs device
+validation. PyTorch allocator warnings remain in the training stderr log.
+
+Retry is available only for offline GRPO and layer/layer-group checkpointing;
+shared-prefix execution continues to require the pinned layer schedule. The
+shared-prefix `segment` path explicitly receives the same `BoundaryOffload`
+instance as the ordinary decoder path. Local custom-autograd recomputation keeps
+its existing `local_saved_tensors` isolation. Host budget exhaustion is FATAL.
+Offload moves checkpoint input activations; prefix state, weights, optimizer state,
+and attention semantics are unchanged. Offload cannot eliminate every temporary
+projection allocation.

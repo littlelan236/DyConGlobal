@@ -4,6 +4,27 @@ from __future__ import annotations
 import math
 from core.io import hash_json
 
+RAW_SEMANTICS = "raw_t1_output_tokens_v1"
+RAW_ORIGIN = "offline_native_trace_scoring"
+
+
+def raw_contract():
+    """Independent of editable root and historical generation transforms."""
+    return {"semantics": RAW_SEMANTICS, "temperature": 1.0, "top_p": 1.0, "top_k": -1,
+            "min_p": 0.0, "presence_penalty": 0.0, "frequency_penalty": 0.0,
+            "repetition_penalty": 1.0, "min_tokens": 0, "ignore_eos": True,
+            "stop_token_ids": [], "stop": [], "logit_bias": None, "allowed_token_ids": None,
+            "structured_outputs": None, "seed": 0,
+            "normalization": "full_vocabulary_float32", "targets": "exact_native_completion"}
+
+
+def raw_policy():
+    contract = raw_contract()
+    parameters = {k: v for k, v in contract.items() if k not in ("semantics", "normalization", "targets")}
+    return {"parameters": parameters, "policy_sha256": hash_json(parameters),
+            "raw_contract_sha256": hash_json(contract), "status": "replay_estimate"}
+
+
 ROOT_KEYS = ("temperature", "top_p", "top_k")
 DEFAULTS = {"min_p": 0.0, "presence_penalty": 0.0, "frequency_penalty": 0.0,
             "repetition_penalty": 1.0, "min_tokens": 0, "ignore_eos": False,
@@ -65,7 +86,7 @@ def validate_values(values, count, *, allow_zero_support=True, tolerance=1e-6):
     for index, value in enumerate(values):
         value = float(value)
         if math.isnan(value) or value == math.inf or value > tolerance:
-            raise ValueError(f"Invalid processed logprob at position {index}")
+            raise ValueError(f"Invalid target logprob at position {index}")
         if value == -math.inf and not allow_zero_support:
             raise ValueError(f"Zero-support token at position {index}")
     return [float(v) for v in values]
@@ -87,7 +108,7 @@ def target_logprobs(request_output, completion):
     if list(output.token_ids) != completion:
         raise ValueError("Trace replay output token IDs differ from native completion")
     if output.logprobs is None or len(output.logprobs) != len(completion):
-        raise ValueError("Trace replay missing per-token processed logprobs")
+        raise ValueError("Trace replay missing per-token target logprobs")
     values = []
     for token, entries in zip(completion, output.logprobs):
         if entries is None or token not in entries:

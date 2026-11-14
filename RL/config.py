@@ -19,13 +19,16 @@ class Strict(BaseModel):
 
 
 class Start(Strict):
-    mode: Literal["fresh", "resume", "warm_start"]
+    mode: Literal["fresh", "resume", "warm_start", "append_resume"]
     checkpoint: str | None
+    extension_manifest: str | None = None
 
     @model_validator(mode="after")
     def check_start(self):
         if (self.mode == "fresh") != (self.checkpoint is None):
             raise ValueError("fresh requires null checkpoint; resume/warm_start require a concrete directory")
+        if (self.mode == "append_resume") != (self.extension_manifest is not None):
+            raise ValueError("append_resume requires an explicit extension_manifest; other modes forbid it")
         return self
 
 
@@ -43,7 +46,7 @@ class Run(Strict):
 
 class Model(Strict):
     path: str
-    dtype: Literal["bfloat16"]
+    dtype: Literal["bfloat16", "float32"]
     attention_backend: Literal["sdpa"]
     gradient_checkpointing: Literal[True]
 
@@ -56,8 +59,30 @@ class Lora(Strict):
 
 
 class Runtime(Strict):
-    gpu: NonnegativeInt
+    gpu: NonnegativeInt | Annotated[str, Field(pattern=r"^MIG-[0-9a-fA-F-]{36}$")] | None = None
+    gpus: list[NonnegativeInt] | None = None
+    distributed_timeout_seconds: Annotated[int, Field(ge=30, le=86400)] = 3600
+    data_preparation_async: bool = False
+    bf16_allow_reduced_precision_reduction: bool = False
+    bf16_allow_split_k: bool = True
+    cuda_allocator: "CudaAllocator" = Field(default_factory=lambda: CudaAllocator())
     output_root: str
+
+    @model_validator(mode="after")
+    def check_devices(self):
+        if self.bf16_allow_reduced_precision_reduction and not self.bf16_allow_split_k:
+            raise ValueError("BF16 reduced-precision reduction requires bf16_allow_split_k=true")
+        if (self.gpu is None) == (self.gpus is None):
+            raise ValueError("Specify exactly one of runtime.gpu or runtime.gpus")
+        if self.gpus is not None and (len(self.gpus) not in {1, 2, 4, 8} or len(set(self.gpus)) != len(self.gpus)):
+            raise ValueError("runtime.gpus requires 1, 2, 4 or 8 distinct physical GPU indexes")
+        return self
+
+
+class CudaAllocator(Strict):
+    """Allocator options applied before the first CUDA context is created."""
+    expandable_segments: bool = True
+    backend: Literal["native", "cudaMallocAsync"] | None = None
 
 
 class Memory(Strict):
@@ -65,9 +90,12 @@ class Memory(Strict):
     mlp_chunk_tokens: NonnegativeInt = 0
     exact_length: bool = False
     attention_policy: Literal["auto", "flash_only"] = "auto"
-    activation_offload: Literal["none", "checkpoint_boundary"] = "none"
+    activation_offload: Literal["none", "checkpoint_boundary", "auto"] = "none"
     host_budget_gib: PositiveFloat = 64.0
     profile_first_update: bool = False
+    auto_offload: "AutoOffload" = Field(default_factory=lambda: AutoOffload())
+    oom_retry: "OOMRetry" = Field(default_factory=lambda: OOMRetry())
+    memory_telemetry: "MemoryTelemetry" = Field(default_factory=lambda: MemoryTelemetry())
 
 
 class Supervision(Strict):
@@ -79,6 +107,22 @@ class Supervision(Strict):
         if (self.mode == "uniform") != (self.max_targets_per_sample is not None):
             raise ValueError("Only uniform supervision requires max_targets_per_sample; other modes require null")
         return self
+
+
+class AutoOffload(Strict):
+    prompt_tokens_threshold: NonnegativeInt = 49152
+    sequence_tokens_threshold: NonnegativeInt = 49152
+    device_headroom_gib: PositiveFloat = 8.0
+
+
+class OOMRetry(Strict):
+    enabled: bool = False
+    max_retries: Annotated[int, Field(ge=0, le=1)] = 1
+
+
+class MemoryTelemetry(Strict):
+    enabled: bool = True
+    granularity: Literal["step", "phase"] = "phase"
 
 
 class Training(Strict):
@@ -115,23 +159,105 @@ class Algorithm(Strict):
         return self
 
 
+class ProbabilityArtifact(Strict):
+    scope: Literal["rl-replay", "rl-probability"]
+    root: str
+    id: str
+
+    @model_validator(mode="after")
+    def check_identity(self):
+        identifier(self.id)
+        path = Path(self.root)
+        if not path.is_absolute() or ".." in path.parts or path == Path(path.anchor):
+            raise ValueError("Probability artifact root must be an explicit absolute directory")
+        return self
+
+
+class ModelForwardCache(Strict):
+    source: Literal["model_forward"] = "model_forward"
+
+
+class ArtifactReferenceCache(Strict):
+    source: Literal["probability_artifact"]
+    artifact: ProbabilityArtifact
+    dtype_compatibility: Literal["same_dtype", "fp16_source_bf16_training"]
+    initial_diagnostic_branches: NonnegativeInt = 0
+
+
+class DatasetReferenceCache(Strict):
+    source: Literal["dataset_probability"]
+    stream: Annotated[str, Field(min_length=1)]
+    dtype_compatibility: Literal["same_dtype", "fp16_source_bf16_training"]
+    initial_diagnostic_branches: NonnegativeInt = 0
+
+
+ReferenceCache = Annotated[ModelForwardCache | ArtifactReferenceCache | DatasetReferenceCache,
+                           Field(discriminator="source")]
+
+
+class PrefixReuse(Strict):
+    mode: Literal["disabled", "boundary_grad"] = "disabled"
+
+
+class RatioGuard(Strict):
+    enabled: bool = False
+    threshold: Annotated[float, Field(gt=0, lt=1, allow_inf_nan=False)] = 1e-3
+
+
 class Grpo(Strict):
+    ratio_guard: RatioGuard = Field(default_factory=RatioGuard)
+    prefix_reuse: PrefixReuse = Field(default_factory=PrefixReuse)
+    advantage_policy: Literal["historical_topk_zero_sum_v1", "consensus_top_half_zero_sum_v1"] = "historical_topk_zero_sum_v1"
     group_batch_size: PositiveInt = 4
+    parallel_branch_chunk_size: Literal[16] | None = None
+    parallel_branch_schedule: Literal["distinct_parent_two_pass_v1"] | None = None
+    branch_partition_seed: Annotated[int, Field(ge=0, lt=2**32)] = 42
     max_epochs: Literal[1] = 1
     shuffle_seed: Annotated[int, Field(ge=0, lt=2**32)] = 42
+    shuffle_algorithm: Literal["stable_random_v1", "prefix_length_pool128_v1"] = "prefix_length_pool128_v1"
     top_k: PositiveInt | None = 4
     top_k_fraction: Annotated[float, Field(gt=0, lt=1, allow_inf_nan=False)] | None = None
     score_scale_floor: PositiveFloat = 0.1
     boundary_tie_sigma: NonnegativeFloat = 0.05
     clip_epsilon: Literal[0.1] = 0.1
-    kl_beta: Literal[0.02] = 0.02
+    kl_beta: NonnegativeFloat = 0.02
     reference: Literal["initial_policy"] = "initial_policy"
     probability_mode: Literal["raw_t1"] = "raw_t1"
+    reference_cache: ReferenceCache = Field(default_factory=ModelForwardCache)
 
     @model_validator(mode="after")
     def check_top_k(self):
+        if self.shuffle_algorithm == "prefix_length_pool128_v1" and self.group_batch_size > 128:
+            raise ValueError("prefix_length_pool128_v1 requires group_batch_size <=128")
         if (self.top_k is None) == (self.top_k_fraction is None):
             raise ValueError("Exactly one of grpo.top_k and grpo.top_k_fraction is required")
+        if self.advantage_policy == "consensus_top_half_zero_sum_v1" and (
+                self.top_k is not None or self.top_k_fraction != 0.5 or self.boundary_tie_sigma != 0):
+            raise ValueError("Consensus top-half requires top_k=null, top_k_fraction=0.5 and boundary_tie_sigma=0")
+        return self
+
+
+class Preflight(Strict):
+    verify_identity: bool = False
+    audit_native_tokens: bool = False
+    validate_dataset: bool = False
+    verify_probabilities: bool = False
+    verify_trajectory_integrity: bool = False
+    verify_checkpoint: bool = False
+    check_resources: bool = False
+    verify_model_state: bool = False
+    run_diagnostics: bool = False
+
+
+class PreparedBinding(Strict):
+    id: str
+    root: str
+    manifest_sha256: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+    receipt_sha256: Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+
+    @model_validator(mode="after")
+    def check_id(self):
+        identifier(self.id)
         return self
 
 
@@ -145,13 +271,25 @@ class Config(Strict):
     validation: Validation
     algorithm: Algorithm | None = None
     grpo: Grpo | None = None
+    preflight: Preflight = Field(default_factory=Preflight)
+    prepared_data: PreparedBinding | None = None
 
     @model_validator(mode="after")
     def check_stop(self):
+        if self.runtime.gpus and len(self.runtime.gpus) > 1 and self.algorithm is None:
+            raise ValueError("Multi-GPU training currently requires offline GRPO")
+        if self.run.start.mode == "append_resume" and self.algorithm is None:
+            raise ValueError("append_resume requires offline GRPO")
+        if self.prepared_data is not None and self.algorithm is None:
+            raise ValueError("prepared_data requires offline GRPO")
         stop = self.validation.stop_after_update
         if stop is not None and stop >= self.training.max_updates:
             raise ValueError("stop_after_update must precede the complete schedule target")
         memory = self.training.memory
+        if (memory.activation_offload == "auto" or memory.oom_retry.enabled) and self.algorithm is None:
+            raise ValueError("Adaptive offload and OOM retry currently require offline GRPO")
+        if memory.oom_retry.enabled and self.training.checkpoint_policy not in {"layer", "layer_group"}:
+            raise ValueError("OOM retry requires checkpoint boundary offload capability")
         if self.training.supervision.mode != "labels" and not memory.loss_chunk_tokens:
             raise ValueError("Sparse supervision requires loss_chunk_tokens > 0 before vocabulary projection")
         if self.lora.dropout != 0:
@@ -170,6 +308,28 @@ class Config(Strict):
         if self.validation.max_sequence_length > 2048:
             if not (memory.loss_chunk_tokens and memory.exact_length and memory.attention_policy == "flash_only"):
                 raise ValueError("Long sequences require chunked CE, exact-length batches and flash_only attention")
+        if self.model.dtype == "float32":
+            if self.validation.max_sequence_length > 2048 or memory.attention_policy == "flash_only":
+                raise ValueError("FP32 currently supports length <=2048 and attention_policy=auto; Flash requires BF16")
+            if self.grpo and self.grpo.reference_cache.source != "model_forward":
+                raise ValueError("FP32 requires a model_forward anchor; external probability precision is not validated")
+        if self.grpo:
+            split = self.grpo.parallel_branch_chunk_size is not None
+            protocol = self.grpo.parallel_branch_schedule is not None
+            count = len(self.runtime.gpus or [self.runtime.gpu])
+            if split != protocol:
+                raise ValueError("8x16 requires both parallel_branch_chunk_size=16 and distinct_parent_two_pass_v1")
+            if count == 8 and not split:
+                raise ValueError("8 GPUs require the explicit distinct-parent 8x16 execution protocol")
+            if split and (count != 8 or self.runtime.gpus is None
+                          or self.grpo.group_batch_size != 8
+                          or self.grpo.prefix_reuse.mode != "boundary_grad"):
+                raise ValueError("8x16 requires 8 distinct physical GPUs, group_batch_size=8 and boundary_grad")
+            if split and self.run.start.mode == "append_resume":
+                raise ValueError("8x16 supports exact resume; append_resume execution schedules are not supported")
+        if self.grpo and self.grpo.prefix_reuse.mode == "boundary_grad":
+            if self.training.checkpoint_policy != "layer":
+                raise ValueError("boundary_grad requires layer checkpointing")
         return self
 
 
@@ -219,6 +379,10 @@ def load(path, project_root):
         if not checkpoint.is_dir():
             raise ValueError("Start checkpoint/adapter directory does not exist")
         config.run.start.checkpoint = str(checkpoint)
+    if config.run.start.extension_manifest is not None:
+        config.run.start.extension_manifest = str(absolute(project_root, config.run.start.extension_manifest))
+    if config.prepared_data is not None:
+        config.prepared_data.root = str(absolute(project_root, config.prepared_data.root))
     attempt_directory(config)
     return config, source
 
@@ -227,12 +391,38 @@ def schedule_contract(config):
     """Only attempt metadata, device/storage, start and pause controls may differ on resume."""
     contract = {
         "schema_version": config.schema_version,
+        "preflight": config.preflight.model_dump(),
         "seed": config.run.seed,
         "model": config.model.model_dump(exclude={"path"}),
         "lora": config.lora.model_dump(),
-        "training": config.training.model_dump(),
+        "training": {**config.training.model_dump(), "memory": memory_contract(config.training.memory)},
         "validation": config.validation.model_dump(exclude={"stop_after_update"}),
     }
     if config.algorithm:
-        contract.update(algorithm=config.algorithm.model_dump(), grpo=config.grpo.model_dump())
+        contract.update(algorithm=config.algorithm.model_dump(), grpo=config.grpo.model_dump(exclude={"reference_cache"}))
+        if config.grpo.parallel_branch_chunk_size is None:
+            for key in ("parallel_branch_chunk_size", "parallel_branch_schedule", "branch_partition_seed"):
+                contract["grpo"].pop(key, None)
+        # The immutable prepared segment binds the shuffle algorithm and order.
+        # Preserve compatibility with previously sealed schedules.
+        contract["grpo"].pop("shuffle_algorithm", None)
+        if not config.grpo.ratio_guard.enabled:
+            contract["grpo"].pop("ratio_guard")
+        if config.grpo.prefix_reuse.mode == "disabled":
+            contract["grpo"].pop("prefix_reuse")
+        if config.grpo.advantage_policy == "historical_topk_zero_sum_v1":
+            contract["grpo"].pop("advantage_policy")
+        # Preserve the legacy schedule byte-for-byte for the default model-forward path.
+        if config.grpo.reference_cache.source != "model_forward":
+            contract["grpo"]["reference_cache"] = config.grpo.reference_cache.model_dump()
     return contract
+
+
+def memory_contract(memory):
+    """Keep default operational fields compatible with pre-existing checkpoints."""
+    result = memory.model_dump()
+    defaults = Memory()
+    for name in ("auto_offload", "oom_retry", "memory_telemetry"):
+        if getattr(memory, name) == getattr(defaults, name):
+            result.pop(name, None)
+    return result

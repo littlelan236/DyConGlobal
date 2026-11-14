@@ -1,5 +1,26 @@
 # Capture 操作与证据
 
+## Capture spool 用量（只读）
+
+```bash
+# 全项目配额、当前本地文件占用和所在文件系统空间，JSON 输出
+.venvs/runner/bin/dycon capture spool-usage
+# 只看指定 run 的 reservation 和本地文件；仍显示项目总配额占用
+.venvs/runner/bin/dycon capture spool-usage RUN_ID
+# 快速查询：跳过递归文件扫描
+.venvs/runner/bin/dycon capture spool-usage --ledger-only
+# 大目录可延长扫描预算（默认 10 秒）
+.venvs/runner/bin/dycon capture spool-usage --scan-seconds 30
+```
+
+`reserved_bytes` 是共享 disk-budget 账本中 capture 的逻辑占用；不传 run 时为全项目，传 run 时按 reservation key 中的 run 路径筛选。`project_reserved_bytes` 始终是全项目占用，包含尚未落盘的队列和写入临时预留；无法按路径归属到 run 的队列预留计入 `unattributed_reserved_bytes`，不会猜测分摊。image 等非 capture reservation 不计入。查询不初始化、清理或修正账本。
+
+`limit_bytes` 来自 `capture.export.spool_max_bytes`；默认读取当前根配置，指定 run 时读取该 run 冻结快照（`configuration_source` 标明来源）。不同 run 的冻结上限可能不同，这里展示的是所选配置上限，不代表所有 writer 采用相同上限。`remaining_bytes = max(0, limit_bytes - project_reserved_bytes)`，`usage_ratio` 和高/低水位也按项目总占用计算；超限由 `over_limit_bytes` 表示。高水位字段仅表示当前读数，不推断 admission 的滞回等待状态。
+
+`local_usage.bytes` 是本地普通文件长度之和，`allocated_bytes` 是普通文件分配块数之和（不含目录元数据；硬链接按路径计数）。统计包括未受配额追踪的元数据和 raw logprob sidecar，因此不等于逻辑 reservation；raw logprob 独立 quota 的剩余额度不在本接口中。`locations[].filesystem` 是整个所在文件系统的 total/used/free，不能当作 spool 自身占用；物理 free 不再减一次 reservation。
+
+查询会统计当前配置 spool 根和账本中仍有 capture reservation 的历史根；已无 reservation 且根配置也不再引用的旧目录不自动发现。允许跟随迁移后的 spool 根软链接，跳过其内部所有软链接（包括归档 run 的 NAS 链接），不读取 tensor 内容或 hash。`--ledger-only` 时 `local_usage` 为 null。扫描超时、并发删除或权限错误会令 `local_usage.complete=false` 并返回受限错误摘要，此时文件字节数是已扫描部分的下界；活跃写入期间账本和文件扫描也不是同一时刻的原子快照。查询不支持 `--set` 或全局 `--run-id`，run 使用上面的显式位置参数。
+
 ## Parallel 可视化发布
 
 启用持久化 `think_close` capture 且 `parallel.branch_count > 1` 时，run 在
@@ -33,6 +54,14 @@ agent 终点 remainder，缺失处保持 null，不能解释为成功标签。�
 在线 capture 在 rollout 的模型请求链中运行，并绑定冻结 run、sample、attempt、rollout 与 session 身份。Capture finalize 产生标签、coverage、索引和 publication receipt；大张量可以放在 `paths.nas_root` 指向的 NAS。run 目录保留 locator、hash 和 receipt，使下游流程可以验证远端数据。
 
 普通 rollout、capture rollout、steering rollout，以及 steering+capture rollout 均使用统一 `dycon rollout`/run 生命周期。通过受支持的根配置选择开关，并在创建 run 时冻结；不要为 capture 单独启动 worker 或 launcher。
+
+## 在线 Raw T=1 Logprob 采集
+
+新 run 可通过 `capture.logprobs.enabled: true` 在同一次生成前向中旁路采集每个实际 output token 的 FP32 raw T=1 logprob；默认关闭。完整词表归一化发生在 grammar mask 和其他采样变换前，生成 policy 保持原样。要求持久化 capture、managed TP=1 和未启用 steering，沿现有 run/rollout lifecycle 执行。配置默认值、支持范围和测试证据见[在线 raw logprob 指南](ONLINE-RAW-LOGPROBS-CN.md)。
+
+概率保存在独立的 `requests/<request-hash>.raw_t1.f32` sidecar，request ledger 的 `raw_t1_probability` 只保留 locator、hash、长度、语义与来源身份。它使用独立 writer/quota，并复用物理 spool、上传 ACK、session publication 与恢复。`sealed` 是本地封存状态，不能替代 NAS publication；概率失败记录为 `failed`，不填零、不改变 rollout 任务成功状态。`-inf` 保留统计，训练锚点仍要求有限值。
+
+`rl-dataset build` 将在线值封存为中性 `raw_t1_output_tokens` stream；概率校验即使在 native `audit.enabled=false` 时仍执行。缺少/失败的 sidecar 保持 unavailable，group 的 `raw_probability_complete` 与 token 的 `data_ready` 分开。训练通过 `grpo.reference_cache.source: dataset_probability` 显式选择 stream，源 run/dataset 不写入训练角色。完整 managed rollout→NAS 性能 pilot 尚未验收。
 
 ## 检查和恢复
 

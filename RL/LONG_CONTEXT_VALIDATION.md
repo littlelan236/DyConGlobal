@@ -3,6 +3,11 @@
 Recorded 2026-11-10, reconstructed from existing evidence during sparse-interface
 implementation. No new GPU training or capacity test was run for this report.
 
+The separate 2026-11-14 adaptive-offload and whole-step OOM retry implementation
+has CPU validation and a CLI dry-run; its GPU acceptance is deferred until the
+required GPUs are free. The historical measurements below do not validate that
+new path. See [OOM recovery validation](OOM_RECOVERY_VALIDATION.md).
+
 The preserved long-context implementation was an uncommitted working-tree change
 on `feature/lora-long-context`, over HEAD `4f1e2b3`. CPU memory tests recorded
 68 passed; the earlier existing-function regression log records 95 passed.

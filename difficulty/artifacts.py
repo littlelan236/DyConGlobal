@@ -1,3 +1,4 @@
+from difficulty.storage import difficulty_path
 """Inspect and verify shared difficulty artifacts and their receipt graph."""
 import json
 from pathlib import Path
@@ -6,7 +7,7 @@ from core.io import identifier, owned_path, read_json, sha256
 from difficulty.receipts import verify_receipt
 
 
-def _check_models(directory, attempt, receipt):
+def _check_models(directory, attempt, receipt, root=None):
     if attempt["mode"] != "fit":
         return
     import numpy as np
@@ -18,7 +19,7 @@ def _check_models(directory, attempt, receipt):
         raise ValueError('Unknown difficulty checkpoint model kind')
     from difficulty.models.ridge_grid import load_model
     from core.io import hash_json
-    split = read_json(directory.parents[1] / 'datasets' / attempt['dataset_id'] / 'splits' / attempt['split_id'] / 'split.json')
+    split = read_json(difficulty_path(root or directory.parents[2], 'datasets', attempt['dataset_id']) / 'splits' / attempt['split_id'] / 'split.json')
 
     for name in receipt["files"]:
         if not name.endswith('.npz') or not name.startswith('models/'):
@@ -53,13 +54,13 @@ def verify(root, scope, artifact_id, *, dataset_id=None):
     root = Path(root).resolve()
     artifact_id = identifier(artifact_id)
     if scope == "difficulty-dataset":
-        directory = root / "difficulty/datasets" / artifact_id
+        directory = difficulty_path(root, 'datasets', artifact_id)
         receipt, checked = verify_receipt(root, directory)
     elif scope == "difficulty-split":
         if dataset_id is None:
             raise ValueError("difficulty-split verification requires --dataset-id")
         dataset_id = identifier(dataset_id)
-        dataset = root / "difficulty/datasets" / dataset_id
+        dataset = difficulty_path(root, 'datasets', dataset_id)
         _, checked = verify_receipt(root, dataset)
         samples = [json.loads(line) for line in (dataset / 'samples.jsonl').read_text().splitlines() if line]
         from difficulty.training.splits import load_split
@@ -68,14 +69,14 @@ def verify(root, scope, artifact_id, *, dataset_id=None):
         _, split_checked = verify_receipt(root, directory)
         checked += split_checked
     elif scope == "difficulty-attempt":
-        directory = root / "difficulty/checkpoints" / artifact_id
+        directory = difficulty_path(root, 'checkpoints', artifact_id)
         receipt, checked = verify_receipt(root, directory)
         attempt = read_json(directory / "attempt.json")
         if attempt.get("attempt_id") != artifact_id:
             raise ValueError("Training attempt identity mismatch")
         dataset_id = identifier(attempt["dataset_id"])
         split_id = identifier(attempt["split_id"])
-        dataset = root / "difficulty/datasets" / dataset_id
+        dataset = difficulty_path(root, 'datasets', dataset_id)
         _, parent_checked = verify_receipt(root, dataset, expected_sha256=attempt['dataset_receipt_sha256'])
         checked += parent_checked
         split_dir = dataset / "splits" / split_id
@@ -91,10 +92,10 @@ def verify(root, scope, artifact_id, *, dataset_id=None):
                 raise ValueError(f'Attempt/receipt identity differs: {key}')
         if read_json(directory / 'experiment.json') != attempt:
             raise ValueError('Compatibility experiment and attempt disagree')
-        _check_models(directory, attempt, receipt)
+        _check_models(directory, attempt, receipt, root)
     elif scope in {"difficulty-prediction", "difficulty-evaluation"}:
         category = "predictions" if scope == "difficulty-prediction" else "evaluations"
-        directory = root / "difficulty" / category / artifact_id
+        directory = difficulty_path(root, category, artifact_id)
         receipt, checked = verify_receipt(root, directory)
         if scope == 'difficulty-evaluation' and receipt.get('kind') == 'ridge-task-holdout-v1':
             from difficulty.evaluation.holdout_verify import verify_evaluation

@@ -73,7 +73,20 @@ def qualify_profile(root, run_id, profile_id, profile_ref=None):
         if template.get('dependency_snapshot_sha256')!=source.get('dependency_snapshot_sha256'):
             from runtime.agents.dependencies import verify_snapshot
             old=verify_snapshot(source['dependency_snapshot']);new=verify_snapshot(template['dependency_snapshot'])
-            if new.get('condenser_parent_receipt_sha256') == old['receipt_sha256']:
+            if new.get('verifier_resources'):
+                from runtime.agents.verifier_dependencies import verify_derivation, POLICY
+                parent = new['verifier_resources']['parent_path']
+                extension = verify_derivation(parent, template['dependency_snapshot'])
+                parent_manifest = verify_snapshot(parent)
+                chain = []
+                if parent_manifest['receipt_sha256'] != old['receipt_sha256']:
+                    from runtime.agents.condenser import verify_derivation as verify_condenser
+                    chain.append(verify_condenser(source['dependency_snapshot'], parent))
+                if template.get('verifier_resource_policy') != POLICY:
+                    raise ValueError('Verifier resource qualification requires the explicit runtime policy')
+                proof['dependency_compatibility'] = {'policy': POLICY, 'steps': chain + [extension]}
+                excluded.add('verifier_resource_policy')
+            elif new.get('condenser_parent_receipt_sha256') == old['receipt_sha256']:
                 from runtime.agents.condenser import verify_derivation
                 proof['dependency_compatibility'] = verify_derivation(
                     source['dependency_snapshot'], template['dependency_snapshot'])

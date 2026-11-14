@@ -138,11 +138,14 @@ def test_publication_rejects_changed_receipt_on_resume(tmp_path, monkeypatch):
     assert second['failed_stage'] == 'publication'
 
 
-def test_deadline_leaves_retryable_summary(tmp_path, monkeypatch):
+@pytest.mark.parametrize('no_deadline', [False, True])
+def test_deadline_leaves_retryable_summary(tmp_path, monkeypatch, no_deadline):
     import application.execution.capture_publication as service
     cfg, evidence, item, path = setup_finalizer(tmp_path, monkeypatch)
     monkeypatch.setattr(service, 'recover_spool', lambda *a: cfg['capture'].update(publication_seconds=-1))
-    assert finalize_capture_publication(cfg, 'run', items=[item])['status'] == 'pending_recovery'
+    summary = finalize_capture_publication(cfg, 'run', items=[item], no_deadline=no_deadline)
+    assert summary['status'] == ('partial' if no_deadline else 'pending_recovery')
+    assert summary['deadline_disabled'] is no_deadline
 
 
 def test_local_writer_must_exit_before_pointwise_audit(tmp_path, monkeypatch):
@@ -171,7 +174,11 @@ def test_online_index_retries_and_preserves_failed_stage(tmp_path, monkeypatch):
     assert read_json(out / 'index.json')['coverage']['native_hidden_missing'] == 1
 
 
-def test_skillsbench_workspace_subject_is_not_a_patch_submission(tmp_path, monkeypatch):
+@pytest.mark.parametrize('report_style', [
+    'batch', 'single', 'single_wrong_evaluation', 'single_wrong_attempt',
+    'single_wrong_subject', 'single_wrong_status', 'single_wrong_resolved',
+])
+def test_skillsbench_workspace_subject_is_not_a_patch_submission(tmp_path, monkeypatch, report_style):
     cfg, evidence, item, resultpath = setup_finalizer(tmp_path, monkeypatch)
     row = evidence['rollouts']['rollout']
     trajectorypath = tmp_path / row['trajectory_path']
@@ -188,9 +195,29 @@ def test_skillsbench_workspace_subject_is_not_a_patch_submission(tmp_path, monke
     write_json(resultpath, result)
     outcome = {'status': 'completed', 'resolved': True, 'subject_sha256': sha256(subjectpath)}
     reportpath = tmp_path / 'runs/run/report.json'
-    write_json(reportpath, {'outcomes': {'rollout': outcome}})
+    if report_style == 'batch':
+        report = {'outcomes': {'rollout': outcome}}
+    else:
+        report = {'schema_version': 1, 'evaluation_id': 'eval', 'attempt_id': row['attempt_id'],
+                  'subject_sha256': row['subject_sha256'], 'evaluation_status': 'completed',
+                  'resolved': True, 'raw_rewards': {'reward': 1.0}}
+        changes = {
+            'single_wrong_evaluation': ('evaluation_id', 'other-evaluation'),
+            'single_wrong_attempt': ('attempt_id', 'other-attempt'),
+            'single_wrong_subject': ('subject_sha256', 'other-subject'),
+            'single_wrong_status': ('evaluation_status', 'infra_error'),
+            'single_wrong_resolved': ('resolved', False),
+        }
+        if report_style in changes:
+            key, value = changes[report_style]
+            report[key] = value
+    write_json(reportpath, report)
     evidence['evaluations']['eval'].update(report_sha256=sha256(reportpath), outcomes={'rollout': outcome})
     summary = finalize_capture_publication(cfg, 'run', items=[item])
+    if report_style.startswith('single_wrong_'):
+        assert summary['status'] == 'failed' and summary['error_type'] == 'ValueError', summary
+        assert not list((tmp_path / 'runs/run/enrichment/online-publications').glob('*/receipt.json'))
+        return
     assert summary['status'] == 'partial' and summary['published_points'] == 2, summary
 
 

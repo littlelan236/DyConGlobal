@@ -1,6 +1,8 @@
 """Offline acceptance through BenchFlow's normal container and verifier lifecycle."""
+import asyncio
 import json
 import shlex
+from pathlib import Path
 
 from core.io import hash_json, now, sha256, write_json
 from runtime.agents.dependencies import install_runtime, verify_snapshot
@@ -9,7 +11,10 @@ from runtime.agents.verifier_tools import prepare_verifier_tools
 
 async def install_probe(env, client, planes, cfg, output):
     profile = cfg["execution_context"]["profile"]
-    snapshot = verify_snapshot(profile["dependency_snapshot"])
+    snapshot = await asyncio.to_thread(verify_snapshot, profile["dependency_snapshot"])
+    expected = profile.get('dependency_snapshot_sha256')
+    if expected and sha256(Path(profile['dependency_snapshot']) / 'manifest.json') != expected:
+        raise ValueError('OpenHands dependency snapshot differs from frozen execution context')
     containers = client.containers.list(filters={"label": [
         "dycon.run=" + planes.run_id, "dycon.epoch=" + planes.ownership["epoch"]]})
     if len(containers) != 1:
@@ -32,8 +37,13 @@ async def install_probe(env, client, planes, cfg, output):
     # Some official verifier scripts run a uv installer before invoking uvx.
     # Preinstall the snapshot's hash-bound binary and normal shell environment;
     # keep the original verifier script and record this environment variant.
-    tools = await prepare_verifier_tools(env)
-    inventory = await env.exec("cat /etc/os-release && python3 --version && dpkg -l",
+    if profile.get('verifier_resource_policy'):
+        from runtime.agents.verifier_dependencies import task_environment
+        variables=task_environment(profile,planes.sample.instance_id)
+        tools=await prepare_verifier_tools(env,planes.sample.instance_id,variables)
+    else:
+        tools = await prepare_verifier_tools(env)
+    inventory = await env.exec("cat /etc/os-release && "+executable+" --version && dpkg -l",
                                user="root", timeout_sec=60)
     if inventory.return_code:
         raise RuntimeError("Offline image package inventory failed")

@@ -6,9 +6,13 @@ here; autograd owns both. FSDP, compilation and higher-order gradients are unsup
 """
 
 import contextlib
+import json
 import math
+import os
 import time
 import weakref
+from datetime import datetime, timezone
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -232,8 +236,9 @@ def install_mlp_backend(model, chunk_tokens):
 
 class BoundaryOffload:
     """Offload only non-reentrant checkpoint input activations, never model weights."""
-    def __init__(self, model, budget_bytes):
+    def __init__(self, model, budget_bytes, *, enabled=True):
         self.budget_bytes = budget_bytes
+        self.enabled = enabled
         self.parameter_storages = {p.untyped_storage().data_ptr() for p in model.parameters()}
         self.live_bytes = self.peak_bytes = 0
         self.reset()
@@ -243,6 +248,7 @@ class BoundaryOffload:
         self.pack_seconds = self.unpack_seconds = 0.0
         self.events = {"d2h": [], "h2d": []}
         self.peak_bytes = self.live_bytes
+        self.budget_rejection = None
 
     def _release(self, size):
         self.live_bytes -= size
@@ -266,6 +272,8 @@ class BoundaryOffload:
                 return False, tensor
             size = tensor.numel() * tensor.element_size()
             if self.live_bytes + size > self.budget_bytes:
+                self.budget_rejection = {"requested_bytes": size, "live_bytes": self.live_bytes,
+                                         "budget_bytes": self.budget_bytes}
                 raise RuntimeError("Pinned activation host budget exceeded; offload was not disabled")
             started = time.monotonic()
             packed = self._copy("d2h", lambda: native.pack_hook(tensor))
@@ -290,28 +298,225 @@ class BoundaryOffload:
 
     def checkpoint(self, function, *args, **kwargs):
         from torch.utils.checkpoint import checkpoint
+        if not self.enabled:
+            return checkpoint(function, *args, use_reentrant=False, **kwargs)
         with self.context():
             return checkpoint(function, *args, use_reentrant=False, **kwargs)
+
+    def set_enabled(self, enabled):
+        self.enabled = bool(enabled)
 
     def metrics(self):
         # The training core synchronizes before calling the update callback.
         values = {"offload_d2h_bytes": self.d2h_bytes, "offload_h2d_bytes": self.h2d_bytes,
                   "offload_pinned_peak_bytes": self.peak_bytes, "offload_live_bytes": self.live_bytes,
                   "offload_pack_wall_seconds": self.pack_seconds,
-                  "offload_unpack_wall_seconds": self.unpack_seconds}
+                  "offload_unpack_wall_seconds": self.unpack_seconds,
+                  "offload_host_budget_bytes": self.budget_bytes,
+                  "offload_budget_rejection": self.budget_rejection}
         for kind, events in self.events.items():
-            seconds = sum(start.elapsed_time(end) for start, end in events) / 1000
+            try:
+                seconds = sum(start.elapsed_time(end) for start, end in events) / 1000
+            except RuntimeError as exc:
+                values[f"offload_{kind}_timing_error"] = str(exc)
+                seconds = 0.
             values[f"offload_{kind}_device_seconds"] = seconds
             values[f"offload_{kind}_GiB_per_second"] = (
                 getattr(self, kind + "_bytes") / 2**30 / seconds if seconds else None)
         return values
 
 
+def is_cuda_oom(exc):
+    """Only the explicit CUDA allocation exception is recoverable."""
+    return isinstance(exc, torch.OutOfMemoryError)
+
+
+class MemoryEventLogger:
+    """Append scalar JSON evidence without retaining tensors or exception objects."""
+    def __init__(self, directory, *, attempt_id="", rank=0, world_size=1,
+                 physical_gpu=None, enabled=True, device="cpu"):
+        self.enabled, self.device = enabled, torch.device(device)
+        self.identity = {"schema_version": 1, "attempt_id": attempt_id,
+                         "rank": rank, "world_size": world_size, "physical_gpu": physical_gpu,
+                         "logical_device": str(self.device)}
+        self.path = Path(directory) / "memory-events.jsonl"
+        if enabled: self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def memory(self):
+        if self.device.type != "cuda": return {}
+        try:
+            free, total = torch.cuda.mem_get_info(self.device)
+            stats = torch.cuda.memory_stats(self.device)
+            return {"allocated_bytes": int(torch.cuda.memory_allocated(self.device)),
+                    "reserved_bytes": int(torch.cuda.memory_reserved(self.device)),
+                    "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(self.device)),
+                    "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(self.device)),
+                    "device_free_bytes": int(free), "device_total_bytes": int(total),
+                    "inactive_split_bytes": stats.get("inactive_split_bytes.all.current"),
+                    "allocation_retries": stats.get("num_alloc_retries"), "allocator_ooms": stats.get("num_ooms")}
+        except Exception as exc:
+            return {"memory_sample_error": f"{type(exc).__name__}: {exc}"}
+
+    def write(self, *, event, phase=None, **fields):
+        if not self.enabled: return
+        item = {**self.identity, "observed_at": datetime.now(timezone.utc).isoformat(),
+                "event": event, "phase": phase, **fields}
+        # No default=str: accidental Tensor payloads are an implementation error.
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(item, allow_nan=False) + "\n")
+            handle.flush()
+
+
+class MemoryController:
+    """Fixed per-attempt offload policy and one device-wide phase sampler.
+
+    Phase intervals do not overlap. Every reset is preceded by a sample and its
+    peak is folded into attempt totals. Branch samples aggregate by group/phase;
+    no per-layer or per-token records are emitted.
+    """
+    def __init__(self, config, directory, *, rank=0, world_size=1, physical_gpu=None,
+                 offloader=None, device="cpu"):
+        self.config, self.offloader = config, offloader
+        self.rank, self.world_size = rank, world_size
+        self.device = torch.device(device)
+        memory = config.training.memory
+        self.mode = memory.activation_offload
+        self.max_retries = memory.oom_retry.max_retries if memory.oom_retry.enabled else 0
+        self.logger = MemoryEventLogger(directory, attempt_id=config.run.attempt_id, rank=rank,
+            world_size=world_size, physical_gpu=physical_gpu, device=device,
+            enabled=memory.memory_telemetry.enabled)
+        self.last_decision = None
+        self.context = {}
+        self.phase_name = None
+        self.fields = {}
+        self.records = {}
+        self.peaks = {"peak_allocated_bytes": 0, "peak_reserved_bytes": 0}
+        self.baseline = {}
+
+    def decide(self, window, *, global_step, group_cursor=0, parallel=None):
+        auto = self.config.training.memory.auto_offload
+        local = []
+        for index, group in enumerate(window):
+            if index % self.world_size != self.rank: continue
+            prompts = [len(v) for v in group.prompt_token_ids]
+            completions = [len(v) for v in group.completion_token_ids]
+            row = {"group_id": group.group_id, "group_ordinal": group_cursor + index,
+                   "window_ordinal": index, "prompt_tokens": max(prompts, default=0),
+                   "completion_min": min(completions, default=0),
+                   "completion_max": max(completions, default=0), "completion_sum": sum(completions),
+                   "max_sequence_tokens": max((p+c for p,c in zip(prompts, completions)), default=0),
+                   "branch_count": group.group_size}
+            reasons = []
+            if row["prompt_tokens"] >= auto.prompt_tokens_threshold: reasons.append("prompt_tokens_threshold")
+            if row["max_sequence_tokens"] >= auto.sequence_tokens_threshold: reasons.append("sequence_tokens_threshold")
+            local.append({**row, "reasons": reasons})
+        payload = {"rank": self.rank, "groups": local, "mode": self.mode}
+        peers = parallel.control_step(global_step + 1, 0, "risk", payload) if parallel else [payload]
+        if any(peer["mode"] != self.mode for peer in peers):
+            raise ValueError("Distributed offload configurations differ")
+        trigger_ranks = [peer["rank"] for peer in peers if any(g["reasons"] for g in peer["groups"])]
+        enabled = self.mode == "checkpoint_boundary" or (self.mode == "auto" and bool(trigger_ranks))
+        self.last_decision = {"mode": "checkpoint_boundary" if enabled else "none", "configured_mode": self.mode,
+            "trigger_ranks": trigger_ranks if self.mode == "auto" else [], "ranks": peers,
+            "thresholds": auto.model_dump() if hasattr(auto, "model_dump") else vars(auto),
+            "policy_version": "global_step_length_or_v1", "capacity_prediction": None,
+            "headroom_usage": "recorded_only_no_capacity_model"}
+        if self.offloader: self.offloader.set_enabled(enabled)
+        return self.last_decision
+
+    def begin_attempt(self, window, *, global_step, attempt_id):
+        self.context = {"global_step": global_step, "global_step_semantics": "committed",
+                        "inflight_step": global_step + 1, "step_attempt": attempt_id, "committed": False}
+        self.fields, self.records = {}, {}
+        self.peaks = {"peak_allocated_bytes": 0, "peak_reserved_bytes": 0}
+        self.phase_name = None
+        self.baseline = self.logger.memory()
+        if self.device.type == "cuda": torch.cuda.reset_peak_memory_stats(self.device)
+        self.logger.write(event="retry_start" if attempt_id else "step_start", phase="step_start",
+                          **self.context, **self.baseline, offload=self.last_decision,
+                          phase_timing="existing_cuda_sync_boundaries_monotonic_wall",
+                          extra_cuda_synchronizations=False)
+        self.phase("step_start")
+
+    def _sample(self):
+        sample = self.logger.memory()
+        for key in self.peaks: self.peaks[key] = max(self.peaks[key], sample.get(key, 0))
+        if self.phase_name is not None:
+            key = (self.fields.get("group_ordinal"), self.phase_name)
+            record = self.records.setdefault(key, {"phase": self.phase_name, **self.fields,
+                                                   "seconds": 0., "samples": 0,
+                                                   "peak_allocated_bytes": 0, "peak_reserved_bytes": 0})
+            record["seconds"] += time.monotonic() - self.phase_started
+            record["samples"] += 1
+            for metric in self.peaks: record[metric] = max(record[metric], sample.get(metric, 0))
+            record["last_memory"] = sample
+        return sample
+
+    def phase(self, name, **fields):
+        self._sample()
+        if self.device.type == "cuda": torch.cuda.reset_peak_memory_stats(self.device)
+        self.phase_name, self.phase_started = name, time.monotonic()
+        self.fields.update(fields)
+
+    def flush_phases(self):
+        self._sample()
+        if self.logger.enabled and self.config.training.memory.memory_telemetry.granularity == "phase":
+            for row in self.records.values():
+                self.logger.write(event="phase_end", **self.context, offload=self.last_decision, **row)
+        self.records = {}
+        self.phase_name = None
+
+    def pause(self):
+        # Waiting for peers must not inflate the final local compute phase.
+        self._sample()
+        self.phase_name = None
+
+    def offload_metrics(self):
+        return self.offloader.metrics() if self.offloader else {"offload_d2h_bytes": 0, "offload_h2d_bytes": 0,
+                                                               "offload_live_bytes": 0, "offload_pinned_peak_bytes": 0}
+
+    def result(self, statuses):
+        self.flush_phases()
+        sample = self.logger.memory()
+        deltas = {key + "_delta": (sample.get(key, 0) or 0) - (self.baseline.get(key, 0) or 0)
+                  for key in ("allocation_retries", "allocator_ooms")}
+        self.logger.write(event="attempt_result", phase="local_compute_end", **self.context,
+                          **sample, attempt_peaks=self.peaks, offload=self.last_decision,
+                          offload_metrics=self.offload_metrics(), rank_results=statuses, **deltas)
+
+    def oom(self, error, *, phase):
+        # Sample before resetting peaks or collecting garbage. The failed requested
+        # allocation is only available in the preserved original error text.
+        self.logger.write(event="oom", phase=phase, **self.context, **self.logger.memory(),
+                          **self.fields, error=error, allocation_parse="best_effort_original_text_only",
+                          offload=self.last_decision)
+
+    def cleanup(self, *, before, statuses):
+        self.logger.write(event="oom_cleanup", phase="oom_cleanup", **self.context,
+                          cleanup_stage="before" if before else "after", **self.logger.memory(),
+                          offload_metrics=self.offload_metrics(), rank_results=statuses)
+
+    def retry(self, window, *, global_step, attempt_id):
+        if self.offloader is None: raise RuntimeError("OOM retry lacks an offloader")
+        self.offloader.set_enabled(True)
+        self.last_decision = {**self.last_decision, "mode": "checkpoint_boundary", "reason": "cuda_oom_retry"}
+
+    def committed(self, *, global_step, window, attempt_id):
+        self.flush_phases()
+        self.logger.write(event="step_commit", phase="step_commit",
+                          **{**self.context, "global_step": global_step, "committed": True},
+                          **self.logger.memory(), attempt_peaks=self.peaks,
+                          offload=self.last_decision, offload_metrics=self.offload_metrics())
+
 def configure_checkpointing(model, config, budget_bytes):
     from RL.modeling import enable_checkpointing
     offloader = None
-    if config.training.memory.activation_offload == "checkpoint_boundary":
-        offloader = BoundaryOffload(model, budget_bytes)
+    memory = config.training.memory
+    if (memory.activation_offload != "none" or memory.oom_retry.enabled):
+        # Keep a controller available for an auto decision or an OOM retry even
+        # when the first attempt intentionally stays entirely on device.
+        offloader = BoundaryOffload(model, budget_bytes,
+                                    enabled=memory.activation_offload == "checkpoint_boundary")
     if config.training.checkpoint_policy == "layer":
         enable_checkpointing(model)
         if offloader:

@@ -144,6 +144,12 @@ class ServingManager:
         serving_python = str(serving_interpreter(cfg))
         self.output.mkdir(parents=True, exist_ok=True)
         capture_cfg = cfg.get("capture", {})
+        raw_checkpoint_identity = None
+        if capture_cfg.get("logprobs", {}).get("enabled"):
+            from core.model_identity import describe
+            raw_checkpoint_identity = describe(Path(cfg["model"]["path"]))
+            if raw_checkpoint_identity["fingerprint"] != cfg["model"]["fingerprint"]:
+                raise ValueError("Raw probability checkpoint inventory differs from frozen model identity")
         if capture_cfg.get("enabled") and s["management"] != "managed":
             raise ValueError("Online capture requires managed serving")
         if s["management"] == "managed":
@@ -235,6 +241,15 @@ class ServingManager:
                         "open_token_ids": self.capture_token_inventory["open_token_ids"],
                         "model_fingerprint": cfg["model"]["fingerprint"],
                         "serving_dtype": s.get("dtype", "float16"),
+                        "raw_probability_source_identity": {
+                            "model_fingerprint": cfg["model"]["fingerprint"],
+                            "checkpoint_inventory_sha256": (raw_checkpoint_identity or {}).get("fingerprint"),
+                            "model": cfg["model"], "adapter": None,
+                            "serving_dtype": s.get("dtype", "float16"),
+                            "generation_policy_sha256": hash_json(cfg.get("generation", {})),
+                            "steering": cfg.get("steering"),
+                            "runtime_sha256": sha256(root / "vendor/easysteer-runtime.json"),
+                        },
                         "tensor_parallel_size": s["tensor_parallel_size"],
                     },
                 )
@@ -244,6 +259,14 @@ class ServingManager:
                     capture_cfg.get("control_port", 0),
                 ).start()
             env = dict(os.environ)
+            raw_options = capture_cfg.get("logprobs", {})
+            env.pop("DYCON_RAW_T1_ENABLED", None)
+            env.pop("DYCON_RAW_T1_OPTIONS", None)
+            if raw_options.get("enabled"):
+                if s["tensor_parallel_size"] != 1 or cfg.get("steering", {}).get("enabled"):
+                    raise ValueError("raw T=1 capture requires unsteered TP=1 generation")
+                env["DYCON_RAW_T1_ENABLED"] = "1"
+                env["DYCON_RAW_T1_OPTIONS"] = json.dumps(raw_options)
             env.pop("DYCON_PARALLEL_OPTIONS", None)
             env.pop("DYCON_PARALLEL_MODEL_FINGERPRINT", None)
             env['DYCON_REASONING_LOOP_OPTIONS'] = json.dumps(cfg.get('parallel', {}).get('reasoning_loop', {}))

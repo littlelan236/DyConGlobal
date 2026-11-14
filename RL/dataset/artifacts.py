@@ -6,10 +6,15 @@ from pathlib import Path
 
 from core.io import artifact_roots, identifier, read_json, sha256, write_json
 from core.locking import file_lock
-from RL.artifacts import commit_receipt, verify_receipt
+from RL.artifacts import commit_receipt, read_receipt, verify_receipt
 
-KINDS = {"rl-dataset": "datasets", "rl-cache": "cache", "rl-replay": "replays"}
+KINDS = {"rl-prepared": "prepared", "rl-reference": "references", "rl-extension": "extensions", "rl-dataset": "datasets", "rl-cache": "cache", "rl-replay": "replays", "rl-probability": "probabilities", "rl-probability-plan": "probability-plans"}
 REQUIRED = {
+    "rl-prepared": {"manifest.json", "schedule.json", "dataset-binding.json", "inventory.sqlite3"},
+    "rl-reference": {"manifest.json"},
+    "rl-extension": {"manifest.json"},
+    "rl-probability": {"probability.json", "branches.jsonl", "selection.json", "targets.jsonl", "missing.jsonl", "coverage.json", "sources.json", "summary.json", "source-config.yaml", "resolved-config.json"},
+    "rl-probability-plan": {"plan.json", "selection.json", "targets.jsonl", "missing.jsonl", "coverage.json", "sources.json", "source-config.yaml", "resolved-config.json"},
     "rl-dataset": {"dataset.json", "source-config.yaml", "resolved-config.json", "selection.json", "rollouts.jsonl", "groups.jsonl", "branches.jsonl", "aliases.jsonl", "exclusions.jsonl", "summary.json", "dependencies.json"},
     "rl-cache": {"cache.json", "groups.jsonl", "branches.jsonl"},
     "rl-replay": {"replay.json", "root-sampling.json", "effective-policies.json", "models.json", "selection.json", "branches.jsonl", "diagnostics.jsonl", "summary.json", "validation.json"},
@@ -27,8 +32,8 @@ def directory(root, kind, artifact_id):
     return path
 
 
-def verify_local(path, kind):
-    receipt = verify_receipt(path, kind + "-v1")
+def verify_local(path, kind, *, verify_files=True):
+    receipt = (verify_receipt if verify_files else read_receipt)(path, kind + "-v1")
     if not REQUIRED[kind] <= receipt["files"].keys():
         raise ValueError(f"Missing required {kind} files")
     return receipt
@@ -99,11 +104,26 @@ def verify_dependencies(path):
     return len(files)
 
 
-def execute_artifact(cfg, kind, artifact_id, root=None):
+def execute_artifact(cfg, kind, artifact_id, root=None, *, deep=True):
     path = locate(cfg, kind, artifact_id, root)
-    if kind == "rl-dataset":
+    if kind == "rl-prepared":
+        from RL.grpo.prepared import PreparedReader, summary, verify_prepared
+        result = summary(verify_prepared(path) if deep else PreparedReader(path))
+    elif kind == "rl-extension":
+        from RL.grpo.prepared_service import read_extension
+        result = read_extension(path, summary_only=True)
+    elif kind == "rl-reference":
+        from RL.grpo.reference_artifact import ReferenceReader
+        result = ReferenceReader(path).summary()
+    elif kind == "rl-dataset":
         from .build import check_dataset
         result = check_dataset(path, level="metadata")
+    elif kind == "rl-probability":
+        from .probability_artifacts import check_probability
+        result = check_probability(path, with_values=True)
+    elif kind == "rl-probability-plan":
+        from .probability_artifacts import read_plan
+        result = read_plan(path)["summary"]
     elif kind == "rl-replay":
         from .replay.artifacts import check_replay
         result = check_replay(path, with_values=True)

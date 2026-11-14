@@ -1,0 +1,1093 @@
+{
+  "schema_version": 1,
+  "contracts": [
+    {
+      "instance_id": "exceltable-in-ppt",
+      "package_sha256": "54c59f18d6842173981c6e575a85da22558d24c40b650985f5108fba146bd143",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "4056e2263dc15e48730a523ce6400312a075a62b2e5fba2b953ed2ea426e8ae2",
+        "verifier/test.sh": "e1360fbfb1e7577ff66793b3ec27a5953a8e708b8e35d5040086c72e6f315b2f",
+        "verifier/test_outputs.py": "5c69a1cb8c95ceb39ff2da566fc24f26ebc90715b8cac8ac92991760ee2ad1ad"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "3d-scan-calc",
+      "package_sha256": "7e5289ab4ab2b4d05548e4d74ed5f1b13890a0be417c458902609d10abcd6db9",
+      "score_mode": "unsupported",
+      "files": {
+        "task.md": "99d7ef3e5ebe2785cd936f269be6d8f179831f6fd788f484146ffffa6fad91b8",
+        "verifier/test.sh": "dfb59780bbce55de353a8c7f25ad136e7c0fc75da3744bd54b273aed42a8bb16",
+        "verifier/test_outputs.py": "0129d7f08adddad68bd2e93f0aaea79d6b2e05d7b2f2aaa06f17d4b71804b9ff"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "xlsx-recover-data",
+      "package_sha256": "a8d703e07a510a2af3f5890fe68e7a90b4f63244374f60d7b961291b2f9a4531",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "1fa882f4c2ccee0356c5e1798b6fd65a6b9bf1a7a40ddf8f97ca9618e1120fec",
+        "verifier/test.sh": "98c0db99d835fa80e2c748233e71aa9b7bd6d1969fed615707181013b5a5b244",
+        "verifier/test_outputs.py": "8bb25e42832dc540674dd8f1fe5603288f1f72a801e58c424a8aee07c5a64ee9"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "crystallographic-wyckoff-position-analysis",
+      "package_sha256": "d29361a7a47803bc6c34ebe01aafc01ae3aae5e75d18ed98c873d46d3c10f1a5",
+      "score_mode": "cif_fraction",
+      "files": {
+        "task.md": "654663a5bde548cb6965379ec553f963749de5fc352ce5bcab0d83e1197f32fe",
+        "verifier/test.sh": "5939ecd309126463f4ada4e8d0b9d13b98ecde05eb6c201c5ab45d6bd36ac0d6",
+        "verifier/test_outputs.py": "ae4650215ef954bd25cbfc348b5c95fab18a9731c85b29745ab2bfe1a9f0adb9"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "drone-planning-control",
+      "package_sha256": "486471d3f994544f53f688452b697e5ad4a91d38735b31080d86370dec0e3a9f",
+      "score_mode": "command_success_fraction",
+      "files": {
+        "task.md": "0f872a982f7e785a8fbf9e1c545fe9815650505654a2880cf842b84976bf932d",
+        "verifier/_oracle_sim.py": "d1975586c0a113c87dd87a5770f25a4afc7077c6de86616dbe385da3bbfe716d",
+        "verifier/test.sh": "f9076fdbe9519a47721db33c0ff4e2ce18177088f0735e68e5e30284a767c71f",
+        "verifier/test_outputs.py": "dd7455dd0ebaf2db603e3e2e71f79cf0babf529055ea6bb66f0f17de3d65b3d2"
+      },
+      "capabilities": [],
+      "command_labels": [
+        "001",
+        "002",
+        "003",
+        "004",
+        "005",
+        "006",
+        "007",
+        "008",
+        "009",
+        "010",
+        "011",
+        "012",
+        "013",
+        "014",
+        "015",
+        "016",
+        "017",
+        "018",
+        "019",
+        "020",
+        "021",
+        "022",
+        "023",
+        "024",
+        "025",
+        "026",
+        "027",
+        "028",
+        "029",
+        "030"
+      ]
+    },
+    {
+      "instance_id": "simpo-code-reproduction",
+      "package_sha256": "33d417dee98481574b8dbd178099156d109b995c4da2dee1ef55364f2074df2e",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "53666dc932ba08495963f937c062565fdc26f7fe331ced36e8c4ba7dd67a1b45",
+        "verifier/test.sh": "6a54950bdb42dff5ed3a0f738add5507bce1696a09e05f2dd41735c78d1180d9",
+        "verifier/test_outputs.py": "05590869057aeaac1032f2177b0b2bf80f56828af3dba66f100e4d1346b2e62f"
+      },
+      "capabilities": [
+        "simpo_paths"
+      ]
+    },
+    {
+      "instance_id": "pptx-reference-formatting",
+      "package_sha256": "5ff458967afa259c63b155bab9521b45996fb8ffcc7e495f51997cd606061511",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "320a93c2bfe866153137801ef19ec604f56f212612e3a8ffaa0b9e6ba38e54ac",
+        "verifier/test.sh": "1b9d59e84e8ea942ecf4a01766ad53589e6483d26fb6547571f6a2379cd75267",
+        "verifier/test_outputs.py": "66059a6f7e075f5e409df36d645cfb19ffccd184cd3ce19f0bebca8764cdd93e"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "dialogue-parser",
+      "package_sha256": "585a95a9906bdb567445818b4901ad6da63d9fb4185f7e6e3eded842fcc3a76b",
+      "score_mode": "ctrf_fraction_round3",
+      "files": {
+        "task.md": "f96d2d4f1332d6bb55d699e654f05a81334db8015b875af44f6f473565b8a390",
+        "verifier/test.sh": "57d2cb2cbd76d173357da476eb525e07678aabbb4b22392563718fe867e12f67",
+        "verifier/test_outputs.py": "d0effcfa8ba898260bce69ba8a0c4852f4959a83e9130cc69c13847f0f05b01c"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "mars-clouds-clustering",
+      "package_sha256": "63b886fd0755d59899b16ad68e0ace48ea6b2f526306c1c544715d813928cbb3",
+      "score_mode": "unsupported",
+      "files": {
+        "task.md": "c806cdf66f204868a99acd2ff378e4433efd10e31de1b4b40598eb55139ebf3f",
+        "verifier/test.sh": "9d458bd36eb6cc1fdfa135553b591af668c630c5930654c4a257156da11d0dc9",
+        "verifier/test_outputs.py": "7a652bc3112f01cb7a97fedbc15fc47b81bda442199b4c95b2f367ae0932aaff"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "citation-check",
+      "package_sha256": "b10dd3bac9093a2b2086bd641cfa06e52e76545175e28a24215471fe4f4ec1c2",
+      "score_mode": "unsupported",
+      "files": {
+        "task.md": "8699c59d1ae337f72d137be07381eabb7450ec2835cd1b0693183b2fef7b2eb1",
+        "verifier/test.sh": "8793d4be74268ffb9c492f85a094d871709e9a11f7c9cf4f3a023381d7b454ec",
+        "verifier/test_outputs.py": "f2134453d38c3493403ccba5f1c29db0322ea1eeea820aa769a9f63123ea16ae"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "dynamic-object-aware-egomotion",
+      "package_sha256": "48f7aaf122e0c95d172123c3e2fbb2bec8f06ae325a54420d716dce5e771d69b",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "83e6093c4ea969e48089297f20c7c85d396dbee22a82e39756cf1c7c16e600e5",
+        "verifier/test.sh": "65db85999d85a335bae22c33bd42bb0976b930ecbed437b8c8a37aac4726d713",
+        "verifier/test_outputs.py": "0b19e77ea7a336b331790d87beb0199bc31fa733d6746060220a2ad2a463994d"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "energy-ac-optimal-power-flow",
+      "package_sha256": "0eb294d2b51140d52d22b7ff1d6c2dd35bc9c573a830485884ca04e5d5646704",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "19cda3fb55a79bbc8bb07f7cfec4a2dbf6dc8ffe67c4ca940cd432f556f8e79b",
+        "verifier/test.sh": "37e038940579be6aca02a6c5567d3749afd848021f91cf264d0c8d97b66144ba",
+        "verifier/test_outputs.py": "6d5ec397bfc3c244e63580ca382134411a3879a4aa6c518570396b5b0097cd47"
+      },
+      "capabilities": [
+        "submitted_generator_ids"
+      ]
+    },
+    {
+      "instance_id": "parallel-tfidf-search",
+      "package_sha256": "5036e432ca4f138cbf467507a9afa0edf4fffbeff175ee7e385bc7cd89633413",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "003f37c9066f268bb7d8dd695f7474b04a6987375956868d0e8562a3c7c54c6a",
+        "verifier/test.sh": "6688b3179091a57c0857a5e1df0e77b92aba50b21cbcecea114843c303f89176",
+        "verifier/test_outputs.py": "3de14cb18c18d2c4afdfee4cf70809acb866aa67c13d8d6f4bc67d7f44e26c20"
+      },
+      "capabilities": [
+        "submitted_parallel_code"
+      ]
+    },
+    {
+      "instance_id": "adaptive-cruise-control",
+      "package_sha256": "16362727f4434da7b069a057a6dc2cd09e0eaf9151ae6eed94592a45ce6199ab",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "facc7bde3820837e58f1739176272249e4923170a5031f240e3f8a20b3238e46",
+        "verifier/test.sh": "943022dfd2d8270b2745d7067cf040717a7fba5f5208b4dfc14f9cc8668c0d01",
+        "verifier/test_outputs.py": "beb7b4d72f718494b4cb8f073af985dc113d57d1d22c015de1e884a62c8b7e58"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "energy-market-pricing",
+      "package_sha256": "8e76e0e772d22175835eb71add3c62bfde29c184a1d3d02f1044ca28cc444474",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "42b51ce40b3e09bf7db1b4b4fd5e335686b8608dad80591336491c033f640e5f",
+        "verifier/test.sh": "55a257735b8acd4fb23fdd06ebff92593842bb6dc8ee6ec67d60c06eb5382b1a",
+        "verifier/test_outputs.py": "72049be44ff8228ce8380efe5ffcb89adef8629845b762b929570d122b428066"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "ada-bathroom-plan-repair",
+      "package_sha256": "281c498e0d2dcfe418da6436ed17cc2d66b68c5e9652e0404032e5ee6859be23",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "b68a30f4ca0d8fa45a3ff58208d5d0aac1e2d31b04c760abfcd74f1c1f9ae6e9",
+        "verifier/test.sh": "5c6221915e19bc16b6873b0dcc984c6993b8ecc83cc0869d8ed9534819ba6fab",
+        "verifier/test_outputs.py": "66c450cb6e23a0912355f16e4f128b18f473a42ad865c3d1ea8601054aec8547"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "radar-vital-signs",
+      "package_sha256": "f10115b533687f1c5afaacfb0a8ffee6e4bb72763929c19dee6c670c1888e279",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "d5da2965cfafa62274b8a2d0755aef090ffe8144e5f5b54262e45f1af06e67f3",
+        "verifier/test.sh": "88a81047a9612c44cb8ef6c72fd325924b76516e77b0bae4304a4a477026cdf0",
+        "verifier/test_outputs.py": "0874200937776965a2402b0ba0d6e662ebdff8edc8575934a442c58f0893abc0"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "multilingual-video-dubbing",
+      "package_sha256": "fdb99d6cfa7d2c96cc58930d5c34a099ea263992e7e605efe51b553308fcf880",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "906c66aa6abcd2d38285a2b8fe3adb1bacfe04cb5ac292470c4a6cf35f7fda13",
+        "verifier/test.sh": "a135e37396a6c9693c195155d7d24b418dafc3419a391ba59dfe15634a8e79f7",
+        "verifier/test_outputs.py": "0dfb656a4fafb8b046a4b3ee7bbfc9caa84a0b05894f8f459fd2c589c0f3bb1d"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "suricata-custom-exfil",
+      "package_sha256": "94fb61bd49d3fcab4e28df3707b906939c413d26ed46b0587050e1579f63b28c",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "892824294e1e088c4ccb08aac2269573188c7db991200dfe11ce09e81fa12e0f",
+        "verifier/test.sh": "efa6d5f0b6751932a71991663c67722a6f9c577e68266c248ba36cfd347224dd",
+        "verifier/test_outputs.py": "16cd7f9acb3641a15d96e91c3fa052f96f6708d85ce15079ece6e87707ecdc5d"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "debug-trl-grpo",
+      "package_sha256": "35bc9fea90ceddb2c2e97a68d22895d38fd22d8588bd9224f64b4ce6c98be387",
+      "score_mode": "custom_groups",
+      "files": {
+        "task.md": "ae20c68633deca5953986606beb01f2f2db3ccdc074e9b1fefcecfe6f3724f0c",
+        "verifier/test.sh": "f7b834d3449e5759f5a4966e3ba0076a313225153a34200fe2e030938ff36b0c",
+        "verifier/test_outputs.py": "b7d5ca3db9f4a2d055b063f5ffd1aeb0fdd4168a336f6a580f6063e104363a3a"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "azure-bgp-oscillation-route-leak",
+      "package_sha256": "59e39a0679029ea33a90a916455002ea7232144cdb9cf2370ff6e0b1979e3157",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "928f6d33162bb994b7a0e4ee858383d307585df097c4e5efac312716f7beab27",
+        "verifier/test.sh": "fe7195562321b71ace6e1f6858994939238cc7ce0ec2d0ae3b610278489a42b7",
+        "verifier/test_outputs.py": "a4b39c30b6b0efcec27b7217f8001c1efe0e90b4f67f78d79951f4466f5dff6c"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "tictoc-unnecessary-abort-detection",
+      "package_sha256": "ce2c6758890741d3b395fbe295de7d88eb9afcdbae7df0645d17f6bf721cf2d4",
+      "score_mode": "separate_score_script",
+      "files": {
+        "task.md": "614716c469108598a526ab532009d9012b0624ed0f8ce45281839ff06ec8f126",
+        "verifier/score_outputs.py": "4fa911fb8fec66a73d7d1f05f57cde126ee9958403d05c7d8e0d423c7d98ff4e",
+        "verifier/test.sh": "d8e804b647681f1ce4c1a691b7e9fac1b2a3b56d885474a0a95330bb3b260aeb",
+        "verifier/test_outputs.py": "5a33d964dd65c7235c19528dc6fd7beaf15d7aac8539478639d5ad4803cf7030"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "software-dependency-audit",
+      "package_sha256": "769f6ea59a45de4a4bbc40854cd13b61065a1aec8225adfa6b772472c8f6c354",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "37e4052173bedf8a8c05e744c18841a6874289bab77daddc9730093537c9937e",
+        "verifier/test.sh": "9265ee934d6511a57128913ae81037dc67717c4af9f893cb725fe1654f7b6c4e",
+        "verifier/test_outputs.py": "bc447eecd3f5b5e2622a0e719def8efb12c20b691b7a9710e36d7bde562b0940"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "hvac-control",
+      "package_sha256": "23671dd7b86bab207fac248b4eb08eb19b006010cb67ae9ccd5a81b9845fe878",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "2387a314e831ccf6e3c9eb8ce28881a504f38e18560bb5a885edd646560a7f85",
+        "verifier/test.sh": "3f17ee3710e4797165d3e7e704a4acf15e279a8c797ed2692976b55fea23cd90",
+        "verifier/test_outputs.py": "79a4f40f87cfd378c03430316c78f6da461e126d77da276951032bce33987ca2"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "sec-financial-report",
+      "package_sha256": "30d13ad9afcb00c8cd56b5d84f7a9c79b1bd4082185fd217aba8cae8b0ef7551",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "e3578ad5d7c671490acd28ac9b2452156968841963ae6103f132c053f4a12c6c",
+        "verifier/test.sh": "d79a4d5deb7b8256c72197649a9a62541bf12c2f0ad4d4a3955a56d1fba9fdc1",
+        "verifier/test_outputs.py": "193c9607dcd3e03a2c281aefbdf728fad90917869e1157d3ff233708b5b9aa4a"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "earthquake-phase-association",
+      "package_sha256": "7fad8f6eb41c65e0248e27f3de1b496b51f807111663960e287c9642e1b71b76",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "a8a647a4a676fd2cd8304d09f37e4dd5cac465640a080f9b3eabd50d2df65e08",
+        "verifier/test.sh": "5c82ae7d80641b385d4cc0197b0a10fd5ec7d42fc306c3071ed6c2d3636e6dda",
+        "verifier/test_outputs.py": "25b2e134bacd802db13f77a8dc7e28dbaeda479b835f4e6f634f4a381b823c28",
+        "verifier/test_utils.py": "9c5efb688a863c3f23ccfdbe89c61b09c82eb450ec3e28057bf47ab1734f7681"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "civ6-adjacency-optimizer",
+      "package_sha256": "ff83eb98f7581dd74c7501442e90bcf5d12cf27c2a1d0346d62d41f4169e7c09",
+      "score_mode": "scenario_score_or_zero",
+      "files": {
+        "task.md": "ad2f61b362a2953179c59cc325eb4270e7a061b9e688b3a3bab5938b119ba558",
+        "verifier/evaluate.py": "ea95e3d6936a735f0d94b5ae1f22d6f1eca2ed7d8baec61196a94d512d939479",
+        "verifier/src/__init__.py": "0e66d16159ae60aeff170bde0e77f02949f0ef9056acbf00cbf550d59537824e",
+        "verifier/src/adjacency_rules.py": "c83be856b6368bd1521914099cd84eb22d1f6cab367fbdb43fb76c7e63831154",
+        "verifier/src/hex_utils.py": "adb32304c24556c9a591ac5a2f78de120a92bca325624069c48dda8e51bbc8a6",
+        "verifier/src/placement_rules.py": "7621d0388cde321c965147ae9fe4c55e5f60d49ea10363663f774b216204ea8c",
+        "verifier/test.sh": "60169bb9436c7a70eda29bf6d9cfdf452207729d271784585ae4ac3581072bd2",
+        "verifier/test_outputs.py": "7ab49580725ed4379c26bf978289f66e890bad588e7772d2400f48a532fde755",
+        "verifier/test_unit.py": "dd4362e49bc9eda753230a2b8a2bf23eadf0a1e96bb0405bc02569c50b502154",
+        "verifier/tools/civ6map_to_scenario.py": "bac23152c3510990eb3afd26efd20665edb2ed25649966014843d2d1871c681a"
+      },
+      "capabilities": [
+        "submitted_scenario_json"
+      ]
+    },
+    {
+      "instance_id": "lean4-proof",
+      "package_sha256": "6ef67eb655abc1a52c8e089158ae384bdc26572cc12c506c1551c892fd5e3650",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "2ab16bc3d8cd559ea27c06542cdbd850800d2303262eddc5af5a4c129372e096",
+        "verifier/test.sh": "fe7195562321b71ace6e1f6858994939238cc7ce0ec2d0ae3b610278489a42b7",
+        "verifier/test_outputs.py": "bc8ac91bcfaaef6fefc2a35c2ecbb713a21f89e077fb5d42ec417a001dd749df"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "pdf-excel-diff",
+      "package_sha256": "7d1d315c479751e45d3409dd6ef1d95112cb7ec05ed3505c6dc90335ff1e8812",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "625db911a5491cdc6c87e14b405537faa2e67f92793a9519958c465d98e6e39d",
+        "verifier/test.sh": "8793d4be74268ffb9c492f85a094d871709e9a11f7c9cf4f3a023381d7b454ec",
+        "verifier/test_outputs.py": "4ac05115f9c9d9555f37849434de0ec9a74ac2e3cb53946c0b27c57bf300b5d0"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "threejs-to-obj",
+      "package_sha256": "b516df55cb9443156ee2f326ebcd612dd11b14c0a61f7fae7170880af54a9930",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "7fd36dcddabb1509f4c6ad2d9aa51a5e124c9ad617f06a2ffafc24c7283ae9b7",
+        "verifier/test.sh": "04f77d1342c0106060bca0d7b40aa2e429e11bbc2e0bd0200524b2b00feaca9c",
+        "verifier/test_outputs.py": "2e8ca83fb5ddeb3ba323cfa9d0a282ed2911e69623fbadf251263c560c3a6226"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "threejs-structure-parser",
+      "package_sha256": "8c7036e8d920568766658f4bcde806bf87dc5cc174a3ca407852681c59f12858",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "ecd5bb26740662db050464fd6b4553d65e8d5c6c3d0b048215bbe6d042680145",
+        "verifier/test.sh": "e265fcab20f8bcce62ce9c227f8ec570225dc24226d09bb863f9036cda92595f",
+        "verifier/test_outputs.py": "9fcbb9bd95cb3e9d65569874f795270bdd243421e333507c6a2be8e0f776d194"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "dapt-intrusion-detection",
+      "package_sha256": "3c8d597c1accc73d56f59db5601708307873ee357b5f780a394bdb79ecdcaed9",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "22833fe635378943177105589b4ce1ef03f248b245a7f496b9e40e293b2a6abb",
+        "verifier/test.sh": "1f539ad9a5a8845c570a92413db2c48046c23764bf3ae9000ae7ad2687813529",
+        "verifier/test_outputs.py": "cb318c3f217135a79decd55894671e00fb9d2b843d5ef3f5ee9e639e09c696b6"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "enterprise-information-search",
+      "package_sha256": "92c7086172b3e812dbd02c292df178e4448a41c9941616278d8837237ee3ae81",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "c5331e604c2dcf021d5fd43c7c1cb90ae0869008f12f74c900dc852d59f467ac",
+        "verifier/test.sh": "fe7195562321b71ace6e1f6858994939238cc7ce0ec2d0ae3b610278489a42b7",
+        "verifier/test_outputs.py": "0bafd48a1eba0a43ccff93dba5ab3a4f75dc3455c9ba602cd73f2f862acd88d1"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "jpg-ocr-stat",
+      "package_sha256": "40f7efd0d7d9ddf4df106e415b22071e1ae7cc99447270afc50b8d8303ca58b7",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "00b1e8f22790db41e2d0026c24a194da285adf93da87ca27a99ed2ca213b8be2",
+        "verifier/test.sh": "013e2ee5d258c992c360d5b0d48a39e3efece51d49fad9c84c66fd211905df77",
+        "verifier/test_outputs.py": "5956de9cf2d3f26d9b77ba17ae74b3987d6a802b6c6cfffc27fe307649d353a6"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "energy-unit-commitment",
+      "package_sha256": "f68131727344340c0f05ca53f09f1dd8f6d4a955de9eaa6024e54936d055729f",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "9060ce077a80d9a31482c0dd2a37a72e363b1dadc27bbc3bb9cb4ceb9eca736d",
+        "verifier/test.sh": "d65311484d8033f915ea72c97bab33fe8026346a1a2a1e9ab841061b737e322e",
+        "verifier/test_outputs.py": "8212aba549fa693cc4ba9710259f37bd29f4b5a4e0a0b0932950a41ae3f5ac2e"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "glm-lake-mendota",
+      "package_sha256": "38497905f4efbdd1276e2a4fd1af7c3325c587f7dace4ac6520ac8bb34809839",
+      "score_mode": "unsupported",
+      "files": {
+        "task.md": "d115cffe42dce0833f2b888c576736c99ed595cac9c772c01d6a6d8081e889f1",
+        "verifier/test.sh": "3103c4a7a472806a6f54e4a9eb2d02a37ed5272d3c8d9ea998ebd9a009bead3a",
+        "verifier/test_outputs.py": "f2a96c032d88ea05953fc83436569a816ed868301f191201be4ba491721ba395"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "exam-block-sequencing",
+      "package_sha256": "3b954b266c2e73887af1e0723aa9bda4b1ae7cb0b139971de19e88d4221d3033",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "f038ac85fcb442ea35607d529f729be9a66833fc7436096b3420f8495e825059",
+        "verifier/test.sh": "c1b231e2c569d431c7cb20ff353ba4230f044471aa1d1a747e60cd22508b9839",
+        "verifier/test_outputs.py": "b3a5f36246928a30bcba871b021d553faf32f591b30611edd5533156d294cc39"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "flood-risk-analysis",
+      "package_sha256": "1bcaa4a0f30d191ef9fe6567edfc87b13f5648267d343bcdf022276c884d2041",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "d2008e9045067d83d359e50f67f55a39117fbc97ea8ccc722e23777c74828713",
+        "verifier/test.sh": "3c5baf21d06f82fd4b25a3111b82e9308a9e479980c98bb87832f8b8c21ad29a",
+        "verifier/test_outputs.py": "718a45e5795a62dbeadedbe427ad1399ad3ee27720dd4a196a702d1ba21ff40b"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "edit-pdf",
+      "package_sha256": "39cc7a0e19691f66c490838072f2e6dd941c77577990299725fdc925273d91c7",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "26b3084faaf8c1674ee67c5c1e8baeb1186e0f5ca466f57d2a803a80bf59ed29",
+        "verifier/test.sh": "25362979c79858cda21cbc25400fcca9ff7db5792d6e4920caf46da134c3a5f5",
+        "verifier/test_outputs.py": "85352c21b1105ef34b015ce7e87f52f5628c862b55ac57d230e3c02fce8ba23f"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "mario-coin-counting",
+      "package_sha256": "36ced3b540def1bb2503441ae52085dd592760c3dc739e50ae929b65b3abe80e",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "4f42df3f7bca987090b5574c9649a57d01571ae8bf2fcf6f77493dab133b4ba7",
+        "verifier/test.sh": "54ac38829b79a81c68f7724f4298c037f250a2b54ae0e9e992d953f218b5bdfc",
+        "verifier/test_outputs.py": "18a3df302d802c577df7558b16fa594f9d61eb77e7f87b98c17789372eb4b888"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "pddl-airport-planning",
+      "package_sha256": "5db6622d2c98e612445c1cd38c532318f19db235180b5085c5ae6de1af32e044",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "267e092388b4a42a1ec8f6b1d9d950dac70b7dbc6fb59280e83e478cb7fec3bd",
+        "verifier/test.sh": "3ddb0d982a52a04feb799fa903c57714733008cc8a2db3087a16f9775d622f59",
+        "verifier/test_outputs.py": "1f8c6cd4be1ed7fdf0925494643dd2d78848c9ec4c855a7a7837612675ac87e4"
+      },
+      "capabilities": [
+        "pddl_syntax"
+      ]
+    },
+    {
+      "instance_id": "protein-expression-analysis",
+      "package_sha256": "a919a6f8eda4329006a7ff4f0d624b315dbf789f15e5a0a48eba02a631241801",
+      "score_mode": "unsupported",
+      "files": {
+        "task.md": "52407120f9c01d53dcfff15fdc92f11310bbaaef7871b9be246991335304374f",
+        "verifier/test.sh": "60f676cbdbb817230e5f47be4c756d2089d88b77904d19385bb674a8ff37912a",
+        "verifier/test_outputs.py": "810fec4eec42c34e9b8faaa14786182a63c32dd753fe11e6af0d1db8c2e23712"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "bike-rebalance",
+      "package_sha256": "bf3d58375891d815055c1eadf5fbb12b76d0873e0561899936ba2bc92f0d1700",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "f03115b34093cbb29c2424fb29a7c96a90257b4a57f7e4adad9d7caec15bf87f",
+        "verifier/test.sh": "ee72f22b7cb8fcdfe222d36715980f08bb5c6d0273d9c7dbecfc60407331ac0f",
+        "verifier/test_outputs.py": "930c406ed2c38235cadd42dbf08d8a205a81c548cfdea4c19094104597336479"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "gravitational-wave-detection",
+      "package_sha256": "c246a41587ecd0288722166cb535636148bff896410fbdaff60ec0e55c1641f1",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "9809601c659888f40f6ae3d97703f016a08e440da1b97ab5ff7914a40f22a9dd",
+        "verifier/test.sh": "4b4ecdb3470c8000bb4fa49a7e9df3d181d242ac82f23f5abaaf8096d3336a4f",
+        "verifier/test_outputs.py": "bf06c20e137ffbf159fbf8cd49f7f0028c4edcb79b7bbb94340e01808ca64f6d"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "powerlifting-coef-calc",
+      "package_sha256": "0fa1d8797ab14412f3e3693f084d53642e695f81929c788bdcbc942dc31fffd4",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "41be2fd6f1fd35d3f501cfe92a7bdc58c1bb1eb03910f89e5d12a70bfab20c67",
+        "verifier/test.sh": "fe441fd4c3d6bfa1bd93ec45ea366e393f3b2bf4c64772950384a5c2a0223340",
+        "verifier/test_outputs.py": "df3b3bfc52b24c18bfb6f4359d71758fc10e7e24a908cfc2a0874a6efb8d5673"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "pddl-tpp-planning",
+      "package_sha256": "16b9c717c7e4a7c0a9e0945ddfd190f8099447ac70f5fb6ba7c24e40d12b26b6",
+      "score_mode": "unsupported",
+      "files": {
+        "task.md": "1b8c398fa95fd900410f177f79dfc5379396da774fee7c3625e2f93517a031f6",
+        "verifier/test.sh": "529c1d3b2e3830a9cea3b40e975d879bb590dd6b76cf638791cc8624177ab029",
+        "verifier/test_outputs.py": "1d8f4a3c47f2b9909772eb7d5c39cbc4a1c435dbd57f2c909f912d1410043b7a"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "grid-dispatch-operator",
+      "package_sha256": "3be9027ab8c7ae3fafe6969172bdac24a929ad1e27d7dce540ff32a448d98745",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "9ab0e8f76e05f655417929f24b45a04efe472944627ba3f311dfd125a23a0573",
+        "verifier/test.sh": "e5e6feff7539e874cd070669556b03bd96d88ff91755973262dfec6cae9c6c05",
+        "verifier/test_outputs.py": "efe68ec3340394872251179295c9f3e426d3aed26008f0864b0bb381b41942fd"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "sales-pivot-analysis",
+      "package_sha256": "c50bfd1300432ad8aa85515460b59df56aa16b9a4fce517c6ef21e9fd1e25521",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "aed27c7a62b1307a6d3dbdc89abacd373150fffd5f02e5e6df30c7ad84ee3232",
+        "verifier/test.sh": "89a25f079630a5015cafce30c8bd9d94b314de7efeaf95fbe3b6dffdae1797a1",
+        "verifier/test_outputs.py": "e8cf8f07ba92961daa3eb5a2f8f173378770e5f80aafdf3626305643040d4ba9"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "llm-prefix-cache-replay",
+      "package_sha256": "3a4e975112d094485e40cd8519f0e23df9ad5868533d5056c83774dab6f9d0e0",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "58ccdd143fa2f59440c9d37ad171b44df61adf9541434e8b48255a998acdcfe8",
+        "verifier/oracle_helpers.py": "bc3579ef49fed337c6f707532f3572cb9dd5a82e42dea8184d2e2c278b6b896c",
+        "verifier/test.sh": "d0315e6d8e06686f40db287f9cc84b93de2ee9b1866a8349cb18bab73b7715d9",
+        "verifier/test_outputs.py": "b8442216fbc86ffbd4b75e96c1b9885e3e57d87ec2664b3636c29c343bef53a7"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "r2r-mpc-control",
+      "package_sha256": "e6bf7e973c3bc30c5cefd15e53a69958747cea3e60b6cac316a47b1c77fb98d0",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "0d63d1cc65751d4f4b90f746dd404cd46c43a7c7dd71ca29b209aa69c51b9082",
+        "verifier/test.sh": "26911f6bad5e450bef1f7d7f4cb15e45c1b0dd7359aa0a3a808d6b10762889b4",
+        "verifier/test_outputs.py": "d305382c273132476fa8f3a74f701d397d926c91bed20a2f78d38734ebde1fca"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "lake-warming-attribution",
+      "package_sha256": "8b75d45b03b8eb374983bb8d59cc4c29795f827ec47ae88a4af1d38f54e8ebe9",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "39e13eda873d3793847ae87a1629f18e660c5b402e011094422f1ffbbdf24b32",
+        "verifier/test.sh": "3c5baf21d06f82fd4b25a3111b82e9308a9e479980c98bb87832f8b8c21ad29a",
+        "verifier/test_outputs.py": "94424ee977ae3435c75f420b4dfce346e1b66937e165f9999ea3288f632811f9"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "syzkaller-ppdev-syzlang",
+      "package_sha256": "133a3c4d578424c51885fcd310c3d29452cbf25fedaccd708309e5c5097da61c",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "9fa8b16fc212f42de3601c478d47e7558137bf550c2e168b7f44d86a7076294d",
+        "verifier/test.sh": "d2d75666dfc7166e4298fd9014fcaeb19f6b6d32e5fcef16dfbfd5a9332de0a5",
+        "verifier/test_outputs.py": "612c0e484ea93a5d80df2849d13b416e5a6dd050287056d6f022ecff02c069a4"
+      },
+      "capabilities": [
+        "required_go_build"
+      ]
+    },
+    {
+      "instance_id": "financial-modeling-qa",
+      "package_sha256": "37c9e391b8a1a3366da41e68d23413ecf354a2644adddd6950837d543f207926",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "690ceaa6ef695d75e36fa61e57f8bf57d2aa27012f360c1381dda5883f57c463",
+        "verifier/test.sh": "fe7195562321b71ace6e1f6858994939238cc7ce0ec2d0ae3b610278489a42b7",
+        "verifier/test_outputs.py": "66550d2f2b83314342c8ea8c81a867d06bbc0b177c23f34b44161f022d64f5ec"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "weighted-gdp-calc",
+      "package_sha256": "ede926d2e390446c1eb3d0bb2c0ddcb25055bd8e7539d966632d44d30cf419b8",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "9eebfad48cbbd71113906e0ff0bbe35bb82711077f513a7c24adfc1706ad5a30",
+        "verifier/test.sh": "f6d94159004f2dcf9488d3f80920a60675f7b45fb22353592fa9b3a61c24843a",
+        "verifier/test_outputs.py": "94b1b6089c1c143cb1f54c5110cfe932e2d85194c19286c7201f5c29c2c87055"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "fix-erlang-ssh-cve",
+      "package_sha256": "0e71288df8e6b61a97053537f9fbb23ad1741efe81161946104d7425765c5c68",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "8d998c0d8d66ebe29b383a82bc3784b313c1553053494b9340236d552341f21e",
+        "verifier/build.sh": "802e1d63d7529af9c0cc3f632e90d40a50383db3930e256158ab643d49597991",
+        "verifier/exploit.py": "95261e494dade053a6d8a5ffd3eeb0b44f4777b2078f65794e400ccba34e61c4",
+        "verifier/test.sh": "1c7be4414512bed087e7021016d2425521505a18bfb03731d918193f18132d1c",
+        "verifier/test_outputs.py": "8baa6eeda3649951d46d61fe2e5c7cc833ca281a1f00fbc8c54b8b033f02b07c"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "court-form-filling",
+      "package_sha256": "fc3e5bd017934252e56a951410b089cfa3c793795e7a3a32699db623d7495a00",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "a1040cb3564a91e9e3a7d8e7351f014637b42ba4854666617a456edc2d96f5cb",
+        "verifier/test.sh": "594a4b8bd62ed47ae798e79f21f94f1ff9f83b0d64140c808a58c36de2cd0034",
+        "verifier/test_outputs.py": "cccc72ef7d553f645a885ad6b921d8401807a7ccf465eaa7ee50ed6e34a0ca6e"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "earthquake-plate-calculation",
+      "package_sha256": "0ffdfbffb2e869b8e00c27178dd4ee47bb25f856ddb8ac3eb107c4f545fac291",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "7e74700780429be4ca3e2722749224ce761c2e864a3aed97e96fce7f4b2c9d88",
+        "verifier/test.sh": "fe7195562321b71ace6e1f6858994939238cc7ce0ec2d0ae3b610278489a42b7",
+        "verifier/test_outputs.py": "d5ddbf850e17561cc7074bda9d0c5457fd7b263e62179ecdff620337ae3efb14"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "paper-anonymizer",
+      "package_sha256": "ce383981b1590b4ebb1b4e758301d320105d7ba157fbed73c21a26d0406cf76e",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "92bf98a8a8980959ee726b4e3d2c5dd4f94d34d89ff6b2d471b42a7dde0c8710",
+        "verifier/test.sh": "3c80578d76c68fd4634e92f7e95c01f6e7baab88e58f6b9483cc93c33c95b5ba",
+        "verifier/test_outputs.py": "bf75c8b4337652e826f49fa4fa1ee64fe27fd2b05c55a5053e2bf247f52275f3"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "paratransit-routing",
+      "package_sha256": "0abb5abd5657390b3c1ad97317b27d3260de7c713dbe4f53353bdb1c8f68e278",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "ac16bc8b7fba81f3e15099339e3989316eb84df771b4c8f6f43b92b1a56e4149",
+        "verifier/darp_validation.py": "5ca4a40c1cc314e8c073395b684f1f5fcd25a703a9d70e23b904cc0abaf3f081",
+        "verifier/reference_oracle.py": "ac11d06efb708c61250f1a6e066fc3e84706fd46c74d876c5459e5be7e8e4eba",
+        "verifier/test.sh": "e7dd779a7c4106558e8781c712246221c8733cd66233b3e43cf570df606653d9",
+        "verifier/test_outputs.py": "db363695efd72c69f583a1a8085731542534cf7494dcafea4100eab845038088"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "fix-build-agentops",
+      "package_sha256": "112b6e065dc46568692dfc15818c98629fd4e13dc577b20af62551e8ac409c53",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "f1826ae6d9b1a0bdd3740368027b110d1307accb03c4fc0913e9b12f075a5308",
+        "verifier/run_passed.sh": "837776dc5221c16dd50f0f1ddfe0cd9e6333aa5be5dc356de3448f911900b59c",
+        "verifier/test.sh": "2314a4addf7d5bebfe1db7681704dd62dabb8b9e617155e50bdf2536d72bbb29",
+        "verifier/test_outputs.py": "88a760014605f111a71ad132a59cb769dc9ed0e455cc76b5463032809f7022ed"
+      },
+      "capabilities": [
+        "agentops_ci"
+      ]
+    },
+    {
+      "instance_id": "jax-computing-basics",
+      "package_sha256": "184fa532dd257a385fd0b20e471a5bc63a45608b739f2f0405a1d29d2954509b",
+      "score_mode": "unsupported",
+      "files": {
+        "task.md": "fc9f4e9cf8b3c97d88dd3b7e563910d6050a51afe37c2bb5d8380bea151ab66b",
+        "verifier/test.sh": "2c77dcbc5d8a924d408676002892868670b2a3bd3105118d1213d77cbcb2cfa6",
+        "verifier/test_outputs.py": "2ced913e7285fa815bbddc830381ca2288c9bebfbf5b60b17c5d9df825418a6b"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "fix-build-google-auto",
+      "package_sha256": "d703c82c42c1c57348c61179a3d24fe742ba3b1f5f2977af18ca0ec12c0eea6b",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "6eeb316a41f60ef49e381328f32f6544a5809794c5292254601ddbad3f31067c",
+        "verifier/run_passed.sh": "4f2ebd85842df0b0e77a8fac8bb816b5d9f015788b777af55a3a8089992b03b4",
+        "verifier/test.sh": "ffb143a46a59ab6e46d4f374b77503580581a5be17a16341621e11768d0a2d45",
+        "verifier/test_outputs.py": "f1747d4c7c102afe30cf7e632af4e398ba575a7cbb60449cb8f78b91fbc515f6"
+      },
+      "capabilities": [
+        "maven_submission"
+      ]
+    },
+    {
+      "instance_id": "spring-boot-jakarta-migration",
+      "package_sha256": "035007aa19be6ed17d6930016df322199da3fe50bff65fae337cbe29c0ffffad",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "0757faa3f3e8d02f3ac6fb0b7ef637f93c12f482721f42777c10b8b69a7cfd31",
+        "verifier/test.sh": "b588a9d9a690da244472fd5259f72ada9d766564973689354dea69767e8a6c0c",
+        "verifier/test_outputs.py": "bfc7a5e8c8fd1bfa3c1ddf58c9c819a237ae07022f52671c845538c50af3aac8"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "exoplanet-detection-period",
+      "package_sha256": "4c0792d4539eed0ff5c8af7838c913fde07eb3ea984c9ea8aabba810b1011fa6",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "b3b69d1f037c04b3c3c9ec3be564774d256b2c24e992b7de82a4979ac95935e4",
+        "verifier/test.sh": "fe7195562321b71ace6e1f6858994939238cc7ce0ec2d0ae3b610278489a42b7",
+        "verifier/test_outputs.py": "7c4bd34f5c9b3b8da50ce45b939816f48e59403998c292ce89c4bdf89b349c03"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "offer-letter-generator",
+      "package_sha256": "eba9affaf0a721eefd67e4a78567356b584b3313abe22f73fc345f66ff71ae9a",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "a3ce086d3b605fcb45cfe553b31ce45071d95047ba839c6a67add358a40cb772",
+        "verifier/test.sh": "cd7165610dcfe25434330d06c9e9de7b2ee2ea0f80d41865c5ad91e8d83a3cbb",
+        "verifier/test_outputs.py": "913b9a3ebe579aed9c8f876dededea4d6a957eca9fbd0d9e8f043719cfb8cf05"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "manufacturing-equipment-maintenance",
+      "package_sha256": "8151c34eea9d8e42dc44ac15a3593aff14bd6a6f9d309e2b8c847ea93fa555b5",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "ac23030507203692094cf245bee71c6690bc4a8b6970d7778b9e627b18206638",
+        "verifier/test.sh": "9d801c4003c57596d42b953c58470a6381221893e0fe42b2ce2af71f64076126",
+        "verifier/test_outputs.py": "6d49ae233317788b3a409d877b60e425e5181cfc0bf7d5b9e2cb106373dac868"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "econ-detrending-correlation",
+      "package_sha256": "9584a7191056dbb6cc437a8b47d14a44f1887d1f5654ba9b779bdf8aad5488ea",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "7956e369eb1bce4db2000e3fad9f7d564269505061ccb5c28d21f90ef51a47a4",
+        "verifier/test.sh": "c51f1d7aec614fda9fedf6db675921bad464e31cc66151bb40684b874f463223",
+        "verifier/test_outputs.py": "7a1dcf2db177d6297e36c7b4ea563518af5c8102031e1d3c9afa04fe8b25b366"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "video-silence-remover",
+      "package_sha256": "3ed1e68570b8fda04397531c9170ec9fdda1d9d7ba01b2ae14b4b3138d20b20e",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "f200dfe10873a88cea005f043853cc4aec680e0211f592bcbdb9811f9ea488a8",
+        "verifier/test.sh": "795600f8600f40c253047ac0c5aac4e297f2e957fbafafab48721786af0c31cd",
+        "verifier/test_outputs.py": "188e11e0571fb8655f10bab9fcbf71f7bba253f380ba26c6144cfc183e93d042"
+      },
+      "capabilities": [
+        "submitted_compression_report"
+      ]
+    },
+    {
+      "instance_id": "seismic-phase-picking",
+      "package_sha256": "508695d67129b6f1258f60401d98957a76ed49fbe25ee00f235cd45e4270f30e",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "43d677698df1c43d68263c05f711a931b739e67f85d417c6dd1a20eafc119c17",
+        "verifier/evaluate_picks.py": "f85eb51eed64093d20adb13db6d8714a20a6c2bd8bf33b56171a1b8258fb7c0f",
+        "verifier/test.sh": "d79a4d5deb7b8256c72197649a9a62541bf12c2f0ad4d4a3955a56d1fba9fdc1",
+        "verifier/test_outputs.py": "f3ea27ae3bf103285be2f52b063a2dd3169956dd04356dc558fe659fa3f81068"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "quantum-numerical-simulation",
+      "package_sha256": "0c3b6b72b9fc2da972c79dd27749f563f984b4a2acaa164100c1cc82291a1782",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "a625ebc90663ac32498251664811f0ded635647ad76b7e6864d28cf3d1c1c19b",
+        "verifier/test.sh": "e0a58d1317b855dc70e09fd85d68e97568cb608de52330b9de955b115b8ad9ce",
+        "verifier/test_outputs.py": "35b1b76dab882850baac20571f7586158e153a81a7a89c53dc6640b19aed980b"
+      },
+      "capabilities": [
+        "submitted_csv_values"
+      ]
+    },
+    {
+      "instance_id": "setup-fuzzing-py",
+      "package_sha256": "b9c79578178f7b95e18e2be65bf45256b0d27bcdbccbeb066c540c7de1794e22",
+      "score_mode": "suite_success_fraction_truncate2",
+      "files": {
+        "task.md": "cb8fe424a97eb61e05207407d399f55a5e9a94ba3b62d2a8c07907e8e85c468b",
+        "verifier/test.sh": "814c426cb146118933647dfa8b852eb584ec08c125b1d2e6455308e94b6f5e43",
+        "verifier/test_lib.py": "2e10aa376b4748889e887afdd21f5be5d5bd4ff8192d557ec21e789db5f58e5a",
+        "verifier/test_setup.py": "8d205e93250400f94b006e507e143c8ad85589c0169c75abafd88addb012550a",
+        "verifier/testing_utils.py": "f74bbb3ae6a427368938f69682d6545ad426f3fa78ac1804b24cc685df81ca19"
+      },
+      "capabilities": [
+        "fuzz_driver"
+      ]
+    },
+    {
+      "instance_id": "lab-unit-harmonization",
+      "package_sha256": "a707488f1a7e4cfea04cc5ac0e99dc4dcfbb21e477893e2a6c43111b18f91be9",
+      "score_mode": "pytest_fraction_round3",
+      "files": {
+        "task.md": "404f728e536a6351cf18caa593abb7d446479f295c8b37455f7fda4d047a9731",
+        "verifier/test.sh": "f8f9bbbfcdf3b3a4d4d922453d4d6d196012fceddb2b4ba823575978e1a50959",
+        "verifier/test_outputs.py": "c9d2151104c18519b554a592a8561bd74b333d4f65601276141c8b8bd31138f0"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "latex-formula-extraction",
+      "package_sha256": "c5d644578e8a5aac042e1bb9f595ec5eacfcae2fb60bdee56a8f0e822912916e",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "ca601e918a6404b8f7286bdbce7cc0067e00c57a7fe02e5798e9c632a884897d",
+        "verifier/test.sh": "3099d125be6772aab900335982a6c649a58a08591ea3f3a4130ad31fb3ac85f8",
+        "verifier/test_outputs.py": "857e670f1813bed43129e73fef31a4f472cdd50e5c73087a6e63821eaedb38c7"
+      },
+      "capabilities": [
+        "mathjax_fixture"
+      ]
+    },
+    {
+      "instance_id": "invoice-fraud-detection",
+      "package_sha256": "89d7291ee1d7de5669c50974a714d7d0d67fd12c22fbb4449f859b3b59d30382",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "f37803e2c0221b47fe2cd206ea1c995a4c320de3d4ece97cf36d6f3ef88fc44b",
+        "verifier/test.sh": "dfb59780bbce55de353a8c7f25ad136e7c0fc75da3744bd54b273aed42a8bb16",
+        "verifier/test_outputs.py": "51365f014273d149a67c19484dadb9f494083fd82f242d524a15014838fd8649"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "organize-messy-files",
+      "package_sha256": "ae8cf803e046f8f43f0ba40964c5b54d03460704876826dab5323f36de62daa5",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "013833bacf27d1e907faa4d0a4e8964784d4f9e2fd21f6ee7b039a6d02666dc8",
+        "verifier/test.sh": "a9b42a4b260fe6639817a325ad9f67b61c972200eed9ed469008ba57fd697a56",
+        "verifier/test_outputs.py": "ce1d6cb719076a1de78cd565542db7687e4f2725636e96d9a5eddefbf49d8bcf"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "xlsx-recover-data",
+      "package_sha256": "42f9532dd075a4a77a11dce379e4982c560b6a563fbad15d1156606fd22706eb",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "1fa882f4c2ccee0356c5e1798b6fd65a6b9bf1a7a40ddf8f97ca9618e1120fec",
+        "verifier/test.sh": "e23180b090dc2a290f0803950755f01529f7501ba54302aac7f30cf86707217f",
+        "verifier/test_outputs.py": "8bb25e42832dc540674dd8f1fe5603288f1f72a801e58c424a8aee07c5a64ee9"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "simpo-code-reproduction",
+      "package_sha256": "94d0f4b1cd7444d4c3cd68f52ea40b85b01036f72e15681f2d8e640260528747",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "53666dc932ba08495963f937c062565fdc26f7fe331ced36e8c4ba7dd67a1b45",
+        "verifier/loss.npz": "162e3cd015afa98503a8419c6955523ba7c4401cd50f34e7d8f7e601e8489d2c",
+        "verifier/test.sh": "b9de164ac31af96ad8d6d978b07c42c10e58076d7df982450dd86da533acb477",
+        "verifier/test_outputs.py": "8d3d4a5301818069436d22d0012318029e0fa8e50258cf676a078b587f4f4040"
+      },
+      "capabilities": [
+        "simpo_independent_reference"
+      ]
+    },
+    {
+      "instance_id": "lean4-proof",
+      "package_sha256": "120755390c7305cb8e899bdbcf1fa21bc8ec72051897982a56ea3503e9d8c2c6",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "2ab16bc3d8cd559ea27c06542cdbd850800d2303262eddc5af5a4c129372e096",
+        "verifier/test.sh": "a531a83a160d5bc5f418d56f94c66b9afc61ac79cad55ff580f6fd89e6ae9fbf",
+        "verifier/test_outputs.py": "bc8ac91bcfaaef6fefc2a35c2ecbb713a21f89e077fb5d42ec417a001dd749df"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "syzkaller-ppdev-syzlang",
+      "package_sha256": "5225ca0e78e8717ab74da6d44910db3f9700e5b6aacbff6e918b1be60e88f249",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "9fa8b16fc212f42de3601c478d47e7558137bf550c2e168b7f44d86a7076294d",
+        "verifier/test.sh": "99b02d8f442134c70a17f97fe6623af074e0a99998c331d20e0a2825e1f79647",
+        "verifier/test_outputs.py": "612c0e484ea93a5d80df2849d13b416e5a6dd050287056d6f022ecff02c069a4"
+      },
+      "capabilities": [
+        "required_go_build"
+      ]
+    },
+    {
+      "instance_id": "paper-anonymizer",
+      "package_sha256": "25c6b8ac7eebfd6208f346dd9604bd2127e9c6747c58f36f29ea349bacd6b8b6",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "92bf98a8a8980959ee726b4e3d2c5dd4f94d34d89ff6b2d471b42a7dde0c8710",
+        "verifier/test.sh": "32bbee51769892fabe17d027b3f7e946640e5daad46e0b0f607efb2a3e8c4b7e",
+        "verifier/test_outputs.py": "bf75c8b4337652e826f49fa4fa1ee64fe27fd2b05c55a5053e2bf247f52275f3"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "fix-build-agentops",
+      "package_sha256": "e2ce62c58d1bd770ade5db4bf087371b6620121810afdcedbc62ab7946bd83d6",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "f1826ae6d9b1a0bdd3740368027b110d1307accb03c4fc0913e9b12f075a5308",
+        "verifier/run_passed.sh": "b1b671356392f48416c5980928276cf0b20c962bdb7c19f396a699f81bfc47a9",
+        "verifier/test.sh": "0a0c419912f572ba38809b71611c2551112110bc99b24d070ac481476fefe52f",
+        "verifier/test_outputs.py": "0fdc2fbf3b5e6aea3d5db234616feeaa8c3573577cee3d39fdd105ab12ac1bdc"
+      },
+      "capabilities": [
+        "agentops_ci"
+      ]
+    },
+    {
+      "instance_id": "fix-build-google-auto",
+      "package_sha256": "6f0e46dbff6c1f25c921ef636d71718ecfa2de24d343358f64d54e51829abb8b",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "6eeb316a41f60ef49e381328f32f6544a5809794c5292254601ddbad3f31067c",
+        "verifier/run_passed.sh": "4f2ebd85842df0b0e77a8fac8bb816b5d9f015788b777af55a3a8089992b03b4",
+        "verifier/test.sh": "cfa09e597cb2290ddd490319a18b7be67a960bd6207c9f6457a021662a630b92",
+        "verifier/test_outputs.py": "f1747d4c7c102afe30cf7e632af4e398ba575a7cbb60449cb8f78b91fbc515f6"
+      },
+      "capabilities": [
+        "maven_submission"
+      ]
+    },
+    {
+      "instance_id": "spring-boot-jakarta-migration",
+      "package_sha256": "14c3651d92f1ebe715a6f5451714d4d1a2f90a0cdf6e5f7f5cfb8ab5679906be",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "0757faa3f3e8d02f3ac6fb0b7ef637f93c12f482721f42777c10b8b69a7cfd31",
+        "verifier/test.sh": "e2b0255f5b1a815cfd2c1dc333db25c50aa60769532858154517d5a20197d210",
+        "verifier/test_outputs.py": "bfc7a5e8c8fd1bfa3c1ddf58c9c819a237ae07022f52671c845538c50af3aac8"
+      },
+      "capabilities": []
+    },
+    {
+      "instance_id": "setup-fuzzing-py",
+      "package_sha256": "4c1dc59d62f2003772677982e7394f7437adc115b18282dce675dee9324ecbb4",
+      "score_mode": "suite_success_fraction_truncate2",
+      "files": {
+        "task.md": "cb8fe424a97eb61e05207407d399f55a5e9a94ba3b62d2a8c07907e8e85c468b",
+        "verifier/test.sh": "19d88861341790f401a0b2c1a981a9a288a1c5e0753ec1cd0a1695de31f35dfa",
+        "verifier/test_lib.py": "2e10aa376b4748889e887afdd21f5be5d5bd4ff8192d557ec21e789db5f58e5a",
+        "verifier/test_setup.py": "8d205e93250400f94b006e507e143c8ad85589c0169c75abafd88addb012550a",
+        "verifier/testing_utils.py": "fd04ac143ab5edfb67c7ceafeb88e302be70719de27592c42f2ab7a36da1f44d"
+      },
+      "capabilities": [
+        "fuzz_driver"
+      ]
+    },
+    {
+      "instance_id": "latex-formula-extraction",
+      "package_sha256": "f48da8c95b45038cf72ba06040bfd18bc7fde81396e77e8f3a069cdbb709c316",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "ca601e918a6404b8f7286bdbce7cc0067e00c57a7fe02e5798e9c632a884897d",
+        "verifier/test.sh": "2d66ce230d580e854b4164a018fad6ae51974fa51f3351d693f55fd44e64f6cb",
+        "verifier/test_outputs.py": "b79d5528bd711be16405a0bf62ac403f508a0df0d753c810aa91df5b37e70e8d"
+      },
+      "capabilities": [
+        "mathjax_fixture"
+      ]
+    },
+    {
+      "instance_id": "simpo-code-reproduction",
+      "package_sha256": "6635057ed026bd518e77f052b96189817c7ae290704159bf13c5dbbc32501543",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "53666dc932ba08495963f937c062565fdc26f7fe331ced36e8c4ba7dd67a1b45",
+        "verifier/loss.npz": "162e3cd015afa98503a8419c6955523ba7c4401cd50f34e7d8f7e601e8489d2c",
+        "verifier/test.sh": "d49448446157ab51482cb43c0a9c3011c383f433d658f9e51de601940267294e",
+        "verifier/test_outputs.py": "8d3d4a5301818069436d22d0012318029e0fa8e50258cf676a078b587f4f4040"
+      },
+      "capabilities": [
+        "simpo_independent_reference"
+      ]
+    },
+    {
+      "instance_id": "fix-build-agentops",
+      "package_sha256": "a9633c83d1365cdc70f056c18ae2a9f06fedff9260749672bde447144a3eb99f",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "a79a1ccd99df41b9862dd8dc80bcb5278d59a5572a25edc86fbe299a978fb422",
+        "verifier/agentops_matrix.py": "95d4e644144c4c66cf2845c590d3ffaae057ec5997a8d6e099dc864883b8d930",
+        "verifier/run_passed.sh": "e20ff3eca82353c0068a34fb2047a213b39106de33f4b76e731605f65a82186d",
+        "verifier/test.sh": "2314a4addf7d5bebfe1db7681704dd62dabb8b9e617155e50bdf2536d72bbb29",
+        "verifier/test_outputs.py": "54a79fc96ec8026862d64aff8fc52beb9dd0895a80688160b86ab4aa50727863"
+      },
+      "capabilities": [
+        "agentops_ci",
+        "agentops_matrix_v1"
+      ],
+      "required_environments": [
+        "py38",
+        "py39",
+        "py310",
+        "py311",
+        "py312"
+      ]
+    },
+    {
+      "instance_id": "fix-build-agentops",
+      "package_sha256": "9cee250c8efaadf68c399b2c711eb7d36f468bbef07ec7ef8e4af28b6ffaee0b",
+      "score_mode": "pytest_exit_binary",
+      "files": {
+        "task.md": "a79a1ccd99df41b9862dd8dc80bcb5278d59a5572a25edc86fbe299a978fb422",
+        "verifier/agentops_matrix.py": "95d4e644144c4c66cf2845c590d3ffaae057ec5997a8d6e099dc864883b8d930",
+        "verifier/run_passed.sh": "b4f40c30fc5815bcb5bfd4036078c26ace674143a1eee37eb9847375423d4705",
+        "verifier/test.sh": "2314a4addf7d5bebfe1db7681704dd62dabb8b9e617155e50bdf2536d72bbb29",
+        "verifier/test_outputs.py": "54a79fc96ec8026862d64aff8fc52beb9dd0895a80688160b86ab4aa50727863"
+      },
+      "capabilities": [
+        "agentops_ci",
+        "agentops_matrix_v1"
+      ],
+      "required_environments": [
+        "py38",
+        "py39",
+        "py310",
+        "py311",
+        "py312"
+      ]
+    }
+  ]
+}

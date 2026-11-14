@@ -64,7 +64,7 @@ def load_base(config):
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for the real Qwen3.5-9B smoke")
     model = Qwen3_5ForConditionalGeneration.from_pretrained(
-        config.model.path, local_files_only=True, dtype=torch.bfloat16,
+        config.model.path, local_files_only=True, dtype=getattr(torch, config.model.dtype),
         attn_implementation=config.model.attention_backend,
     ).to(torch.device("cuda:0"))
     model.config.use_cache = False
@@ -139,6 +139,15 @@ class Coverage:
                 summary["projections"] += 1
                 summary["nonzero_B_gradients"] += int(norm > 0)
                 summary["max_B_gradient_norm"] = max(summary["max_B_gradient_norm"], norm)
+
+    def begin_attempt(self):
+        import copy
+        self._attempt_snapshot = copy.deepcopy((self.rows, self.last_gradients))
+
+    def abort_attempt(self):
+        if hasattr(self, "_attempt_snapshot"):
+            self.rows, self.last_gradients = self._attempt_snapshot
+            del self._attempt_snapshot
 
     def finish(self, before, after):
         for name, row in self.rows.items():

@@ -152,6 +152,13 @@ def test_workspace_subject_distinguishes_missing_and_rejected_outputs(tmp_path):
     assert [row["status"] for row in data["output_inventory"]] == ["missing", "rejected", "rejected"]
 
 
+def verifier_evidence_owner(output):
+    return SimpleNamespace(output=output, ownership={'attempt_id': 'a'},
+        sample=SimpleNamespace(task_key='task', instance_id='test-task'),
+        cfg={'selection': {'tasks': {'task': {'instance': {'package_sha256': 'a' * 64}}}},
+             'execution_context': {'profile': {}}})
+
+
 def test_verifier_command_evidence_has_safe_phase_and_target_host(tmp_path):
     import json
     from types import SimpleNamespace
@@ -171,7 +178,7 @@ def test_verifier_command_evidence_has_safe_phase_and_target_host(tmp_path):
             await self._sandbox.exec("curl https://user:pass@example.test/pkg.whl", timeout_sec=8)
             return SimpleNamespace(rewards={"reward": 1})
 
-    owner = SimpleNamespace(output=tmp_path, ownership={"attempt_id": "a"})
+    owner = verifier_evidence_owner(tmp_path)
     result = asyncio.run(_run_verifier_with_evidence(Verifier(), owner))
     assert result.rewards == {"reward": 1}
     receipt = json.loads((tmp_path / "diagnostics/verifier-execution.json").read_text())
@@ -182,9 +189,7 @@ def test_verifier_command_evidence_has_safe_phase_and_target_host(tmp_path):
     assert "do-not-save" not in json.dumps(command)
 
 
-def test_missing_bootstrap_tools_do_not_become_a_valid_zero_reward(tmp_path):
-    import pytest
-
+def test_bootstrap_evidence_is_saved_without_premature_classification(tmp_path):
     from runtime.agents.skillsbench import _run_verifier_with_evidence
 
     log = tmp_path / 'test-stdout.txt'
@@ -197,9 +202,9 @@ def test_missing_bootstrap_tools_do_not_become_a_valid_zero_reward(tmp_path):
         async def verify(self):
             return SimpleNamespace(rewards={'reward': 0})
 
-    owner = SimpleNamespace(output=tmp_path, ownership={'attempt_id': 'a'})
-    with pytest.raises(RuntimeError, match='bootstrap failed'):
-        asyncio.run(_run_verifier_with_evidence(Verifier(), owner))
+    owner = verifier_evidence_owner(tmp_path)
+    result = asyncio.run(_run_verifier_with_evidence(Verifier(), owner))
+    assert result.rewards == {'reward': 0}
     receipt = read_json(tmp_path / 'diagnostics/verifier-execution.json')
-    assert receipt['phase'] == 'failed'
-    assert receipt['attempts'][-1]['failure_reason'] == 'verifier_bootstrap_tools_missing'
+    assert receipt['phase'] == 'completed'
+    assert 'uvx: command not found' in receipt['attempts'][-1]['test_stdout_tail']

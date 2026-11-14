@@ -1,3 +1,4 @@
+from difficulty.storage import difficulty_path
 """Semantic verification of the holdout receipt, cohort and model/prediction chain."""
 from html.parser import HTMLParser
 
@@ -20,7 +21,7 @@ def verify_evaluation(root, directory, receipt):
     if any(workflow[k] != receipt[k] for k in ('attempt_id', 'dataset_id', 'split_id')):
         raise ValueError('Holdout workflow child IDs mismatch')
     verify(root, 'difficulty-attempt', attempt_id)
-    attempt_dir = owned_path(root, 'difficulty/checkpoints/' + attempt_id)
+    attempt_dir = difficulty_path(root, 'checkpoints', attempt_id)
     attempt = read_json(attempt_dir / 'attempt.json')
     if (attempt['mode'] != receipt['mode'] or attempt['dataset_id'] != dataset_id or attempt['split_id'] != split_id
             or attempt['training_config'] != resolved['training_config']):

@@ -1515,7 +1515,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
             initial_state = ssm_state[prefill_state_indices]
-            initial_state[~prefill_has_initial_state, ...] = 0
+            initial_state.masked_fill_(~prefill_has_initial_state[:, None, None, None], 0)
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,

@@ -152,6 +152,13 @@ def owned_path(root, relative):
 def artifact_dir(cfg, module, artifact_id, category="outputs"):
     if module not in {"enrichment", "hidden", "difficulty", "action", "runtime"}:
         raise ValueError(module)
+    if module == "difficulty":
+        from difficulty.storage import active_root, difficulty_path
+        if active_root(cfg['project_root']) is not None and category in {'datasets', 'checkpoints', 'evaluations', 'predictions'}:
+            return difficulty_path(cfg['project_root'], category, artifact_id)
+    if module == "difficulty" and category == "datasets":
+        from difficulty.datasets.paths import dataset_directory
+        return dataset_directory(cfg, artifact_id)
     if module in {"difficulty", "action"}:
         return owned_path(cfg["project_root"], f"{module}/{category}/{identifier(artifact_id)}")
     if cfg.get("run_id") and module in {"enrichment", "hidden", "difficulty", "action"}:

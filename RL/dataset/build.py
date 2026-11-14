@@ -196,6 +196,11 @@ def build_dataset(cfg, config_file, *, dry_run=False, recover=False):
                                        recorded_request_sha256=native.get("request_sha256"), recorded_output_sha256=native.get("output_sha256"),
                                        prompt_count=len(p), completion_count=len(c), native_finish=native.get("finish_reason"),
                                        mask_spans=spans(len(p), len(c)), tokenizer_fingerprint=native["tokenizer_fingerprint"])
+                            from .online_probabilities import bind_online_probability
+                            from runtime.serving.raw_logprobs import STREAM
+                            probability = bind_online_probability(native, session, row, scfg, deps)
+                            row["probability_streams"] = {STREAM: probability} if probability else {}
+                            row["raw_probability_available"] = probability is not None
                             prompt_lengths[len(p)] += 1; output_lengths[len(c)] += 1
                             cohort = {"model": scfg["model"], "tokenizer_fingerprint": native["tokenizer_fingerprint"],
                                       "generation": {k:v for k,v in scfg.get("generation", {}).items() if k != "seed"},
@@ -263,6 +268,7 @@ def build_dataset(cfg, config_file, *, dry_run=False, recover=False):
                         json_line(streams["exclusions"], {"group_id": gid, "branch_sample_id": row["branch_sample_id"], "reason": row["exclusion_reason"], "severity": "data"})
                 group = {**base, "group_id": gid, "expected_branch_count": n, "available_branch_count": sum(r["token_usable"] for r in rows),
                          "branch_ids": member_ids, "data_ready": ready, "grpo_ready": False,
+                         "raw_probability_complete": all(r.get("raw_probability_available", False) for r in rows),
                          "historical_selected_branch_id": decision.get("selected_branch_id"), "prompt_ref": next((r["native_evidence"] for r in rows if r["native_evidence"]), None)}
                 json_line(streams["groups"], group)
                 counts["training_groups"] += int(ready)
@@ -284,7 +290,10 @@ def build_dataset(cfg, config_file, *, dry_run=False, recover=False):
                    "behavior_logprobs": "not_extracted", "audit_enabled": audit, "grpo_ready": False}
         write_json(stage / "summary.json", summary)
         write_json(stage / "dependencies.json", {"files": deps})
+        from .online_probabilities import freeze_dataset_stream
+        probability_streams = freeze_dataset_stream(stage, max_shard_bytes=dc.storage.max_shard_bytes)
         write_json(stage / "dataset.json", {"schema_version": 1, "dataset_id": dc.dataset_id,
+                   "probability_streams": probability_streams,
                    "mask_policy": MASK_POLICY, "quality": dc.quality.model_dump(), "cohort": common_cohort,
                    "data_ready": counts["training_groups"] > 0, "grpo_ready": False,
                    "audit": {"enabled": audit, "source_hashes_verified": audit, "identity_verified": audit, "token_hashes_verified": audit}})
@@ -307,6 +316,9 @@ def check_dataset(path, level="full"):
             if audit and level == "full" and row["native_evidence"]:
                 from .loader import native_tokens
                 native_tokens(row)
+            if level == "full" and row.get("probability_streams"):
+                from .online_probabilities import OnlineProbabilityReader
+                OnlineProbabilityReader(path).record(row)
         if actual != group["branch_ids"]:
             raise ValueError("Group/member order mismatch")
         groups += 1
