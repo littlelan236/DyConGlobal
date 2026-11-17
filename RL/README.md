@@ -108,6 +108,8 @@ LoRA initialization. Source selection, dtype compatibility and the shared cache 
 are bound in the training contract. See [external-anchor acceptance](GRPO_BINDING_VALIDATION.md)
 for the same-dtype synthetic GPU result and remaining real FP16/BF16 acceptance.
 
+For a new server or checkout, use the maintained [environment setup and deployment checks](DEPLOYMENT.md).
+
 Use `.venvs/rl`, independently locked by `locks/rl.in` / `locks/rl.txt`. On this server
 the environment and its UV cache live under `/data3/wangtianyi/DyConGlobal/RL/`;
 `.venvs/rl` links to that environment. The project is installed editable from
