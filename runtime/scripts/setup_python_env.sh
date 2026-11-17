@@ -55,6 +55,9 @@ for ENVIRONMENT in "${ENVIRONMENTS[@]}"; do
   INSTALL_OPTIONS=()
   if [ "$ENVIRONMENT" = rl ]; then INSTALL_OPTIONS+=(--require-hashes); fi
   "$UV" pip install --python "$PYTHON" "${INSTALL_OPTIONS[@]}" -r "$LOCK"
+  # A root egg-info from a previous editable install can shadow fresh dist-info.
+  # Refresh it through the locked build backend before registering this checkout.
+  "$PYTHON" -c 'from setuptools import setup; setup()' egg_info
   "$UV" pip install --python "$PYTHON" --no-deps --no-build-isolation -e .
   "$UV" pip check --python "$PYTHON"
   "$PYTHON" -c 'import ijson; assert ijson.__version__ == "3.5.1"'

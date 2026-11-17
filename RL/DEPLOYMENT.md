@@ -26,8 +26,10 @@ bash runtime/scripts/setup_rl.sh
 
 The scripts work from any checkout path. Locks contain dependency packages;
 the current checkout is registered separately with `--no-deps -e .` after the
-locked build tools are installed. Existing `.venvs/runner` / `.venvs/rl` links
-to external storage are supported. An existing environment with a different
+locked build tools are installed. Root `egg-info` metadata from earlier editable installs is refreshed
+through the locked build backend so it cannot shadow the current dependencies.
+Existing `.venvs/runner` / `.venvs/rl` links to external storage are supported.
+An existing environment with a different
 Python version is rejected rather than replaced. For an exact clean deployment,
 start with new environment directories; install does not remove unrelated
 packages from an existing environment.
