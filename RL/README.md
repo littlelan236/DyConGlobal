@@ -1,5 +1,18 @@
 # Qwen3.5-9B LoRA foundation
 
+GRPO checkpoint resume can explicitly opt into `runtime.topology_policy:
+preserve_updates` for bidirectional 2/4/8-GPU execution. It retains the source
+logical windows, weights, frozen advantages, anchor, optimizer/scheduler and
+committed cursor, while changing physical task assignment. Training computations
+must not consume RNG. Use the same CLI, a new attempt ID and a dry-run first;
+default `exact` restrictions remain unchanged. See [configuration and limits](TOPOLOGY_SWITCH.md)
+and [validation evidence](TOPOLOGY_SWITCH_VALIDATION.md). CPU/Gloo tests passed;
+real Qwen/NCCL cross-topology GPU acceptance remains pending.
+
+Fixed checkpoint preference diagnostics are available through `dycon lora-probe`:
+explicit checkpoint and fixed complete group IDs, JSON reports and optional baseline
+comparison, with no TensorBoard or training-state writes. See [FIXED_PROBE.md](FIXED_PROBE.md).
+
 Native streaming GRPO supports exact checkpoint resume through the same training CLI, retaining the original anchor and each rank's optimizer/scheduler/RNG. Unlike prepared cache reuse, streaming requires unconsumed native ledgers and raw probability sources to remain accessible. See [streaming recovery](STREAMING_RESUME.md) for complete recovery bundles, read-only historical compatibility, strict paths/topology and validation boundaries.
 
 All optional startup audits and diagnostics default to off in `preflight`:
@@ -22,6 +35,8 @@ training remains the default; `boundary_grad` is an explicit opt-in mode.
 
 | 使用情境 | 文档 |
 |---|---|
+| 2/4/8 卡双向 checkpoint 恢复、逻辑更新保持、RNG 限制 | [TOPOLOGY_SWITCH.md](TOPOLOGY_SWITCH.md) |
+| 跨卡数 CPU/Gloo 验证、v10 八卡 dry-run 与待完成 GPU 验收 | [TOPOLOGY_SWITCH_VALIDATION.md](TOPOLOGY_SWITCH_VALIDATION.md) |
 | Native streaming resume、旧 checkpoint 兼容、外部数据与路径/拓扑限制 | [STREAMING_RESUME.md](STREAMING_RESUME.md) |
 | 单卡/双卡短 native 数据验收与 v10 只读验证范围 | [STREAMING_RESUME_VALIDATION.md](STREAMING_RESUME_VALIDATION.md) |
 | CLI、完整 YAML、fresh/resume/warm_start、Python 服务与训练核心 | [TRAINING.md](TRAINING.md) |
@@ -31,6 +46,7 @@ training remains the default; `boundary_grad` is an explicit opt-in mode.
 | 离线数据集、token cache 和 raw T=1 概率 stream/replay | [dataset/README.md](dataset/README.md) |
 | 离线 GRPO、外部 shared anchor、一次 epoch 与精确恢复 | [GRPO.md](GRPO.md) |
 | 训练进度、TensorBoard 实时 loss、冻结 advantage 查询 | [OBSERVABILITY.md](OBSERVABILITY.md) |
+| 固定 group checkpoint 偏好评分、JSON 报告及历史改善对比 | [FIXED_PROBE.md](FIXED_PROBE.md) |
 | 可观测性测试与 GPU fresh/resume 验收 | [OBSERVABILITY_VALIDATION.md](OBSERVABILITY_VALIDATION.md) |
 | GRPO 原有实现与 GPU 验收 | [GRPO_VALIDATION.md](GRPO_VALIDATION.md) |
 | 外部 anchor 配置、联调及 GPU fresh/pause/resume 验收 | [GRPO_BINDING_VALIDATION.md](GRPO_BINDING_VALIDATION.md) |
@@ -42,7 +58,9 @@ training remains the default; `boundary_grad` is an explicit opt-in mode.
 This module provides bf16 LoRA training in the original DyConGlobal checkout. It
 supports synthetic causal CE and the versioned offline `offline_grpo_k3_v1`
 objective. Offline GRPO supports synchronous whole-group data parallelism on 1, 2
-or 4 GPUs, with an opt-in distinct-parent 8x16 mode on 8 GPUs; see [DATA_PARALLEL.md](DATA_PARALLEL.md). Benchmark evaluation, vLLM
+or 4 GPUs by default, with an opt-in distinct-parent 8x16 mode on 8 GPUs;
+`preserve_updates` additionally remaps either logical schedule across 2/4/8 GPUs.
+See [DATA_PARALLEL.md](DATA_PARALLEL.md). Benchmark evaluation, vLLM
 adapter serving and quantization remain separate.
 The separate [dataset module](dataset/README.md) constructs offline native-token step groups
 and exposes neutral raw T=1 online streams and offline native-vLLM replay artifacts.
@@ -297,3 +315,5 @@ acceptance; CPU/Gloo results do not establish a GPU speedup or training quality.
 ## 8×16 validation status (2026-11-14)
 
 The explicit experimental [8-GPU distinct-parent protocol](DATA_PARALLEL_8X16.md) has passed CPU/Gloo regression: **426 passed, 12 skipped**, including real eight-process synchronization and tiny-Qwen prepared/streaming resume. See [validation details and pending acceptance](DATA_PARALLEL_8X16_VALIDATION.md). The skips do not count as GPU acceptance; real Qwen3.5-9B eight-GPU correctness, long-prefix capacity, throughput and quality remain pending.
+
+Full merged checkpoints for rollout: `.venvs/rl/bin/dycon lora-export --checkpoint PATH --base-model PATH --output PATH`; see [LoRA serving export](EXPORT.md). Uses CPU only and registers the model for the existing run/serving interfaces.

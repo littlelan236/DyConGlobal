@@ -198,3 +198,12 @@ attempt，保留原 seed round；accepted 且 capture complete 不属于该新�
 独立采样次数扩展使用 run add-repetitions --count N：向每个冻结 task 追加 N 个
 repetition，保留旧样本与 capture 证据；与上述重跑可以在同一次 resume 中调度。
 完整预览、哈希校验及恢复用法见 [最小运行指南](MINIMUM-RUN-CN.md#追加-repetition-与重跑-accepted-partial-capture)。
+
+
+## Resume 与历史 capture 并行恢复
+
+正式 `dycon run resume RUN_ID --detach` 在后台恢复启动前已有的 capture，模型服务启动和新轨迹 rollout 同时继续，无需等待历史 NAS 发布完成；新轨迹仍受既有 spool 配额和 admission 水位约束。恢复复用 `capture recover` 的校验、封装、上传和 ACK 清理逻辑，不重跑模型，也不改变 sample/repetition 或源 capture 身份。
+
+后台恢复只使用服务启动前冻结的文件路径清单；有 spill 待重放的历史 session 交给现有 export queue，后台不同时封装这些 session。每个会话的 request/index 元数据通过一次清单扫描分组，避免逐会话重复扫描整个 run。`runs/RUN_ID/capture-recovery.json` 记录当前 execution、running/complete/stopped/failed；complete 表示本轮恢复扫描结束，不代表所有 capture 均已完整发布，deferred_sessions、pending_upload 和 partial 仍需检查。异常另记 capture-recovery-error.json，不改变 rollout 成败。
+
+取消或 rollout 退出时，恢复扫描/发布等待协作停止，未 ACK 的本地 bytes 保留；先收拢后台恢复，再关闭后端并执行原有 run-end capture publication，run 锁始终覆盖后台写入。独立 `dycon capture recover RUN_ID` 仍同步运行并独占 run 锁。

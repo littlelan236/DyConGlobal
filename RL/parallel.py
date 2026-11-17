@@ -112,12 +112,21 @@ class GroupParallel:
 
     def finish_window(self, model, parameters, window, rows, loss, prefix, compute_seconds):
         import torch
+        from RL.topology import portable, merge_rows
         chunk_mode = bool(window and window[0].metadata.get("execution_chunk")) if hasattr(window[0], "metadata") else False
+        remapped = portable(self) and not chunk_mode
         identities = [dict(g.metadata["execution_chunk"]) for g in window] if chunk_mode else None
+        if remapped:
+            branch_count = sum(len(values) for _, values in rows)
+            token_count = sum(len(window[i].completion_token_ids[row["native_branch_ordinal"]])
+                              for i, values in rows for row in values)
+        else:
+            branch_count = sum(window[index].group_size for index, _ in rows)
+            token_count = sum(int(window[index].loss_mask.sum()) for index, _ in rows)
         payload = {"identities": identities, "groups": [index for index, _ in rows], "rows": rows, "loss": loss,
                    "prefix": prefix, "rank": self.rank, "compute_seconds": compute_seconds,
-                   "branch_count": sum(window[index].group_size for index, _ in rows),
-                   "token_count": sum(int(window[index].loss_mask.sum()) for index, _ in rows),
+                   "branch_count": branch_count,
+                   "token_count": token_count,
                    "peak_allocated_bytes": getattr(self, "attempt_peak_allocated_bytes", 0) or
                         (torch.cuda.max_memory_allocated() if parameters[0].is_cuda else 0),
                    "peak_reserved_bytes": getattr(self, "attempt_peak_reserved_bytes", 0) or
@@ -126,7 +135,8 @@ class GroupParallel:
                    "finite": all(p.grad is None or bool(torch.isfinite(p.grad).all()) for p in parameters)}
         peers = self.gather(payload)
         indexes = [index for peer in peers for index in peer["groups"]]
-        if sorted(indexes) != list(range(len(window))):
+        parent_rows = merge_rows(window, peers) if remapped else None
+        if not remapped and sorted(indexes) != list(range(len(window))):
             raise ValueError("Distributed window has missing or duplicate group contributions")
         if chunk_mode:
             if (any(peer["identities"] != identities for peer in peers)
@@ -151,7 +161,8 @@ class GroupParallel:
         stats = {"world_size": self.world_size, "gradient_sync_seconds": time.monotonic() - started,
                  "local_telemetry_rank": 0,
                  "rank_critical_path_seconds": max(p["compute_seconds"] for p in peers),
-                 "ranks": [{"rank": peer["rank"], "group_count": len(peer["groups"]),
+                 "ranks": [{"rank": peer["rank"], "group_count": len(set(peer["groups"])) if remapped else len(peer["groups"]),
+                            **({"physical_task_count": len(peer["groups"])} if remapped else {}),
                             "group_ordinals": peer["groups"], "compute_seconds": peer["compute_seconds"],
                             "branch_count": peer["branch_count"], "token_count": peer["token_count"],
                             "peak_allocated_bytes": peer["peak_allocated_bytes"],
@@ -159,7 +170,7 @@ class GroupParallel:
                             **({"parent_group_count": len(peer["groups"]),
                                 "execution_chunk_count": len(peer["groups"])} if chunk_mode else {})}
                            for peer in peers]}
-        return ([row for _, row in ordered], sum(peer["loss"] for peer in peers),
+        return (parent_rows if remapped else [row for _, row in ordered], sum(peer["loss"] for peer in peers),
                 [item for peer in peers for item in peer["prefix"]], stats)
 
     def after_step(self, model):

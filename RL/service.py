@@ -58,9 +58,8 @@ def _source(config):
 def _preflight(config, root, parent):
     from RL.parallel import execution_contract
     if parent and config.run.start.mode in {"resume", "append_resume"}:
-        saved = read_json(Path(parent["path"]) / "state.json")["contract"].get("parallel")
-        if saved != execution_contract(config):
-            raise ValueError("Resume requires the same data-parallel world size and execution contract")
+        from RL.topology import validate_resume as validate_topology
+        validate_topology(config, read_json(Path(parent["path"]) / "state.json"))
     if config.preflight.check_resources:
         memory_plan(config)
     base = base_identity(config.model.path, root, config.preflight.verify_identity)
@@ -183,6 +182,7 @@ def run(root_config, training_config):
         parent = _source(config)
         if config.run.mode == "dry-run":
             base = _preflight(config, root, parent)
+            from RL.topology import enabled as portable_enabled, execution_record
             return {"mode": "dry-run", "purpose": "engineering_smoke", "status": "validated",
                     "output": str(directory), "base_fingerprint": base["fingerprint"],
                     "fixture_sha256": sha256(Path(__file__).parent / "fixtures/causal-text-smoke-v1.json"),
@@ -195,6 +195,8 @@ def run(root_config, training_config):
                     "grpo": config.grpo.model_dump() if config.grpo else None,
                     "dataset": base.get("grpo_dataset"),
                     "streaming_resume": base.get("streaming_resume"),
+                    "physical_execution": execution_record(config) if portable_enabled(config) else None,
+                    "training_rng_validation": "pending_model_and_update" if portable_enabled(config) else None,
                     "coverage": "text backbone all Linear; exact paths resolved only when loading the model"}
         directory.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(directory.parent / ("." + config.run.attempt_id + ".lock"), nonblocking=True):
@@ -541,6 +543,8 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
     """Offline objective within the common attempt/model/checkpoint lifecycle."""
     from RL.parallel import current, execution_contract, follower
     parallel = current()
+    from RL.topology import configure as configure_topology
+    configure_topology(config, model, parallel)
     if parallel and not parallel.primary:
         return follower(config, root, directory, parent, model, targets,
                         optimizer_settings=optimizer_settings, mlps=mlps, offloader=offloader,
@@ -773,6 +777,8 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
         if reader is None and not streaming_mode:
             raise ValueError("Distributed GRPO requires prepared indexed groups; migrate the legacy attempt first")
         contract["parallel"] = execution_contract(config)
+    from RL.topology import bind as bind_topology
+    bind_topology(config, metadata, contract, directory)
     optimizer, scheduler = optimizer_and_scheduler(model, optimizer_settings)
     if metadata is not None:
         if config.run.start.mode == "append_resume":
@@ -823,6 +829,8 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
     extra_files = (write_bundle(directory, contract, origin=resolved_stream["origin"] if resolved_stream else None)
                    if streaming_mode else
                    {p.relative_to(directory).as_posix(): p for p in (directory / "grpo").rglob("*") if p.is_file()})
+    if config.runtime.topology_policy == "preserve_updates":
+        extra_files["topology-transition.json"] = directory / "topology-transition.json"
     # Metric prefix travels with a checkpoint so resumed reports are reconstructible
     # even if the source attempt is still incomplete after an interruption.
     if metadata:

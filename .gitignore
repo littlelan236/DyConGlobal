@@ -241,3 +241,12 @@ desktop.ini
 /RL/experiments/observability-20261112/
 # Historical verifier execution evidence; catalog/verifier_patches remains source
 /analysis/pddl-airport-revalidation-*/
+
+# Generated catalog revision evidence and task-specific selections
+/catalog/changes/
+/catalog/task-sets/
+
+# Host-bound dated training/diagnostic configurations; reusable presets stay visible
+/RL/experiments/*-20[0-9][0-9][01][0-9][0-3][0-9]*.yaml
+/RL/experiments/*-20[0-9][0-9][01][0-9][0-3][0-9]*.yml
+/RL/experiments/*-20[0-9][0-9][01][0-9][0-3][0-9]*/

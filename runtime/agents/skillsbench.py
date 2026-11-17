@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import copy
 import json
+import logging
 import os
 import uuid
 from pathlib import Path
@@ -22,6 +23,7 @@ from runtime.agents.openhands import OPENHANDS_AGENT_ENVIRONMENT, resource_overr
 from runtime.images.nas import ImageLeaseManager, NasImageStore
 
 SKILLSBENCH_AGENT_ENVIRONMENT = OPENHANDS_AGENT_ENVIRONMENT
+LOGGER = logging.getLogger(__name__)
 
 
 def verifier_environment_policy(profile, task_variables, proxy=None, task_id=None):
@@ -807,6 +809,77 @@ def _json_events(events):
             for i, e in enumerate(events or [])]
 
 
+def _openhands_sdk_evidence(output):
+    '''Join bounded SDK transport receipts into an attempt-level error summary.'''
+    output = Path(output)
+    diagnostics = output / 'diagnostics'
+    receipts, http_failures, call_failures = [], [], []
+    paths = sorted(diagnostics.glob('sdk-transport-sdk-*.json'))
+    local_path = diagnostics / 'sdk-local-transport.json'
+    if local_path.is_file():
+        paths.append(local_path)
+    for path in paths:
+        try:
+            row = read_json(path)
+        except (OSError, ValueError):
+            continue
+        receipts.append({'path': str(path.relative_to(output)), 'sha256': sha256(path)})
+        sdk_id = row.get('sdk_request_id')
+        for event in row.get('events', []):
+            if not isinstance(event, dict):
+                continue
+            base = {'sdk_request_id': event.get('sdk_request_id', sdk_id),
+                    'observed_at': event.get('observed_at')}
+            status = event.get('http_status')
+            if event.get('event') == 'sdk_http_finished' and isinstance(status, int) and status >= 400:
+                http_failures.append({**base, 'http_status': status, **{
+                    key: event[key] for key in (
+                        'http_error_type', 'http_error_code', 'http_error_param',
+                        'http_error_message', 'http_error_body_sha256',
+                        'http_error_body_omitted', 'http_error_body_unavailable')
+                    if key in event}})
+            elif event.get('event') == 'sdk_call_failed':
+                call_failures.append({**base,
+                    'http_status': status if isinstance(status, int) else None,
+                    'phase': event.get('phase', 'unknown'),
+                    'exception_types': event.get('exception_types', []),
+                    **{key: event[key] for key in (
+                        'http_error_type', 'http_error_code', 'http_error_param',
+                        'http_error_message', 'http_error_body_sha256',
+                        'http_error_body_omitted', 'http_error_body_unavailable')
+                        if key in event}})
+    return {'receipt_count': len(receipts), 'receipts': receipts,
+            'http_failures': http_failures[:64], 'call_failures': call_failures[:64]}
+
+
+def _openhands_error_diagnostics(output, result_row, binding):
+    '''Persist the causal join between ACP failure and SDK/upstream evidence.'''
+    sdk = _openhands_sdk_evidence(output)
+    error = result_row.get('error')
+    if not error and not sdk['http_failures'] and not sdk['call_failures']:
+        return None
+    if sdk['http_failures']:
+        first = sdk['http_failures'][0]
+        cause, source = 'sdk_http_error', 'actual_sdk_http_transport'
+        summary = {'http_status': first.get('http_status'),
+                   'sdk_request_id': first.get('sdk_request_id')}
+    elif sdk['call_failures']:
+        first = sdk['call_failures'][0]
+        cause, source = 'sdk_call_error', 'actual_sdk_http_transport'
+        summary = {'http_status': first.get('http_status'),
+                   'sdk_request_id': first.get('sdk_request_id'),
+                   'exception_types': first.get('exception_types', []),
+                   'phase': first.get('phase', 'unknown')}
+    elif isinstance(error, str) and error.startswith('ACP '):
+        cause, source, summary = 'acp_error', 'benchflow_acp_transport', {}
+    else:
+        cause, source, summary = 'openhands_error', 'benchflow_result', {}
+    return {'schema_version': 1, 'binding': binding, 'observed_at': now(),
+            'cause': cause, 'cause_source': source, **summary,
+            'public_error': _safe_acp_message(error),
+            'error_category': result_row.get('error_category'), 'sdk_transport': sdk}
+
+
 def _result_json(result):
     return {key: getattr(result, key, None) for key in (
         "task_name", "rollout_name", "rewards", "agent", "agent_name", "model", "n_tool_calls",
@@ -920,7 +993,7 @@ def _terminal_evidence(output, *, agent_status, capture_status, evaluation_statu
         'diagnostics/process-supervisor.json', 'capture-drain.json',
         'capture-finalization.json', 'capture-stop-error.json', 'evaluation-raw.json',
         'sample-token-budget.json', 'diagnostics/verifier-zero-audit.json',
-        'diagnostics/context-window-error.json',
+        'diagnostics/context-window-error.json', 'diagnostics/openhands-error.json',
     ]
     files = []
     primary_cause, cause_source = None, None
@@ -948,6 +1021,14 @@ def _terminal_evidence(output, *, agent_status, capture_status, evaluation_statu
                     ('process_pid', 'process_exit_code', 'diagnosis', 'source', 'cause')})
     supervisor_path = output / 'diagnostics/process-supervisor.json'
     supervisor = read_json(supervisor_path) if supervisor_path.is_file() else None
+    sdk_paths = sorted((output / 'diagnostics').glob('sdk-transport-sdk-*.json'))
+    local_sdk_path = output / 'diagnostics/sdk-local-transport.json'
+    if local_sdk_path.is_file():
+        sdk_paths.append(local_sdk_path)
+    for path in sdk_paths:
+        files.append({'path': str(path.relative_to(output)), 'sha256': sha256(path)})
+    for path in sorted((output / 'diagnostics').glob('request-lifecycle-*.json')):
+        files.append({'path': str(path.relative_to(output)), 'sha256': sha256(path)})
     if agent_status == 'ContextWindowExceededError':
         primary_cause, cause_source = agent_status, 'upstream_model_response'
     if not primary_cause:
@@ -2010,6 +2091,14 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
                     evidence_path=output / 'diagnostics/process-supervisor.json', binding=binding)
 
         result_row = _result_json(result)
+        openhands_error = _openhands_error_diagnostics(output, result_row, binding)
+        if openhands_error is not None:
+            write_json(output / 'diagnostics/openhands-error.json', openhands_error)
+            LOGGER.warning('DYCON_OPENHANDS_ERROR %s', json.dumps({
+                key: openhands_error.get(key) for key in (
+                    'cause', 'cause_source', 'http_status', 'sdk_request_id',
+                    'error_category') if key in openhands_error
+            }, sort_keys=True, separators=(',', ':')))
         # This diagnostic is separate from immutable result/terminal receipts.
         # Public exit status deliberately retains the frozen retry semantics.
         cause = {"schema_version": 1, "binding": binding,
@@ -2039,6 +2128,13 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
                         cause.update(cause="sdk_api_timeout", phase=event.get("phase", "unknown"),
                                      sdk_request_id=event.get("sdk_request_id", sdk_row.get("sdk_request_id")),
                                      source="actual_sdk_http_transport", exception_types=types)
+        if openhands_error is not None:
+            cause.update(cause=openhands_error['cause'], source=openhands_error['cause_source'],
+                         openhands_error_path='diagnostics/openhands-error.json')
+            if openhands_error.get('http_status') is not None:
+                cause['http_status'] = openhands_error['http_status']
+            if openhands_error.get('sdk_request_id'):
+                cause['sdk_request_id'] = openhands_error['sdk_request_id']
         write_json(output / "benchflow-diagnostics.json", cause)
         write_json(output/'requests/receipt.json',{'schema_version':1,'binding':binding,
             'files':{p.name:sha256(p) for p in sorted((output/'requests').glob('req-*.json'))},
@@ -2226,6 +2322,18 @@ async def _execute_attempt(cfg, run_id, task, runtime, sample, context, output, 
                 drain_capture(cfg, output, capture_client, capture_session, capture_diagnostic_errors)
             except Exception as cleanup_error:
                 write_json(output / "capture-stop-error.json", {"error": repr(cleanup_error)})
+        sdk_evidence = _openhands_sdk_evidence(output)
+        if (sdk_evidence['http_failures'] or sdk_evidence['call_failures']
+                or 'acp' in (type(exc).__name__ + ' ' + str(exc)).lower()):
+            openhands_error = _openhands_error_diagnostics(
+                output, {'error': repr(exc), 'error_category': type(exc).__name__}, binding)
+            if openhands_error is not None:
+                write_json(output / 'diagnostics/openhands-error.json', openhands_error)
+                LOGGER.warning('DYCON_OPENHANDS_ERROR %s', json.dumps({
+                    key: openhands_error.get(key) for key in (
+                        'cause', 'cause_source', 'http_status', 'sdk_request_id',
+                        'error_category') if key in openhands_error
+                }, sort_keys=True, separators=(',', ':')))
         write_json(output / "backend-error.json", {"error_type": type(exc).__name__,
             "error": str(exc), "binding": binding, "at": now()})
         if not isinstance(exc, Exception):

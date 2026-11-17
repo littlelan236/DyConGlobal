@@ -20,6 +20,8 @@ from core.io import hash_json, identifier, now, read_json, sha256, write_json
 from core.locking import file_lock
 from runtime.agents.submission_restore import archive_inventory, RESTORE_CODE
 
+from runtime.agents.submission_trajectory_recovery import OUTPUTS as RECOVERY_OUTPUTS, recover
+
 POLICY = 'skillsbench-declared-submission-regrade-v1'
 SUPPORTED = {
     'lean4-proof': ['/app/workspace/solution.lean'],
@@ -31,6 +33,12 @@ SUPPORTED = {
     'fix-build-agentops': ['/home/github/build/failed'],
     'spring-boot-jakarta-migration': ['/workspace'],
     'setup-fuzzing-py': ['/app'],
+    **RECOVERY_OUTPUTS,
+    'manufacturing-equipment-maintenance': [
+        '/app/output/q01.json', '/app/output/q02.json',
+        '/app/output/q03.json', '/app/output/q04.json',
+        '/app/output/q05.json',
+    ],
 }
 
 
@@ -43,11 +51,21 @@ def member(base, relative):
 
 def source_inventory(source, audit_rows):
     run = source['run']
-    paths = {run / n for n in ['plan.json', 'selection.json', 'config.yaml', 'resolved-config.json',
+    recovery_only = all(row.get('trajectory_recovery') is True for row in audit_rows)
+    if recovery_only:
+        paths = {run / n for n in ['plan.json', 'selection.json', 'config.yaml', 'resolved-config.json']}
+        for row in audit_rows:
+            attempt = member(run, row['attempt_path'])
+            paths.update(attempt / n for n in ['attempt.json', 'subject/subject.json',
+                'openhands/acp-events.json', 'openhands/canonical.traj.json',
+                'agent-outcome.json', 'finalization/05-settled.json'])
+    else:
+        paths = {run / n for n in ['plan.json', 'selection.json', 'config.yaml', 'resolved-config.json',
                                'evidence.json', 'progress.json']}
     names = {'reward.txt', 'rewards.jsonl', 'evaluation-raw.json', 'evaluation.json',
              'result.json', 'attempt.json', 'evidence.json', 'progress.json', '05-settled.json'}
-    paths.update(p for p in run.rglob('*') if p.is_file() and p.name in names)
+    if not recovery_only:
+        paths.update(p for p in run.rglob('*') if p.is_file() and p.name in names)
     for row in audit_rows:
         for entry in row.get('source_manifest', []):
             p = Path(entry['path'])
@@ -85,35 +103,51 @@ def replay_plan(source, target, audit):
         original = source['config']['selection']['tasks'][row['task_key']]
         if row['instance_id'] not in checked:
             verify_package(task)
+            same_package = task['instance']['package_sha256'] == original['instance']['package_sha256']
             adaptation = task['instance'].get('verifier_adaptation', {})
-            receipt_path = Path(adaptation['receipt_path'])
-            if sha256(receipt_path) != adaptation['receipt_sha256']:
-                raise ValueError('Task adaptation receipt changed')
-            upstream = read_json(receipt_path)['upstream_task']
-            if (upstream['instance']['package_sha256'] != original['instance']['package_sha256']
-                    or task['instance']['images'] != original['instance']['images']):
-                raise ValueError('New verifier does not derive from the source package and image')
-            checked.add(row['instance_id'])
+            if same_package and task['instance']['images'] == original['instance']['images']:
+                checked.add(row['instance_id'])
+            else:
+                receipt_path = Path(adaptation['receipt_path'])
+                if sha256(receipt_path) != adaptation['receipt_sha256']:
+                    raise ValueError('Task adaptation receipt changed')
+                upstream = read_json(receipt_path)['upstream_task']
+                if (upstream['instance']['package_sha256'] != original['instance']['package_sha256']
+                        or task['instance']['images'] != original['instance']['images']):
+                    raise ValueError('New verifier does not derive from the source package and image')
+                checked.add(row['instance_id'])
         attempt = member(source['run'], row['attempt_path'])
         subject_path = member(attempt, 'subject/subject.json')
         subject = read_json(subject_path)
         if current.get('subject_sha256') != sha256(subject_path):
             raise ValueError('Original subject identity changed')
         binding = subject['binding']
+        if 'run_id' in binding:
+            binding = {'run': binding['run_id'], 'sample': binding['sample_key'],
+                       'attempt': binding['attempt_id'], 'task': row['instance_id']}
+            if subject['binding']['task_key'] != row['task_key']:
+                raise ValueError('Subject task binding mismatch')
         if any(binding.get(k) != value for k, value in {
                 'run': source['plan']['run_id'], 'sample': row['sample_key'],
                 'attempt': row['attempt_id'], 'task': row['instance_id']}.items()):
             raise ValueError('Subject belongs to a different historical attempt')
+        recovery = None
+        if row.get('trajectory_recovery') is True:
+            if subject['outputs'] or current.get('evaluation_status') not in {None, 'not_run'}:
+                raise ValueError('Trajectory recovery requires an unexported, unevaluated subject')
+            recovery = recover(attempt, row.get('source_manifest', []), row['instance_id'])
+            subject = {**subject, 'outputs': [{k:v for k,v in f.items() if k!='hex'} for f in recovery['files']],
+                       'missing_outputs': [], 'rejected_outputs': []}
         allowed = SUPPORTED.get(row['instance_id'], [])
         reason = None
         paths = [o['source_path'] for o in subject['outputs']]
         if row['instance_id'] not in SUPPORTED:
             reason = 'Required /opt/syzkaller submission was not exported; /app archive cannot restore it'
-        elif set(paths) | set(subject['missing_outputs']) != set(allowed) or subject['rejected_outputs']:
+        elif set(paths) | set(subject['missing_outputs']) != set(allowed) or subject.get('rejected_outputs', []):
             reason = 'Incomplete or unsupported declared output inventory'
         selected.append({'source': row, 'task_key': key, 'task': task,
                          'subject_path': str(subject_path), 'subject_sha256': sha256(subject_path),
-                         'subject': subject, 'unavailable_reason': reason,
+                         'subject': subject, 'recovery': recovery, 'unavailable_reason': reason,
                          'replay_scope': 'Declared authenticated outputs in a fresh image; original full live state unavailable'})
     if not selected:
         raise ValueError('No historical VerifierError/Review candidates')
@@ -122,9 +156,19 @@ def replay_plan(source, target, audit):
 
 async def restore(env, item, folder):
     subject, requests = item['subject'], []
+    recovered = item.get('recovery')
+    if recovered:
+        write_json(folder / 'trajectory-recovery.json', recovered)
+        for index, row in enumerate(subject['outputs']):
+            path = folder / 'recovered-inputs' / str(index)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(bytes.fromhex(recovered['files'][index]['hex']))
+            if sha256(path) != row['sha256']:
+                raise ValueError('Recovered input changed')
+            row['path'] = str(path.resolve())
     allowed = SUPPORTED[item['source']['instance_id']]
     for index, row in enumerate(subject['outputs']):
-        path = member(Path(item['subject_path']).parent, row['path'])
+        path = Path(row['path']) if recovered else member(Path(item['subject_path']).parent, row['path'])
         if row['kind'] == 'directory_archive':
             request = await asyncio.to_thread(archive_inventory, path, row['sha256'], row['source_path'])
             request['kind'] = 'directory_archive'
@@ -259,9 +303,11 @@ async def replay(cfg, run_id, item, output):
     return row
 
 
-def regrade(root, run_id, source_run, audit_report, output_dir, *, workers=3, plan_only=False, replace_original=False):
+def regrade(root, run_id, source_run, audit_report, output_dir, *, workers=3, plan_only=False, replace_original=False, allow_active_source=False):
     if not 1 <= workers <= 4 or run_id == source_run:
         raise ValueError('Use a distinct frozen target run and workers in 1..4')
+    if allow_active_source and not replace_original:
+        raise ValueError('Dynamic source replacement requires --replace-original-with-backup')
     source, target = load_plan(root, source_run), load_plan(root, run_id)
     output = Path(output_dir).resolve()
     if not output.is_relative_to((target['run'] / 'validation').resolve()) or output == (target['run'] / 'validation').resolve():
@@ -271,12 +317,26 @@ def regrade(root, run_id, source_run, audit_report, output_dir, *, workers=3, pl
     audit_path = Path(audit_report).resolve()
     if not audit_path.is_relative_to(Path(root).resolve()):
         raise ValueError('Audit selection must be project owned')
-    if replace_original:
+    if replace_original and any(json.loads(l).get('trajectory_recovery') for l in audit_path.read_text().splitlines() if l.strip()):
+        raise ValueError('Recovered trajectory submissions require separate review; canonical replacement disabled')
+    if replace_original and not allow_active_source:
         from application.execution.config_revision import _offline
         _offline(source['run'])
     selected, audit_rows = replay_plan(source, target, audit_path)
     output.mkdir(parents=True, exist_ok=False)
     before = source_inventory(source, audit_rows)
+    if allow_active_source:
+        # Active runs may append unrelated attempts while this replay executes.
+        # Preserve the selected terminal attempt and frozen run identity files;
+        # replacement still rechecks the selected sample projection under locks.
+        selected_roots = [member(source['run'], row['attempt_path']).resolve()
+                          for row in audit_rows]
+        frozen = {str((source['run'] / name).resolve())
+                  for name in ('plan.json', 'selection.json', 'config.yaml', 'resolved-config.json')}
+        before = {path: digest for path, digest in before.items()
+                  if path in frozen or any(Path(path).resolve() == root or
+                                           root in Path(path).resolve().parents
+                                           for root in selected_roots)}
     write_json(output / 'source-before.json', before)
     write_json(output / 'plan.json', {'policy': POLICY, 'run_id': run_id, 'source_run_id': source_run,
         'audit_report': str(audit_path), 'audit_sha256': sha256(audit_path),
@@ -332,7 +392,7 @@ def regrade(root, run_id, source_run, audit_report, output_dir, *, workers=3, pl
         if not summary['complete']:
             raise ValueError('Incomplete replay or changed sources; refusing historical replacement')
         from runtime.agents.submission_replacement import replace_outcomes
-        replacement = replace_outcomes(root, source, target, selected, results, output, before)
+        replacement = replace_outcomes(root, source, target, selected, results, output, before, allow_active_source=allow_active_source)
         summary.update(replacement=replacement,
                        historical_outcomes_modified=replacement['applied_count'] > 0)
         write_json(output / 'summary.json', summary)

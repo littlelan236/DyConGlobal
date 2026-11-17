@@ -54,3 +54,9 @@ seed、parallel enabled/branch_count、limits retry 种子策略、benchmark/任
 `sandbox.memory_mb` 的单位是 MiB，16 GiB 对应 16384；它是全局默认值，已有 profile 的任务专属内存覆盖仍优先。内存上限不是预分配。
 
 修订 `paths.artifact_roots` 可改变后续产物位置；已有 run 的物理目录由 `run_storage_root` 继续绑定，不在配置事务中搬迁大量历史数据。文件搬迁应使用对应存储维护接口。
+
+
+仅增加已停止 run 的 `capture.export.spool_max_bytes` 时，修订只改变该 run
+后续 writer 的冻结配额，不搬迁共享 spool，也不修改其他 run 的限制；因此不要求
+其他 run 的 capture writer 停止。目标 run 仍须退出且清理完成。减少配额、修改其他
+export 字段或使用 `--replan` 仍保留原有项目 writer 停止检查。

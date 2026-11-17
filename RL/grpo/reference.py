@@ -186,6 +186,30 @@ def load_reference(directory, groups, proof, reference_proof, *, verify=True):
     return values
 
 
+def load_reference_group(directory, group, proof, reference_proof):
+    """Read one verified group from a sealed cache without loading all storage.
+
+    The caller verifies checkpoint/artifact receipts before using this reader.
+    Token/mask/anchor checks remain identical to the full-cache reader.
+    """
+    directory = Path(directory)
+    manifest = read_json(directory / "grpo/reference.json")
+    identity = reference_proof["reference_identity"]
+    expected = _entries([group], proof, identity)
+    selected = set(group.branch_ids)
+    entries = [e for e in manifest["entries"]
+               if e["group_id"] == group.group_id and e["branch_id"] in selected]
+    if (manifest.get("identity") != identity or manifest.get("input_sha256") != hash_json(proof)
+            or entries != expected):
+        raise ValueError("Selected reference group/token/mask identity mismatch")
+    payload = torch.load(directory / "grpo/reference-logprobs.pt", map_location="cpu", weights_only=True, mmap=True)
+    if payload.get("identity") != identity or payload.get("input_sha256") != hash_json(proof):
+        raise ValueError("Selected reference anchor/input identity mismatch")
+    values = {group.group_id: {bid: payload["groups"][group.group_id][bid] for bid in group.branch_ids}}
+    _validate_values(values, [group])
+    return {bid: value.clone() for bid, value in values[group.group_id].items()}
+
+
 def adapter_compatibility(model, *, start_mode, adapter_hash):
     """Prove base equivalence from actual PEFT state, not the word 'fresh'."""
     if start_mode == "warm_start":

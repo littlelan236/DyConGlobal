@@ -152,6 +152,8 @@ def main(argv=None):
     sb.add_argument('--plan-only', action='store_true')
     sb.add_argument('--replace-original-with-backup', action='store_true',
                     help='Replace only valid replay scores in the source run after backup; preserve unavailable/error samples')
+    sb.add_argument('--allow-active-source', action='store_true',
+                    help='Allow backed-up replacement while unrelated source samples are still running; selected sample must remain terminal')
     sb = sb_sub.add_parser('audit-rewards', help='Read-only audit of accepted SkillsBench rewards below one')
     sb.add_argument('run_id')
     sb.add_argument('--output', type=Path, required=True, help='New report directory; existing paths are rejected')
@@ -170,6 +172,15 @@ def main(argv=None):
     sw.add_argument("--task-cwd", default="/testbed")
     sw.add_argument("--patch-max-bytes", type=int, default=16 * 1024 * 1024)
     sw_sub.add_parser("preflight", help="Validate a frozen SWE-bench OpenHands run").add_argument("run_id")
+    sw = sw_sub.add_parser("catalog-sync", help="Regroup SWE tasks and register verified NAS images from pinned sources")
+    sw.add_argument("--source", type=Path, required=True)
+    sw.add_argument("--image-plan", type=Path, action="append", required=True)
+    sw.add_argument("--output", type=Path, required=True)
+    sw.add_argument("--apply", action="store_true")
+    sw = sw_sub.add_parser("catalog-list", help="Summarize or export SWE catalog tasks by official group")
+    sw.add_argument("--group", choices=["verified", "dev", "nonverified"])
+    sw.add_argument("--output", type=Path)
+
     sb = sb_sub.add_parser("cleanup-network", help="Reconcile a stopped run owned legacy proxy")
     sb.add_argument("run_id")
     sb = sb_sub.add_parser("audit", help="Verify real tools, native capture and winner-only execution")
@@ -295,6 +306,9 @@ def main(argv=None):
     q = run_sub.add_parser("merge", help="Merge accepted samples from SOURCE_RUN into DESTINATION_RUN")
     q.add_argument("source_run", metavar="SOURCE_RUN")
     q.add_argument("destination_run", metavar="DESTINATION_RUN")
+    q.add_argument("--mode", choices=["by-repetition", "append-executed"], default="by-repetition",
+                   help="Append actually executed repetitions, including failures, into remaining task slots, capped by destination repeat_count")
+    q.add_argument("--dry-run", action="store_true", help="Preview mapping without changing run artifacts")
     run_sub.add_parser("list")
     run_sub.add_parser("active-status", help="Query all live runs and their progress")
     harness = sub.add_parser("harness", help="Prepare, run and inspect run-local harness results")
@@ -311,6 +325,12 @@ def main(argv=None):
     q.add_argument("--incremental", action="store_true", help="Evaluate newly submitted trajectories and retain prior evaluations")
     q = harness_sub.add_parser("status")
     q.add_argument("run_id")
+    q = harness_sub.add_parser("audit", help="Write an immutable SWE-bench validity sidecar without rerunning tests")
+    q.add_argument("run_id")
+    q.add_argument("--output", type=Path, required=True)
+    q.add_argument("--scope", choices=["all", "positive", "negative", "infra"], default="all")
+    q.add_argument("--rollout-id", action="append", default=[])
+    q.add_argument("--labels", type=Path, help="Explicit evidence-bound attribution findings")
     q = harness_sub.add_parser("metadata-prefetch", help="Cache exact official requirements before harness execution")
     q.add_argument("--instances", type=Path, required=True)
     q.add_argument("--output", type=Path, required=True)
@@ -629,7 +649,7 @@ def main(argv=None):
     p.add_argument("--dataset-id", required=True)
     p.add_argument("--task-partitions", required=True, type=Path)
     a = parser.parse_args(argv)
-    if a.command in {"lora-train", "lora-prepare", "lora-status", "lora-tensorboard", "lora-advantages", "lora-memory"} or (a.command == "artifact" and a.scope == "lora-attempt"):
+    if a.command in {"lora-export", "lora-train", "lora-prepare", "lora-status", "lora-tensorboard", "lora-advantages", "lora-memory", "lora-probe", "lora-probe-plot"} or (a.command == "artifact" and a.scope == "lora-attempt"):
         if a.set or a.analysis_run_id:
             parser.error("LoRA uses an independent training YAML; do not pass --set or --run-id")
         from RL.cli import execute as execute_lora
@@ -788,7 +808,8 @@ def main(argv=None):
             parser.error("run merge reads only the two frozen run snapshots; do not pass --run-id or --set")
         from application.execution.merge import merge_runs
         try:
-            result = merge_runs(Path(a.config).resolve().parent, a.source_run, a.destination_run)
+            result = merge_runs(Path(a.config).resolve().parent, a.source_run, a.destination_run,
+                                mode=a.mode, dry_run=a.dry_run)
         except (ValueError, OSError) as exc:
             parser.error(str(exc))
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -835,12 +856,23 @@ def main(argv=None):
         from runtime.agents.submission_regrading import regrade
         result = regrade(Path(a.config).resolve().parent, a.run_id, a.source_run,
                          a.audit_report, a.output, workers=a.workers, plan_only=a.plan_only,
-                         replace_original=a.replace_original_with_backup)
+                         replace_original=a.replace_original_with_backup,
+                         allow_active_source=a.allow_active_source)
         print(json.dumps(result, ensure_ascii=False))
         if not a.plan_only and not result.get("complete"):
             raise SystemExit(3)
         return
     explicit_run = a.analysis_run_id or getattr(a, "run_id", None)
+    if a.command == "harness" and a.harness_command == "audit":
+        if a.analysis_run_id or a.set:
+            parser.error("harness audit reads frozen evidence without configuration overrides")
+        from benchmark_evaluation.swebench_audit import audit_run
+        result = audit_run(Path(a.config).resolve().parent, a.run_id, a.output,
+                           rollout_ids=a.rollout_id, scope=a.scope, labels=a.labels)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if not result["complete"]:
+            raise SystemExit(3)
+        return
     if a.command == "harness" and a.harness_command == "metadata-prefetch":
         if a.analysis_run_id or a.set:
             parser.error("metadata-prefetch reads root config.yaml without run overrides")
@@ -1268,6 +1300,14 @@ def main(argv=None):
     if a.command == "swebench":
         if a.set or a.analysis_run_id:
             parser.error("swebench profile/preflight commands use the root or frozen configuration")
+        if a.swebench_command in {"catalog-sync", "catalog-list"}:
+            from catalog.swebench_sync import sync, list_tasks
+            if a.swebench_command == "catalog-sync":
+                result = sync(cfg, source_path=a.source, image_plans=a.image_plan, output=a.output, apply=a.apply)
+            else:
+                result = list_tasks(cfg, group=a.group, output=a.output)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return
         if a.swebench_command == "openhands-profile":
             from core.io import identifier
             from runtime.agents.swebench_openhands import SWEOpenHandsProfile, validate_profile

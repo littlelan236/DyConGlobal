@@ -298,7 +298,14 @@ def revise_config(root, run_id, *, revision_id, updates=None, reason, replan=Fal
         if expect_config_hash and loaded['config']['config_hash'] != expect_config_hash:
             raise ValueError('Configuration changed since preview')
         candidate, identity_changes = _prepare(root, loaded, updates, replan)
-        if replan or candidate.get('capture', {}).get('export') != loaded['config'].get('capture', {}).get('export'):
+        old_export = loaded['config'].get('capture', {}).get('export', {})
+        new_export = candidate.get('capture', {}).get('export', {})
+        # A writer reads its own frozen quota. Increasing only this stopped
+        # run's quota does not move shared bytes or change other writers.
+        quota_increase_only = (
+            new_export.get('spool_max_bytes', 0) > old_export.get('spool_max_bytes', 0)
+            and new_export == {**old_export, 'spool_max_bytes': new_export.get('spool_max_bytes')})
+        if replan or (new_export != old_export and not quota_increase_only):
             from hidden.relocate_spool import assert_no_writers
             assert_no_writers(root, [run_id])
         proposed = _documents(loaded, candidate, revision_id, replan)

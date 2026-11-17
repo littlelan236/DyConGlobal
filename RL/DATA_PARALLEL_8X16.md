@@ -1,6 +1,8 @@
 # Experimental GRPO 8-GPU distinct-parent 8x16
 
-This explicit opt-in mode uses the existing `dycon lora-train --training-config
+Physical-topology exception: `runtime.topology_policy: preserve_updates` can execute this same frozen two-pass plan on 2/4/8 GPUs, or split a whole-parent plan across eight GPUs without adopting two-pass semantics. Default exact mode retains the original restrictions below. See [topology switching](TOPOLOGY_SWITCH.md) for configuration, RNG restrictions and validation boundaries.
+
+The default `exact` implementation of this explicit opt-in mode uses the existing `dycon lora-train --training-config
 YAML` lifecycle, GPU locks, eight supervised workers, preparation, checkpoint
 publication and artifact verification. It supports native step streaming and
 indexed prepared input, on one node with eight distinct physical GPUs.
@@ -24,7 +26,10 @@ selects native streaming for fresh input without a prepared binding; the normal
 prepared route is also supported. Run runner-environment dry-run before an
 actual `.venvs/rl/bin/dycon lora-train` invocation. Do not wrap it in torchrun.
 
-Eight GPUs without splitting, splitting on 1/2/4 GPUs, other chunk sizes,
+In default `exact` mode, eight GPUs without splitting and splitting on 1/2/4 GPUs
+are rejected. `preserve_updates` permits the original two-pass plan on 2/4/8
+physical GPUs and whole-parent execution on 2/4/8 GPUs without converting plans.
+Other chunk sizes,
 non-boundary execution, fewer than eight eligible parents or an eligible parent
 with other than 32 branches are rejected. Required structural checks happen
 before model loading regardless of optional preflight flags.
@@ -83,6 +88,16 @@ Old 1/2/4-rank or v10 checkpoints cannot resume directly as 8x16. Any supported
 new-stage adapter warm-start resets optimizer/cursor and binds the actual new
 reference anchor; streaming warm-start and 8x16 append-resume are unsupported.
 No silent fresh fallback is allowed.
+
+With `runtime.topology_policy: preserve_updates`, an existing two-pass checkpoint
+can instead resume on 2/4/8 GPUs. Each rank executes its assigned original halves
+before the same single optimizer update; rounds, weights and incomplete-parent
+cursor remain unchanged. The plan's historical `world_size: 8` remains a logical
+identity. Actual worker count is saved separately, including the saved rank RNG
+cardinality. This policy rejects training RNG consumption. A whole-parent
+checkpoint can use eight GPUs under this policy while retaining its whole-parent
+schedule; it does not become an 8x16 checkpoint. See [operation](TOPOLOGY_SWITCH.md)
+and [validation](TOPOLOGY_SWITCH_VALIDATION.md).
 
 ## IO, telemetry and validation boundary
 

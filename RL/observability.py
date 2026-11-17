@@ -13,6 +13,7 @@ import warnings
 
 from core.io import artifact_roots, hash_json, now, read_json, write_json
 from RL.artifacts import _directory
+from RL.metric_schema import SIGNAL_SCALARS
 
 MAX_METRIC_BYTES = 64 * 1024 * 1024
 SCALARS = ('consumed_execution_chunks', 'execution_window_cursor', 'completed_parent_groups',
@@ -23,7 +24,7 @@ SCALARS = ('consumed_execution_chunks', 'execution_window_cursor', 'completed_pa
            'ratio_mean', 'positive_ratio_mean', 'negative_ratio_mean',
            'gradient_norm', 'learning_rate', 'seconds', 'step_seconds',
            'forward_seconds', 'backward_seconds', 'peak_allocated_bytes',
-           'peak_reserved_bytes', 'free_bytes', 'observed_at', 'attempt_id', 'metrics_schema_version')
+           'peak_reserved_bytes', 'free_bytes', 'observed_at', 'attempt_id', 'metrics_schema_version') + SIGNAL_SCALARS
 
 
 def streaming_json():

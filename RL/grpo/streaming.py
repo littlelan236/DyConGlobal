@@ -249,6 +249,25 @@ class StreamingGroups:
                 pass
         return False
 
+    def load_group(self, group_id):
+        """Read a complete frozen parent for independent evaluation; no cursor IO."""
+        value = next((v for v in self._ordered if v["group"]["group_id"] == group_id), None)
+        if value is None:
+            raise ValueError("Unknown frozen parent group: " + group_id)
+        return self._load_group(value, with_reference=True)
+
+    def _load_group(self, value, *, with_reference):
+        import torch
+        from RL.dataset.loader import native_tokens
+        raw = copy.deepcopy(value)
+        for row in raw["members"]:
+            p, c = native_tokens(row, audit=self.config.preflight.audit_native_tokens, verify_hashes=True)
+            row.update(prompt_token_ids=p, completion_token_ids=c, audit_enabled=True)
+        group = next(tensor_groups([raw]))
+        members = ({row["branch_sample_id"]: torch.from_numpy(self.source.values(row, verify=True).copy()).detach()
+                    for row in raw["members"]} if with_reference else {})
+        return group, members
+
     def _produce(self, start):
         import torch
         try:
@@ -261,21 +280,16 @@ class StreamingGroups:
                     return
                 self._progress("preparing_window")
                 window, values = [], {}
+                branch_counts = [len(v["members"]) for v in self._ordered[offset:offset+batch]]
                 for value in self._ordered[offset:offset+batch]:
-                    raw = copy.deepcopy(value)
-                    from RL.dataset.loader import native_tokens
-                    for row in raw["members"]:
-                        p, c = native_tokens(row, audit=self.config.preflight.audit_native_tokens,
-                                             verify_hashes=True)
-                        row.update(prompt_token_ids=p, completion_token_ids=c, audit_enabled=True)
-                    group = next(tensor_groups([raw]))
+                    from RL.topology import enabled as portable_enabled, owns_parent
+                    owned = (owns_parent(len(window), branch_counts, self.rank, self.world_size)
+                             if portable_enabled(self.config) else len(window) % self.world_size == self.rank)
+                    group, members = self._load_group(value,
+                        with_reference=owned)
                     window.append(group)
                     # Only import reference arrays used by this rank's groups.
-                    if (len(window)-1) % self.world_size == self.rank:
-                        members = {}
-                        for row in raw["members"]:
-                            members[row["branch_sample_id"]] = torch.from_numpy(self.source.values(
-                                row, verify=True).copy()).detach()
+                    if owned:
                         values[group.group_id] = members
                 if not self._put((tuple(window), values)):
                     return

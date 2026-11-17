@@ -29,6 +29,8 @@ class GroupObjective:
         self.group_metadata = {"parent_group_id": group.group_id,
             "branch_ids": list(group.branch_ids), "prefix_length": len(group.prompt_token_ids[0]),
             **group.metadata.get("execution_chunk", {})}
+        if "physical_task" in group.metadata:
+            self.group_metadata["physical_task"] = dict(group.metadata["physical_task"])
         self.active_reference = (self.reference_values.for_group(group)
                                  if hasattr(self.reference_values, "for_group") else None)
         mode = getattr(getattr(self.settings, "prefix_reuse", None), "mode", "disabled")
@@ -81,13 +83,28 @@ class GroupObjective:
         if current.shape != reference.shape:
             raise ValueError("Reference cache target shape mismatch")
         import torch
+        diagnostics = None
+        diagnostic_settings = getattr(self.settings, "token_diagnostics", None)
+        if diagnostic_settings is not None and diagnostic_settings.enabled:
+            from .token_diagnostics import branch_diagnostics
+            diagnostics = branch_diagnostics(current, reference, group, index, diagnostic_settings)
+            if any(v for k, v in diagnostics["counts"].items()
+                   if k.startswith(("current_", "reference_"))
+                   and k.endswith(("_nan_tokens", "_posinf_tokens", "_neginf_tokens"))):
+                import json
+                raise ValueError("Nonfinite GRPO target diagnostics: " + json.dumps(diagnostics, allow_nan=False))
         result = grpo_objective(current[None], reference[None], [group.advantages[index]],
             torch.ones_like(current[None], dtype=torch.bool),
             clip_epsilon=self.settings.clip_epsilon, kl_beta=self.settings.kl_beta,
             ratio_guard_enabled=self.settings.ratio_guard.enabled,
             ratio_guard_threshold=self.settings.ratio_guard.threshold)
+        if diagnostics is not None:
+            from .token_diagnostics import compare_branch_scores
+            compare_branch_scores(model, group, index, current, reference, diagnostics,
+                                  diagnostic_settings, self.block_size)
+            result.metrics["_token_diagnostics"] = diagnostics
         result.metrics["branch_id"] = branch_id
-        result.metrics["native_branch_ordinal"] = group.metadata.get("execution_chunk", {}).get(
+        result.metrics["native_branch_ordinal"] = group.metadata.get("physical_task", group.metadata.get("execution_chunk", {})).get(
             "native_branch_ordinals", list(range(group.group_size)))[index]
         result.loss = result.loss / group.group_size
         result.group_count = 0

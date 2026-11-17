@@ -37,3 +37,7 @@ SkillsBench ??????????????? timing receipt ? [SkillsBench ????](SKILLSBENCH-STAR
 
 
 SkillsBench verifier resource releases and their exact profile/task snapshot references are documented in [verifier resources](SKILLSBENCH-VERIFIER-RESOURCES-CN.md). Local Python/Go/MathJax resources do not imply that every task or Maven business build is offline-qualified. New runs freeze the root configuration; old runs keep their original publication identities.
+
+SWE-bench 官方分组和 NAS 同步见 [catalog 分类指南](SWEBENCH-CATALOG-CN.md)。
+
+SWE-bench 验证有效性与 gold 控制策略见 [审计指南](SWEBENCH-VERIFIER-AUDIT-CN.md)。

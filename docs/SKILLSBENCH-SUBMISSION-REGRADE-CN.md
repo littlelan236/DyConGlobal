@@ -28,3 +28,10 @@ syzkaller 历史导出的是空 `/app`，而 verifier 消费 `/opt/syzkaller`，
 `regrade-submissions ... --replace-original-with-backup` 在全部样例处理完成、原始来源哈希未变且源 run 已退出并清理后，对 ValidOutcome（含有效零分和部分分）自动回写 canonical 评分。沿用既有事务备份/回滚接口，保存 replacement-manifest.json、replacement-state.json、backup/ 和逐样例 replacement-summary.json，同步 evaluation raw/report、attempt、repetition result、结算回执、evidence 和 progress，并刷新 status-summary。原 subject、轨迹、capture、原 verifier 运行日志及旧独立审计报告保留；新评分明确绑定新任务包、依赖、冻结 run、恢复范围及评测证据。
 
 VerifierError、Review、RegradeUnavailable 和重放/清理失败只记录本次重评结果，不以无效数值覆盖旧奖励；replacement-summary.json 列明所有未覆盖样例。未传该选项的默认行为仍为只读历史来源。`--plan-only` 只检查覆盖前提，不写历史结果。
+
+
+## Manufacturing 历史提交重评
+
+支持 `manufacturing-equipment-maintenance` 的五个声明输出 `/app/output/q01.json` 至 `q05.json`。沿用原 subject 身份、大小与 SHA256 校验和统一容器恢复接口；在冻结任务镜像中保留原 `/app/data` 输入，恢复提交后执行官方 verifier，不请求模型或执行 oracle。
+
+2026-11-15 的 `skillsbench-mfg-regrade-20261115/validation/manufacturing-rep008-results` 已对 baseline 的 rep-008 完成独立重评：7 项测试中 4 项通过、3 项失败，分类 ValidOutcome、reward=0；源记录保持不变，容器清理完成。

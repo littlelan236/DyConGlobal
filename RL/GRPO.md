@@ -356,6 +356,43 @@ time, CUDA/host memory and projection/MLP/offload telemetry, plus:
 - clip fraction, `k3_penalty_mean`, and positive/negative branch logprob changes;
 - actual consumed group/branch/token counters and partial-window group count.
 
+## Fixed checkpoint preference probe
+
+Use `dycon lora-probe` to rescore the same explicit complete parent groups across
+checkpoints. This is separate from the positive/negative logprob changes emitted
+by training: those describe the current, changing batch at the model state used
+by that update. A fixed probe holds inputs, frozen advantages and the original
+shared probability anchor constant and scores the explicitly selected checkpoint
+in evaluation mode. It requires additional forwards and writes an independent
+JSON report instead of TensorBoard events.
+
+For branch `b`, let `L_b` be the mean raw T=1 logprob over native completion
+targets and `R_b` its mean original-reference logprob. Within each complete group:
+
+- `preference_gap = mean(L_b | A_b > 0) - mean(L_b | A_b < 0)`.
+- `preference_gap_change` subtracts the same gap computed from `R_b`.
+- `advantage_logprob_alignment = mean(A_b * (L_b - R_b))` over all branches.
+
+Aggregate metrics average group values equally; absent sign comparisons are
+`null` and excluded from the corresponding mean, with support counts reported.
+The 8x16 protocol is evaluated as full 32-branch parents, preserving original
+advantages without recentering within execution halves. This diagnostic measures
+preference on a fixed training subset, not held-out or downstream success.
+
+```bash
+.venvs/rl/bin/dycon lora-probe \
+  --checkpoint /absolute/attempt/checkpoints/step-000100 \
+  --group-id GROUP_A --group-id GROUP_B \
+  --gpu 0 --output reports/rl-probe/step100.json
+```
+
+For a later checkpoint, use `--baseline-report reports/rl-probe/step100.json`
+instead of the group arguments to reuse the fixed ordered IDs and obtain
+current-minus-baseline deltas. Incompatible tokens, advantages, anchor or scoring
+protocol are rejected. See [FIXED_PROBE.md](FIXED_PROBE.md) for report fields,
+dry-run, checkpoint-owner configuration, source retention and GPU requirements.
+This command is independent of startup `preflight.run_diagnostics`.
+
 ## Engineering acceptance
 
 ```bash

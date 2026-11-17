@@ -45,7 +45,7 @@ class _SelectedLogprobs(torch.autograd.Function):
         return gradient, None, None, None, None
 
 
-def model_target_logprobs(model, batch, block_size=0):
+def model_target_logprobs(model, batch, block_size=0, *, target_observer=None):
     labels = batch["labels"]
     mask = batch["loss_mask"].bool()
     if (not torch.equal(labels != -100, mask) or mask[:, 0].any()
@@ -56,6 +56,9 @@ def model_target_logprobs(model, batch, block_size=0):
         raise ValueError("No native completion targets")
     hidden = text_backbone(model)(input_ids=batch["input_ids"],
         attention_mask=batch["attention_mask"], use_cache=False).last_hidden_state
+    if target_observer is not None:
+        with torch.no_grad():
+            target_observer(model, hidden.detach(), labels, block_size)
     return hidden_target_logprobs(model, hidden, labels, block_size)
 
 

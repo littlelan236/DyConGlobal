@@ -1,6 +1,8 @@
 # GRPO 数据并行：完整父组 1 / 2 / 4 GPU，实验性 8×16
 
-`dycon lora-train --training-config YAML` 支持单机 1、2、4 张物理 GPU 的同步
+新增显式 `runtime.topology_policy: preserve_updates`：完整 parent 与原 two-pass 计划均可在 2/4/8 张物理 GPU 间双向恢复，保持原 update windows、权重、anchor 和 optimizer 状态。默认 exact 模式仍遵守本文的原卡数限制。详见 [跨卡数恢复](TOPOLOGY_SWITCH.md)。
+
+默认 `exact` 策略下，`dycon lora-train --training-config YAML` 支持单机 1、2、4 张物理 GPU 的同步
 LoRA 数据并行。每张 GPU 保留完整 base 与 adapter，计算单位是完整 group。
 本功能适用于现有 `offline_grpo_k3_v1`，包括 `prefix_reuse.mode: boundary_grad`；
 单条轨迹的容量仍由单卡显存决定。
@@ -25,7 +27,7 @@ training:
 ```
 
 示例只展示相关字段，其他训练、数据、reference 配置保留原完整 YAML。
-完整父组模式的 GPU 列表长度为 1、2、4，不能重复；`gpu` 与 `gpus` 必须二选一。
+默认 exact 完整父组模式的 GPU 列表长度为 1、2、4，不能重复；`gpu` 与 `gpus` 必须二选一。
 多卡暂不接受 MIG UUID 或 causal CE 配置。通信超时涵盖初始化、rank 0
 准备 reference 期间的等待、训练同步和最终收尾；长时间 reference 构建需要
 相应增大该配置，超时范围为 30–86400 秒。
@@ -78,7 +80,7 @@ weight decay。共享前缀边界与计算图完全保留在所属 GPU，不跨�
   从已提交 cursor 准备剩余窗口。async=true 不会把 prepared resume 转为 streaming。
 - checkpoint 保存一份相同的 adapter/optimizer/scheduler、全局 cursor，以及
   **每个 rank** 的 Python/NumPy/CPU/CUDA RNG。只在完整更新且梯度清空后发布。
-- `resume` 要求相同 world size 和执行协议；可换同数量的物理 GPU，但必须
+- 默认 `exact` 的 `resume` 要求相同 world size 和执行协议；可换同数量的物理 GPU，但必须
   保持每个 rank 的 CUDA 可见设备数与保存时一致，不做 RNG 设备列表重映射。
   各 rank 在启动 producer/forward 前恢复 optimizer/scheduler 和自己的 RNG。
   旧单卡 checkpoint 与多卡 checkpoint 不能直接互换。
@@ -173,11 +175,24 @@ created because retry is forbidden after the update boundary.
 
 ## Experimental 8-GPU distinct-parent 8x16
 
-The existing whole-parent mode described above remains the default. Eight GPUs
+The existing whole-parent mode described above remains the default. In `exact` mode, eight GPUs
 require the explicit 16-branch, two-pass protocol; see [the configuration,
 cursor, normalization and acceptance boundaries](DATA_PARALLEL_8X16.md).
 Every regular update selects one half from each of eight different parents;
 parent scoring still uses all 32 branches. The two round tails stay separate.
+
+## 2/4/8 卡双向恢复
+
+`preserve_updates` 将来源逻辑计划与物理 GPU 数分开：完整 parent 计划保持
+原窗口和 `1/(K*N)` 分支权重，每个 parent 拆成最多 16 条分支的物理任务；
+原 two-pass 计划保持 halves、rounds、窗口与 `1/(16*K)` 权重。
+每个窗口的全部任务结束后，仍只执行一次 SUM 归约、裁剪、AdamW 和 scheduler
+更新，不按新 world size 再平均。恢复后 checkpoint 继续记录来源逻辑合同，
+另存实际物理拓扑，允许再次切回 2/4/8 卡。
+
+完整配置、RNG 限制和操作见 [跨卡数恢复](TOPOLOGY_SWITCH.md)，
+13 通过、4 GPU 项跳过及真实 v10 dry-run 证据见
+[验证记录](TOPOLOGY_SWITCH_VALIDATION.md)。这些结果尚未验证真实 GPU 提速或长上下文容量。
 
 ## 8×16 validation status (2026-11-14)
 

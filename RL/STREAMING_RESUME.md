@@ -1,12 +1,14 @@
 # Native streaming GRPO checkpoint recovery
 
+Opt-in exception: `runtime.topology_policy: preserve_updates` supports 2/4/8-GPU bidirectional resume while preserving the original logical windows, anchor and optimizer state. Default exact mode retains same-world-size recovery. Training RNG consumption is rejected in the portable mode; see [topology switching](TOPOLOGY_SWITCH.md).
+
 Use the existing `.venvs/rl/bin/dycon lora-train --training-config TASK.yaml`
 entrypoint. Streaming applies to fresh training with
 `runtime.data_preparation_async: true` and `prepared_data: null`, or to exact
 resume from a supported streaming checkpoint. The parent contract selects the
 data execution mode. An async flag cannot convert a prepared checkpoint into a
 streaming checkpoint. Streaming warm-start, append-resume, format conversion and
-world-size changes are rejected. See [acceptance evidence](STREAMING_RESUME_VALIDATION.md)
+world-size changes in the default exact mode are rejected. See [acceptance evidence](STREAMING_RESUME_VALIDATION.md)
 for the tested single/two-GPU short native fixtures and the read-only v10 checks.
 
 ## Choose the recovery path
@@ -201,3 +203,13 @@ stream plan and all-rank RNG; external inputs are still required. Exact resume
 requires the same 8-rank execution/reduction protocol and partition, while the
 physical GPU indexes may change. Old v10/1/2/4-rank checkpoints cannot directly
 switch protocols. Streaming warm-start/append restrictions remain in force.
+
+With `runtime.topology_policy: preserve_updates`, physical world size can change
+among 2/4/8 while the source protocol, frozen windows and committed cursor remain
+unchanged. A round-0 checkpoint retains all outstanding halves and resumes from
+the execution-window cursor. Keep the original async/prepared binding, complete
+schedule length and unconsumed external inputs. Use a new attempt ID and first
+validate through the runner CLI. The real v10 step-60 eight-device dry-run passed
+metadata validation on 2026-11-15; model tensor and training RNG validation still
+require actual execution. See [topology switching](TOPOLOGY_SWITCH.md) and
+[evidence and pending GPU acceptance](TOPOLOGY_SWITCH_VALIDATION.md).

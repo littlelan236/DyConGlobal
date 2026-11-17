@@ -49,7 +49,7 @@ def test_harness_failure_has_null_success(cfg, monkeypatch):
     )
     result = harness.evaluate(cfg, Path(cfg["project_root"]) / "runs/run", "bad", factory=factory)
     assert result["outcomes"][rid]["resolved"] is None
-    assert RunEvidence(cfg["project_root"], "run").read()["rollouts"][rid]["evaluation_status"] == "infra_error"
+    assert RunEvidence(cfg["project_root"], "run").read()["rollouts"][rid]["evaluation_status"] == "Review"
 
 
 def test_harness_retries_network_error_and_records_attempts(cfg, monkeypatch):
@@ -88,9 +88,9 @@ def test_harness_marks_garbage_patch_as_failed_resolution(cfg, monkeypatch):
     factory = SimpleNamespace(lock_images=lambda x: None, client=None, deadline=Deadline(), cleanup_owned=lambda x: None)
     result = harness.evaluate(cfg, Path(cfg["project_root"]) / "runs/run", "garbage", factory=factory)
     outcome = result["outcomes"][rid]
-    assert outcome["status"] == "completed" and outcome["resolved"] is False
+    assert outcome["status"] == "Review" and outcome["resolved"] is None
     assert outcome["failure_type"] == "invalid_patch"
-    assert RunEvidence(cfg["project_root"], "run").read()["rollouts"][rid]["evaluation_status"] == "completed"
+    assert RunEvidence(cfg["project_root"], "run").read()["rollouts"][rid]["evaluation_status"] == "Review"
 
 
 def test_harness_exhausted_network_error_uses_connection_error_status(cfg, monkeypatch):
@@ -106,7 +106,29 @@ def test_harness_exhausted_network_error_uses_connection_error_status(cfg, monke
     factory = SimpleNamespace(lock_images=lambda x: None, client=None, deadline=Deadline(), cleanup_owned=lambda x: None)
     result = harness.evaluate(cfg, Path(cfg["project_root"]) / "runs/run", "exhausted", factory=factory)
     outcome = result["outcomes"][rid]
-    assert outcome["status"] == "ConnectionError" and outcome["resolved"] is None
+    assert outcome["status"] == "Review" and outcome["resolved"] is None
     assert outcome["failure_type"] == "network_error"
     assert len(outcome["attempts"]) == 3
-    assert RunEvidence(cfg["project_root"], "run").read()["rollouts"][rid]["evaluation_status"] == "ConnectionError"
+    assert RunEvidence(cfg["project_root"], "run").read()["rollouts"][rid]["evaluation_status"] == "Review"
+
+@pytest.fixture(autouse=True)
+def unit_attempt_evidence(monkeypatch):
+    # These lifecycle tests stub the official runner, including its filesystem
+    # side effects. Supply a matching collector stub; real collection/settlement
+    # is exercised by test_swebench_settlement.py.
+    from benchmark_evaluation import swebench_audit
+    def collect(output, eid, rid, task, outcome, *, gold=False):
+        official = outcome.get('official_result', {'completed': outcome['status']=='completed', 'resolved': outcome.get('resolved')})
+        test = 'tests/test_x.py::test_x'
+        passed = official.get('resolved') is True
+        complete = official.get('completed') is True
+        state = 'PASSED' if passed else 'FAILED'
+        return {'identity': {'instance_id': task['instance_id']},
+            'task': {**task, 'FAIL_TO_PASS': [test], 'PASS_TO_PASS': []}, 'gold': gold,
+            'official_result': official, 'report': {'resolved': passed, 'patch_successfully_applied': True,
+                'tests_status': {'FAIL_TO_PASS': {'success': [test] if passed else [], 'failure': [] if passed else [test]},
+                                 'PASS_TO_PASS': {'success': [], 'failure': []}}} if complete else {},
+            'statuses': {test: state} if complete else {}, 'parser_found': complete,
+            'sources': [], 'environment': {}, 'test_output':
+            "+ : '>>>>> Start Test Output'\n_____ test_x _____\nE   AssertionError: expected\n+ : '>>>>> End Test Output'\n" if complete else ''}
+    monkeypatch.setattr(swebench_audit, 'collect', collect)

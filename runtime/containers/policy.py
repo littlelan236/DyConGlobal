@@ -106,7 +106,10 @@ class EnvironmentPolicy:
         exports = "\n".join(f"export {k}={shlex.quote(v)}" for k, v in self.variables().items())
         head, separator, rest = script.partition("\n")
         prefix = exports + "\n" + INSTALL_ERROR_GUARD + "\n"
-        return head + separator + prefix + rest if head.startswith("#!") else prefix + script
+        wrapped = head + separator + prefix + rest if head.startswith("#!") else prefix + script
+        from benchmark_evaluation.swebench_receipts import instrument
+
+        return instrument(wrapped)[0]
 
 
 PROBE_CODE = """import json,sys,subprocess,importlib,os,re

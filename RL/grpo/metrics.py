@@ -1,6 +1,7 @@
 """Small, receipt-friendly objective metrics."""
 
 from .k3_diagnostics import summarize_statistics
+from .signals import summarize_signals
 
 
 def summarize(results):
@@ -45,6 +46,9 @@ def summarize_update(groups):
     output.update(positive_branches=sum(r.get("positive_branches", 0) for r in rows),
                   negative_branches=sum(r.get("negative_branches", 0) for r in rows))
     output.update(summarize_statistics(groups))
+    output.update(summarize_signals(groups))
+    from .token_diagnostics import summarize_token_diagnostics
+    output.update(summarize_token_diagnostics(groups))
     return output
 
 

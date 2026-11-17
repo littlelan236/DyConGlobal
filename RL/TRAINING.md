@@ -1,5 +1,7 @@
 # 训练接口使用指南
 
+GRPO 跨卡数恢复现可显式设置 `runtime.topology_policy: preserve_updates`，在 2/4/8 卡间切换；保留来源逻辑计划，不会自动改变 global batch 或转成另一种 GRPO 算法。须使用新 attempt ID，并先执行原 CLI dry-run。默认 exact 恢复限制不变；随机计算限制、配置和验证范围见 [跨卡数恢复](TOPOLOGY_SWITCH.md)。
+
 流式 GRPO 现在支持单卡和原 world size 的完整 checkpoint resume，继续使用本页的正式 CLI。启动方式和父 contract 共同选择 streaming/prepared 路径；保留父配置的完整 max_updates，通过 stop_after_update 暂停。配置、旧 checkpoint 只读兼容、外部 native/probability 依赖及迁移限制见 [流式恢复](STREAMING_RESUME.md)。runner dry-run 会明确标注尚待实际 tensor 验证。
 
 本指南说明 `RL/` 中单卡 Qwen3.5-9B LoRA causal CE 与离线 GRPO 接口。命令从项目根目录
@@ -14,7 +16,9 @@
 | 为已有模型传入自定义 batch / loss | `RL.training.train(...)`，由调用方管理加载与产物 |
 | 只解析监督位置或调用分块 CE | `prepare_batch(...)` / `LossBackend(...)` |
 | GRPO 绑定外部 raw anchor、一次 epoch 和完整 checkpoint 恢复 | [GRPO.md](GRPO.md)，同一 `lora-train` 入口 |
+| checkpoint 在 2/4/8 卡间双向恢复且保留原逻辑更新 | [跨卡数恢复](TOPOLOGY_SWITCH.md)；[验证记录](TOPOLOGY_SWITCH_VALIDATION.md) |
 | 查看训练进度、loss 曲线和冻结 advantage | `lora-status` / `lora-tensorboard` / `lora-advantages`，见 [可观测性](OBSERVABILITY.md) |
+| 对固定训练 group 比较 checkpoint 偏好改善，输出 JSON | `lora-probe --checkpoint PATH --group-id ID --gpu N --output JSON`，见 [固定 probe](FIXED_PROBE.md) |
 | 查询每 rank 显存阶段、卸载决策与 OOM 重试结果 | `lora-memory ATTEMPT_ID --storage-root ROOT`，见 [OOM 验证记录](OOM_RECOVERY_VALIDATION.md) |
 | 构建离线 step groups、缓存和概率 replay | [数据集模块](dataset/README.md)，独立于 CE smoke |
 | Training progress, loss curves and branch advantages | [RL observability guide](OBSERVABILITY.md) |
@@ -70,6 +74,45 @@ loss 曲线按完整 optimizer update 刷新；总 loss、policy loss 与未乘 
 停止可视化不停止训练。events、心跳和索引位于独立 runtime 目录，不写入 sealed attempt
 或 checkpoint。分页、CSV、resume 继承曲线、历史时间与 token 预览边界见
 [可观测性专题](OBSERVABILITY.md)，测试证据见 [验收记录](OBSERVABILITY_VALIDATION.md)。
+
+## 固定 probe：独立比较 checkpoint 的偏好改善
+
+训练期指标来自不断变化的 batch。需要在同一组输入上比较多个 checkpoint 时，
+使用独立的 `lora-probe`；它额外执行模型 forward，因此不进入 TensorBoard 实时同步。
+它保留选中 group 的完整分支、冻结优势与原始 anchor，只输出 JSON，不推进训练游标。
+
+从已有 `lora-advantages` 查询结果中选定实际 `group_id`，然后固定这份清单。
+将下面的 `CHECKPOINT_PATH` 替换为完整 `step-XXXXXX` 检查点目录，
+`GROUP_A` / `GROUP_B` 替换为实际 parent group ID，GPU 编号替换为空闲设备：
+
+```bash
+# 只验证元数据；不加载模型，不创建报告，无需指定 GPU。
+.venvs/runner/bin/dycon lora-probe \
+  --checkpoint CHECKPOINT_PATH --group-id GROUP_A --group-id GROUP_B \
+  --output reports/rl-probe/step100.json --dry-run
+
+# 实际评分需要 RL 环境和空闲 GPU。
+.venvs/rl/bin/dycon lora-probe \
+  --checkpoint CHECKPOINT_PATH --group-id GROUP_A --group-id GROUP_B \
+  --gpu 0 --output reports/rl-probe/step100.json
+
+# 换用后续 checkpoint；直接继承历史报告中的固定 group 顺序。
+.venvs/rl/bin/dycon lora-probe \
+  --checkpoint NEXT_CHECKPOINT_PATH \
+  --baseline-report reports/rl-probe/step100.json \
+  --gpu 0 --output reports/rl-probe/step200.json
+```
+
+JSON 的 `aggregate.preference_gap_change` 表示相对原始 anchor 的偏好差变化；
+`comparison.aggregate_delta.preference_gap` 表示当前减历史 checkpoint 的偏好差。
+缺少正负分支时比较项为 `null`，应同时查看 `support.comparable_group_count`。
+不同样本、优势、anchor 或评分协议的报告不能直接比较，命令会拒绝不兼容基线。
+
+输出必须使用新的独立报告路径，不能写入 sealed attempt / checkpoint。命令使用训练
+共用的 GPU 锁并检查设备空闲；不会自动停止训练。需保留 checkpoint 所属 attempt 的
+`resolved-config.json`；streaming 还需保留选中 group 的 native ledgers 和概率源。
+8x16 训练按完整 32 分支 parent group 评分。这是固定训练子集的诊断，不能替代下游评测。
+完整统计定义、数据依赖和资源开销见 [固定 probe 使用说明](FIXED_PROBE.md)。
 
 ## 1. 选择配置并先执行 dry-run
 

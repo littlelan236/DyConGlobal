@@ -23,10 +23,11 @@ Formal work goes through `core.cli`. Do not launch internal workers, copy a task
 | Artifact inspection | `artifact show/verify`, `report run` | runner or analysis per command |
 | Offline GRPO step data and behavior replay | `rl-dataset build/check/materialize/replay-logprobs/check-logprobs/probability-plan/probability-build/probability-check` | runner; isolated replay worker uses latent-vLLM |
 | RL training progress | `lora-status ATTEMPT_ID` or `lora-status --active` | runner; read-only, no Torch/model load |
+| Fixed GRPO preference probe | `lora-probe --checkpoint PATH --group-id ID --gpu N --output JSON [--plot-output PNG]`; `lora-probe-plot --report JSON --output PNG` | rl for forwards; runner for JSON-only charts / help / metadata dry-run |
 | RL memory and OOM analysis | `lora-memory ATTEMPT_ID --storage-root ROOT [--rank N] [--phase NAME] [--limit N]` | runner; read-only, no Torch/model load |
 | RL loss visualization | `lora-tensorboard ATTEMPT_ID --action start/status/stop/rebuild` | runner CLI; managed analysis workers, TensorBoard over SSH |
 | Frozen GRPO advantages | `lora-advantages ATTEMPT_ID`, explicit `--build-index/--index-status` for legacy JSON | runner query; analysis index worker |
-| LoRA/GRPO training and exact resume | `lora-train --training-config YAML` | runner dry-run; actual single/data-parallel training in rl |
+| LoRA/GRPO training and checkpoint resume | `lora-train --training-config YAML` | runner dry-run; actual training in rl; opt-in 2/4/8-GPU `preserve_updates` |
 | Prepared GRPO data and append resume | `lora-prepare`, `artifact show/verify` with `rl-prepared`, `rl-reference`, `rl-extension` scopes | runner; CPU-only immutable preparation and receipt verification |
 
 ### Capture spool usage
@@ -274,7 +275,7 @@ deferred while existing workloads are preserved.
 
 Use `.venvs/rl/bin/dycon lora-train --training-config RL/experiments/lora-smoke.yaml` for single-GPU bf16 Qwen3.5-9B LoRA engineering validation. The `RL/` source remains in the original project; `.venvs/rl` is an independent environment with `locks/rl.in` and `locks/rl.txt`, stored on `/data3` on this server. The standalone YAML is an explicit training configuration exception, resolved against the root project selected by the ordinary root CLI configuration. Rollout `config.yaml` stays unchanged. Neither `--set` nor `--run-id` is accepted.
 
-Eight-GPU GRPO uses the same CLI and GPU-lock/worker/artifact lifecycle. Explicitly
+Default exact-mode eight-GPU GRPO uses the same CLI and GPU-lock/worker/artifact lifecycle. Explicitly
 set eight distinct `runtime.gpus`, `grpo.group_batch_size: 8`,
 `parallel_branch_chunk_size: 16`,
 `parallel_branch_schedule: distinct_parent_two_pass_v1`, a partition seed and
@@ -287,6 +288,18 @@ halves, seen parents and fully completed parents. Exact resume binds that plan
 and world size; old whole-parent checkpoints cannot directly resume as 8x16.
 Do not add torchrun or a second launcher. See [8x16 configuration](../RL/DATA_PARALLEL_8X16.md)
 and [CPU/Gloo evidence and pending GPU acceptance](../RL/DATA_PARALLEL_8X16_VALIDATION.md).
+
+For bidirectional 2/4/8-GPU checkpoint resume, set
+`runtime.topology_policy: preserve_updates` and select target `runtime.gpus` in a
+new attempt's complete resume YAML. Preserve the original logical batch,
+schedule, advantages, initial anchor, optimizer/scheduler and cursor. Whole-parent
+work may split across GPUs without adopting two-pass semantics; existing two-pass
+checkpoints retain their original halves and rounds. Portable training rejects
+RNG consumption. Run `.venvs/runner/bin/dycon lora-train --training-config YAML`
+with `run.mode: dry-run` first. Actual execution uses `.venvs/rl` and
+`run.mode: smoke` through that same CLI. See [topology switching](../RL/TOPOLOGY_SWITCH.md)
+and [recorded validation](../RL/TOPOLOGY_SWITCH_VALIDATION.md). Real GPU capacity,
+throughput and cross-topology numerical acceptance remain pending.
 
 Offline GRPO is supported through the existing `lora-train` entrypoint. Use
 `RL/experiments/grpo-offline-k3-smoke.yaml` for strict schema/data-readiness dry-run,
@@ -312,9 +325,11 @@ reopening the external probability source. Native streaming resume inherits
 the frozen plan, original reference anchor and committed cursor, but reads the
 unconsumed native token ledgers and selected external raw probability payloads.
 It requires `runtime.data_preparation_async: true`, `prepared_data: null`, the
-original world size and unchanged dataset/source paths and identities. The
+original world size in default `exact` mode, and unchanged dataset/source paths and identities. The
 parent checkpoint contract selects the path; async does not convert a prepared
-checkpoint into streaming. Streaming checkpoints support exact `resume` only.
+checkpoint into streaming. Streaming checkpoints support complete-checkpoint
+`resume`, including the explicit topology policy above; warm-start and append
+remain unsupported.
 Source/dtype rules, schedule, model, dependency and numerical contracts remain
 enforced; project source fingerprints are audit metadata, not a resume gate.
 For supported non-streaming warm-starts, scores must match the actual starting
@@ -417,3 +432,61 @@ events, heartbeats and indexes stay outside sealed artifact directories. See
 [RL observability](../RL/OBSERVABILITY.md) for forwarding, pagination, snapshot
 fields, inherited resume metrics and evidence limits.
 See [RL observability validation](../RL/OBSERVABILITY_VALIDATION.md) for test and deployment evidence.
+
+
+## Merge rollout results
+
+`run merge SOURCE_RUN DESTINATION_RUN` defaults to `--mode by-repetition`,
+which matches task/repetition identities and prefers destination accepted results.
+
+Use `--mode append-executed` to append physically executed source repetitions,
+including failures, into unexecuted destination slots for the same task. Keep
+destination executed repetitions first; cap each task at its frozen destination
+`repeat_count`. A repetition's retry history is retained but consumes no extra
+slot. A queue/admission cursor without an attempt-started receipt is not an
+executed repetition. Source results over the cap remain in the original run.
+
+    .venvs/runner/bin/dycon run merge REVERSE_RUN FORWARD_RUN --mode append-executed --dry-run
+    .venvs/runner/bin/dycon run merge REVERSE_RUN FORWARD_RUN --mode append-executed
+    .venvs/runner/bin/dycon run resume FORWARD_RUN --detach
+
+Apply only after both runs stop and supervisor exit/cleanup receipts are complete.
+`--dry-run` previews the mapping without writing result/evidence/progress/receipts;
+previewing active runs can be refused by their exclusive run locks. The original
+source run and frozen destination plan/selection/configuration are preserved.
+Imported results retain source sample/repetition/seed and attempt provenance;
+canonical trajectory/subject/report bytes are copied without alteration. Capture
+session IDs and producer identity remain those of the source run, whose capture
+receipts and published data must be retained. Import does not regenerate hidden
+states or logprobs, and repeated imports skip already imported source repetitions.
+Patch and workspace subjects are supported; live-state/web-trace subjects require
+their own immutable identity import contract and are explicitly rejected.
+
+Ordinary resume preserves settled failures; interrupted work follows the existing
+recovery policy. Importing a failure does not mark it accepted or authorize a new
+retry. Use the established recovery/retry commands when a new attempt is wanted.
+
+## Fixed GRPO preference probe
+
+`dycon lora-probe --checkpoint PATH --group-id ID [--group-id ID ...] --gpu N --output reports/rl-probe/REPORT.json`
+evaluates frozen complete parent groups independently of training. Use the RL environment
+(`.venvs/rl/bin/dycon`) for model forwards; runner can inspect help and validate metadata
+with `--dry-run`. `--baseline-report JSON` reuses fixed IDs and emits compatible report
+deltas. `--plot-output IMAGE` also charts the explicitly selected groups with linear first-training-step spacing; `lora-probe-plot --report JSON --output IMAGE` redraws existing JSON without forwards. See [RL/FIXED_PROBE.md](../RL/FIXED_PROBE.md) for metrics, data dependencies and scope.
+
+Example checkpoint comparison, from the project root:
+
+```bash
+.venvs/rl/bin/dycon lora-probe \
+  --checkpoint /absolute/attempt/checkpoints/step-000200 \
+  --baseline-report reports/rl-probe/step100.json \
+  --gpu 0 --output reports/rl-probe/step200.json
+```
+
+The baseline fixes ordered parent group IDs; report deltas are current minus
+baseline, while anchor-relative metrics retain the original training reference.
+The command requires an idle device and the source attempt's resolved configuration;
+streaming additionally requires selected native ledgers and probability sources.
+Reports use new paths outside sealed artifacts and never enter TensorBoard.
+
+Full merged checkpoints for rollout: `.venvs/rl/bin/dycon lora-export --checkpoint PATH --base-model PATH --output PATH`; see [LoRA serving export](../RL/EXPORT.md). Uses CPU only and registers the model for the existing run/serving interfaces.

@@ -87,6 +87,16 @@ def _active_sample_rows(loaded, progress, latest_attempt_id):
         row = {**item, "exit_status": "Pending", "disposition": "pending",
                **samples.get(key, {})}
         work = run / "rollout/tasks" / item["instance_id"] / "repetitions" / item["repetition_id"]
+        final_path = work / "result.json"
+        final = read_json(final_path) if final_path.exists() else {}
+        if (final.get("merged_from") and final.get("sample_key") == key
+                and row.get("attempt_id") == final.get("attempt_id")
+                and not superseded(retries, key, final)):
+            # Imported results supersede older physical attempts in this slot.
+            # A later resume/retry changes the progress pointer and follows the
+            # normal physical-attempt projection below.
+            rows[key] = {**item, **final}
+            continue
         attempts = work / "attempts"
         pattern = re.compile(re.escape(item["repetition_id"]) + r"-attempt-(\d+)$")
         floor = floors.get(item["instance_id"] + "/" + item["repetition_id"], -1)

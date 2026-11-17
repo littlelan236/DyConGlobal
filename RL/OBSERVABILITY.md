@@ -109,6 +109,136 @@ size, first-line and last-committed-line fingerprints detect truncation,
 replacement and committed-prefix changes; such errors remain visible in status
 until explicit rebuild. Old generations are excluded from the active run.
 
+## Fixed probe reports alongside live monitoring
+
+`lora-probe` complements the existing training monitor by evaluating an explicit
+checkpoint on fixed complete parent groups. It requires extra model forwards,
+runs in `.venvs/rl`, and writes JSON outside the sealed training artifacts.
+
+Its JSON also includes `token_changes` and `groups[].token_changes`: signed and
+absolute logprob-change means and quantiles, the largest 1%/5%/10% tokens' share
+of total absolute change, and token fractions with relative probability changes
+strictly exceeding 10%/50% (increase, decrease and either direction). Each section
+splits all/positive/negative/zero-advantage tokens and pools actual target tokens
+with equal token weights. These diagnostics reuse existing probe forwards, remain
+outside TensorBoard, and expose no token text, positions or individual probability
+pairs. They are relative to the training anchor, including when a baseline report
+is supplied. Existing reports need a fresh evaluation to populate these fields;
+they remain compatible baselines for the original scalar comparisons. See
+[fixed probe definitions](FIXED_PROBE.md#token-变化分布与集中度) for formulas,
+rounding, empty partitions and the difference from branch/group-equal metrics.
+
+| Interface | Input and purpose | Model forward / output |
+|---|---|---|
+| `lora-status` / `lora-tensorboard` | Observe recorded metrics from changing training batches | No evaluation forward; status / live curves |
+| `lora-advantages` | Inspect frozen group IDs, advantages and provenance | No model forward; group / branch records |
+| `lora-probe` | Compare the same groups at explicit checkpoints | Additional teacher-forced forwards; independent JSON reports |
+
+```bash
+.venvs/rl/bin/dycon lora-probe \
+  --checkpoint /absolute/attempt/checkpoints/step-000100 \
+  --group-id GROUP_A --group-id GROUP_B \
+  --gpu 0 --output reports/rl-probe/step100.json
+
+.venvs/rl/bin/dycon lora-probe \
+  --checkpoint /absolute/attempt/checkpoints/step-000200 \
+  --baseline-report reports/rl-probe/step100.json \
+  --gpu 0 --output reports/rl-probe/step200.json
+```
+
+The second command reuses the first report's ordered IDs. Read
+`aggregate.preference_gap_change` for improvement relative to the original anchor
+and `comparison.aggregate_delta.preference_gap` for current-minus-baseline
+checkpoint change. Check `support.comparable_group_count`; missing signs produce
+`null` comparisons. Positive values indicate movement toward the frozen positive
+advantage branches on this subset, not a measured downstream success increase.
+
+Probe reports never enter the TensorBoard synchronizer and do not update
+`metrics.jsonl`, checkpoints or training cursors. Choose an idle GPU explicitly;
+the shared GPU lock prevents use of a device owned by training. `--dry-run` works
+in the runner environment without loading a model or creating a report.
+See [FIXED_PROBE.md](FIXED_PROBE.md) for exact reduction, compatibility checks,
+source retention and validation scope, or [TRAINING.md](TRAINING.md) for the workflow.
+
+## Live learning signals and chart folders
+
+The realtime signal producer and TensorBoard projection are both required.
+Restarting a visualization alone reloads chart mappings; an already running
+trainer keeps its loaded Python objective and optimizer code. New producer-only
+statistics appear after the next normal training launch or checkpoint resume.
+No automatic training restart is performed by monitoring commands.
+
+| TensorBoard folder | Signals and interpretation |
+|---|---|
+| `loss/` | Total and policy loss; retain original `train/*` aliases |
+| `learning/logprob/`, `learning/ratio/` | Positive / negative advantage branch changes and ratios |
+| `learning/preference/` | Group preference change, advantage alignment, fraction of positive-gap groups |
+| `learning/support/` | Comparable groups and positive / negative target counts |
+| `policy/active/` | Policy surrogate tokens still carrying a non-flat direct objective term |
+| `policy/clipping/` | Interval exceedance and sign-dependent saturation, reported separately |
+| `policy/guard/` | Excluded tokens / objective weight, sign partitions, fully excluded branches / groups |
+| `drift/ratio/`, `drift/log_ratio/` | Ratio bounds / tails and log-ratio min, p01, p50, p99, max |
+| `drift/k3/` | Guarded K3 objective mean, max and cap comparisons; shown even when KL beta is zero |
+| `optimizer/gradient/` | Preclip norm, threshold, estimated clip scale and parameter gradient coverage |
+| `optimizer/update/` | Actual adapter update on a deterministic parameter sample, at step 1 and every 10 steps |
+| `optimizer/learning_rate/` | Current and next learning rate |
+| `throughput/`, `timing/` | Committed update / group / branch / target rates, retry fraction, queue / synchronization timings |
+| `progress/` | Existing committed counters and model step at which forward metrics were evaluated |
+
+`learning/preference/gap` is the group mean of positive-minus-negative
+**logprob changes relative to the original anchor**. In the independent fixed
+probe JSON, the corresponding anchor-relative quantity is
+`preference_gap_change`; the probe's `preference_gap` is an absolute difference
+between current positive / negative branch mean logprobs. Training batch
+composition changes every update, so neither live curve is an update-before/after
+measurement on fixed inputs. Forward diagnostics emitted at committed step `s`
+were evaluated at model step `s-1`; `progress/evaluated_at_global_step` records this.
+
+For nonzero advantages, saturation means positive advantage with `r > 1+epsilon`
+or negative advantage with `r < 1-epsilon`, excluding guard-rejected tokens.
+Active means neither rejected nor saturated and advantage nonzero. These describe
+the policy term's direct token coverage, not the norm of the complete parameter
+gradient; K3 can still contribute when enabled. The old `clip_fraction` counts
+both directions outside the interval and is not a saturation fraction.
+
+`objective_fraction` uses token mean → branch mean → group mean with original
+target denominators. `advantage_weighted_fraction` additionally weights by `|A|`.
+Positive / negative `token_fraction` fields and log-ratio quantiles use actual
+token counts. Missing signs or zero total advantage magnitude yield no scalar
+point rather than a fabricated zero. In 8x16 mode these are execution-window
+statistics on the scheduled halves; they do not combine different model states
+into a complete-parent evaluation.
+
+Gradient coverage counts trainable parameter elements whose gradient exists,
+including zero-valued gradients; it does not claim every element has a nonzero
+gradient. Update sampling reads at most 64 fixed elements per trainable tensor,
+uses no RNG and makes no complete adapter copy. Relative update norm is omitted
+when the sample's before-norm is zero. No extra model forward is added.
+
+### Existing attempts and visualization refresh
+
+On an older running trainer, the updated reader can expose already recorded
+positive / negative logprob changes, guard totals, K3 drift, next learning rate,
+timings and throughput derived from stored counts / seconds. It cannot recreate
+per-token tails, active / saturated fractions, group preference or sampled
+parameter changes if those were never recorded. Missing historical values stay
+absent. This also applies to metrics inherited from a parent attempt after resume.
+
+After updating monitoring code, rebuild an already started TensorBoard service
+using its current port and storage root:
+
+```bash
+.venvs/runner/bin/dycon lora-tensorboard ATTEMPT_ID --storage-root ROOT \
+  --action rebuild --port 16006
+```
+
+The formal command restarts only its owned visualization processes and replays
+existing metrics into a fresh event generation. Keep the existing SSH forwarding
+and refresh the browser after it reports ready. Newly emitted signals then append
+as training progresses; producer-only fields require a trainer that loaded the
+new code. Semantic/data-invariant charts and independent probe forwards are not
+part of these realtime additions.
+
 ## Frozen group/branch advantages
 
 ```bash

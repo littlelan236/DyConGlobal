@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import torch
 
 from .k3_diagnostics import token_statistics
+from .signals import token_signals
 
 
 @dataclass
@@ -123,4 +124,5 @@ def grpo_objective(logp_theta, logp_reference, advantages, loss_mask, *, clip_ep
         "positive_branches": int((adv > 0).sum()), "negative_branches": int((adv < 0).sum()),
         "branch_count": int(logp_theta.shape[0]), "token_count": int(mask.sum()),
         **token_statistics(k3, mask, rejected, group_indices),
+        **token_signals(raw_log_ratio, raw_ratio, adv, mask, rejected, clip_epsilon),
     }, len(group_slices), int(logp_theta.shape[0]), int(mask.sum()))

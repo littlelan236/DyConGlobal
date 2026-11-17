@@ -348,7 +348,7 @@ class ContainerFactory:
         return {
             "output": result.output.decode("utf-8", errors="replace"),
             "returncode": code,
-            "exception_info": "CommandTimeout" if code in [124, 137] else "",
+            "exception_info": "CommandTimeout" if code == 124 else "CommandKilled" if code == 137 else "",
         }
 
     def probe(self, container: ManagedContainer, filename: str) -> dict:

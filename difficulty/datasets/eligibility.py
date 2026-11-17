@@ -18,8 +18,12 @@ def eligible_evaluation(row, evidence, rollout_id, policy):
     validate_policy(policy)
     if row.get('evaluation_status') != 'completed':
         return False
+    from benchmark_evaluation.swebench_settlement import training_label
+    value = training_label(row, evidence, rollout_id)
+    if type(value) is not bool:
+        return False
     if policy == 'resolved_only':
-        return row.get('resolved') is True
+        return value is True
     if row.get('evaluation_subject', {}).get('kind') != 'workspace':
         return False
     evaluation = evidence['evaluations'].get(row.get('selected_evaluation_id'), {})

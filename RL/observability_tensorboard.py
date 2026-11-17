@@ -13,6 +13,7 @@ import urllib.request
 from core.io import now, read_json, write_json
 from core.locking import file_lock
 from RL.observability import MetricReader, matches, process, source, training_process
+from RL.metric_schema import SIGNAL_TAGS
 
 TAGS = {**{k: 'train/' + k for k in ('loss', 'policy_loss', 'k3_penalty_mean',
         'clip_fraction', 'ratio_mean', 'gradient_norm', 'learning_rate')},
@@ -34,6 +35,12 @@ def scalar_values(row, *, include_k3=True):
     if not include_k3:
         values = {key: value for key, value in values.items()
                   if key not in ('train/k3_penalty_mean',)}
+    # Drift is useful even when KL is not part of the optimization objective.
+    # Existing train/* tags remain compatibility aliases for saved dashboards.
+    values.update({tag: row[k] for k, tag in SIGNAL_TAGS.items() if k in row})
+    from RL.grpo.signals import throughput
+    values.update({SIGNAL_TAGS[k]: v for k, v in throughput(row).items()
+                   if k in SIGNAL_TAGS and k not in row})
     if 'step_seconds' in row or 'seconds' in row:
         values['timing/step_seconds'] = row.get('step_seconds', row.get('seconds'))
     for key, tag in [('peak_allocated_bytes', 'peak_allocated_gib'),

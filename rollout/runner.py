@@ -707,16 +707,20 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
     elif request_for(run, os.environ.get('DYCON_EXECUTION_ATTEMPT')) is not None:
         update_run_status(run, 'cancelled', reason='Cancelled')
         return settled
-    # Recover capture publication using the established no-model recovery path.
-    if resume and cfg.get('capture', {}).get('enabled'):
-        needs_capture_recovery = any(p.exists() for p in (run / 'rollout/tasks').glob('*/repetitions/*/attempts/*/capture-session.json'))
-        if needs_capture_recovery:
-            from hidden.recover_online import recover_online
-            try:
-                recover_online.__wrapped__(cfg, run_id)
-            except Exception as exc:
-                write_json(run / 'capture-recovery-error.json', {'error': repr(exc)})
+    from hidden.recover_online import BackgroundCaptureRecovery
+    with BackgroundCaptureRecovery(cfg, run_id, CURRENT.get(), enabled=resume and not check_only) as recovery:
+        return _run_manifest_active(cfg, run_id, loaded, adapter, settled, factory,
+                                    operator_retries, check_only, recovery)
 
+
+def _run_manifest_active(cfg, run_id, loaded, adapter, settled, factory, operator_retries, check_only, recovery):
+    from core.model_identity import model_identity_verification_enabled, verify_model
+    from runtime.serving.manager import ServingManager
+
+    root = Path(cfg['project_root'])
+    run = root / 'runs' / run_id
+    selection = cfg['selection']
+    work_items = loaded['work_items']['items']
     from core.preflight import long_checks_enabled, timed_check
     model_checks = {}
     try:
@@ -901,10 +905,13 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
         raise
     finally:
         try:
-            adapter.close_run(backend_context, CURRENT.get())
+            recovery.close()
         finally:
-            if not check_only:
-                _finalize_capture_publication(cfg, run_id, work_items, producers=capture_producers)
+            try:
+                adapter.close_run(backend_context, CURRENT.get())
+            finally:
+                if not check_only:
+                    _finalize_capture_publication(cfg, run_id, work_items, producers=capture_producers)
 
 
 def _finalize_capture_publication(cfg, run_id, work_items, *, producers=()):

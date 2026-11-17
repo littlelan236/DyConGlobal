@@ -1,7 +1,8 @@
 """Durable completion-token usage and reservations for one physical attempt.
 
 The class and configuration field retain their historical sample-level names.
-Only schema 2 attempt ledgers are read; legacy sample ledgers are evidence only.
+Baseline uses schema 2; parallel selected-trajectory accounting uses schema 3.
+Historical ledgers are never silently converted to a new accounting definition.
 """
 from __future__ import annotations
 
@@ -18,6 +19,9 @@ class BudgetStopped(RuntimeError):
 class SampleTokenBudget:
     def __init__(self, cfg, binding):
         self.limit = cfg.get('execution', {}).get('sample_completion_token_budget')
+        # Baseline keeps its existing all-call semantics. Parallel decisions
+        # charge one selected response; condensation is charged in both modes.
+        self.selected_trajectory = bool(cfg.get('parallel', {}).get('enabled'))
         self.binding = {k: binding.get(k) for k in
                         ('run_id', 'task_key', 'sample_key', 'repetition_id', 'attempt_id')}
         self.attempt = self.binding['attempt_id']
@@ -38,14 +42,17 @@ class SampleTokenBudget:
             row = read_json(self.path)
             self._validate(row)
             return row
-        return {'schema_version': 2, 'scope': 'physical_attempt',
+        return {'schema_version': 3 if self.selected_trajectory else 2, 'scope': 'physical_attempt',
+                **({'accounting': 'selected_trajectory_completion_v1'} if self.selected_trajectory else {}),
                 'binding': dict(self.binding), 'limit': self.limit,
                 'completion_tokens': 0, 'by_role': {}, 'requests': {}, 'created_at': now()}
 
     def _validate(self, row):
         """Fail closed on corrupt state, including evidence from another attempt."""
         if (not isinstance(row, dict) or type(row.get('schema_version')) is not int
-                or row['schema_version'] != 2 or row.get('scope') != 'physical_attempt'):
+                or row['schema_version'] != (3 if self.selected_trajectory else 2)
+                or row.get('scope') != 'physical_attempt'
+                or (self.selected_trajectory and row.get('accounting') != 'selected_trajectory_completion_v1')):
             raise ValueError('Invalid physical attempt token budget schema or scope')
         if (row.get('binding') != self.binding or type(row.get('limit')) is not int
                 or row['limit'] != self.limit):
@@ -68,19 +75,30 @@ class SampleTokenBudget:
                 tokens = request.get('completion_tokens')
                 if type(tokens) is not int or tokens < 0:
                     raise ValueError('Invalid physical attempt usage receipt')
-                total += tokens
-                by_role[role] = by_role.get(role, 0) + tokens
+                if self.selected_trajectory and type(request.get('charged')) is not bool:
+                    raise ValueError('Invalid selected trajectory charge')
+                if self.selected_trajectory and role != 'agent_decision' and not request['charged']:
+                    raise ValueError('Baseline non-decision usage must be charged')
+                if not self.selected_trajectory or request['charged']:
+                    total += tokens
+                    by_role[role] = by_role.get(role, 0) + tokens
             elif status == 'reserved':
                 reserved += request['reserved_tokens']
             elif status == 'usage_unknown':
-                if not row.get('usage_unknown') or request.get('completion_tokens') is not None:
+                if ((not self.selected_trajectory or role != 'agent_decision')
+                        and not row.get('usage_unknown')) or request.get('completion_tokens') is not None:
                     raise ValueError('Invalid physical attempt unknown usage receipt')
             else:
                 raise ValueError('Invalid physical attempt request status')
         if (total != row['completion_tokens'] or by_role != row['by_role']
                 or any(type(value) is not int for value in row['by_role'].values())
-                or reserved > self.limit):
+                or (not self.selected_trajectory and reserved > self.limit)):
             raise ValueError('Inconsistent physical attempt token budget counters')
+        if self.selected_trajectory:
+            selected = [r.get('request_id') for r in row['requests'].values()
+                        if r.get('charged') and r['role'] == 'agent_decision']
+            if None in selected or len(selected) != len(set(selected)):
+                raise ValueError('Multiple charges for one selected trajectory decision')
 
     def _prior(self, row, api_id, role):
         prior = row['requests'].get(api_id)
@@ -111,7 +129,9 @@ class SampleTokenBudget:
                 raise BudgetStopped('sample_token_usage_unknown')
             if row['completion_tokens'] >= self.limit:
                 raise BudgetStopped('sample_completion_token_budget')
-            available = self.limit - row['completion_tokens'] - sum(r['reserved_tokens'] for r in pending)
+            available = self.limit - row['completion_tokens']
+            if not self.selected_trajectory:
+                available -= sum(r['reserved_tokens'] for r in pending)
             if available <= 0:
                 return None
             amount = min(requested, available)
@@ -127,6 +147,8 @@ class SampleTokenBudget:
         tokens = usage.get('completion_tokens') if isinstance(usage, dict) else None
         if type(tokens) is not int or tokens < 0:
             self.record_unknown(api_id, role)
+            if self.selected_trajectory and role == 'agent_decision':
+                return self.snapshot()  # Only a selected unknown blocks this budget.
             raise BudgetStopped('sample_token_usage_unknown')
         with file_lock(self.lock_path):
             row = self._read()
@@ -139,8 +161,14 @@ class SampleTokenBudget:
                 raise ValueError('Physical attempt usage cannot replace an unknown receipt')
             row['requests'][api_id] = {**prior, 'role': role, 'attempt_id': self.attempt,
                 'completion_tokens': tokens, 'status': 'completed', 'recorded_at': now()}
-            row['completion_tokens'] += tokens
-            row['by_role'][role] = row['by_role'].get(role, 0) + tokens
+            charged = not self.selected_trajectory or role != 'agent_decision'
+            if self.selected_trajectory:
+                if tokens > prior['reserved_tokens']:
+                    raise ValueError('Physical usage exceeds reserved generation allowance')
+                row['requests'][api_id]['charged'] = charged
+            if charged:
+                row['completion_tokens'] += tokens
+                row['by_role'][role] = row['by_role'].get(role, 0) + tokens
             row['exhausted'] = row['completion_tokens'] >= self.limit
             row['updated_at'] = now()
             write_json(self.path, row)
@@ -156,8 +184,39 @@ class SampleTokenBudget:
                 return
             row['requests'][api_id] = {**prior, 'role': role, 'attempt_id': self.attempt,
                 'completion_tokens': None, 'status': 'usage_unknown', 'recorded_at': now()}
-            row['usage_unknown'] = True
+            if not self.selected_trajectory or role != 'agent_decision':
+                row['usage_unknown'] = True
             write_json(self.path, row)
+
+    def select(self, request_id, api_id):
+        """Charge exactly one authenticated selected API response per decision."""
+        if self.limit is None or not self.selected_trajectory:
+            return None
+        with file_lock(self.lock_path):
+            row = self._read()
+            prior = self._prior(row, api_id, 'agent_decision')
+            if not request_id or prior.get('request_id') != request_id:
+                raise ValueError('Selected response differs from its logical request')
+            for other_id, other in row['requests'].items():
+                if (other.get('charged') and other['role'] == 'agent_decision'
+                        and other.get('request_id') == request_id):
+                    if other_id != api_id:
+                        raise ValueError('Conflicting selected response for one decision')
+                    return row
+            if row.get('usage_unknown') or prior['status'] != 'completed':
+                row['usage_unknown'] = True
+                write_json(self.path, row)
+                raise BudgetStopped('sample_token_usage_unknown')
+            row['requests'][api_id]['charged'] = True
+            tokens = prior['completion_tokens']
+            if row['completion_tokens'] + tokens > self.limit:
+                raise ValueError('Selected trajectory exceeds its remaining allowance')
+            row['completion_tokens'] += tokens
+            row['by_role']['agent_decision'] = row['by_role'].get('agent_decision', 0) + tokens
+            row['exhausted'] = row['completion_tokens'] >= self.limit
+            row['updated_at'] = now()
+            write_json(self.path, row)
+            return row
 
     def remaining(self):
         row = self.snapshot()
@@ -165,7 +224,7 @@ class SampleTokenBudget:
             return None
         if row.get('usage_unknown'):
             return 0
-        reserved = sum(r['reserved_tokens'] for r in self._pending(row))
+        reserved = 0 if self.selected_trajectory else sum(r['reserved_tokens'] for r in self._pending(row))
         return max(0, self.limit - row['completion_tokens'] - reserved)
 
     def snapshot(self):

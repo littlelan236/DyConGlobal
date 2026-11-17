@@ -1,25 +1,25 @@
-﻿# SkillsBench/OpenHands 物理 attempt 独立 completion-token 预算
+# SkillsBench/OpenHands 物理 attempt 主轨迹生成预算
 
-在根 `config.yaml` 的 `execution` 中设置 `sample_completion_token_budget: 正整数`，随后通过 `dycon run create` 冻结。该字段沿用旧名称以兼容冻结配置，当前含义是**每个样本物理 attempt 的 completion-token 上限**。省略或为 `null` 时不启用；仅 SkillsBench/OpenHands 支持，其他 backend 配置此字段会拒绝创建。字段类型、配置规范化和 snapshot hash 算法不变，不改写历史冻结配置。
+在根 `config.yaml` 的 `execution` 中设置 `sample_completion_token_budget: 正整数`，通过 `dycon run create` 冻结。省略或为 `null` 时不启用；仅 SkillsBench/OpenHands 支持。字段名称、类型、配置规范化和 snapshot hash 算法不变，不改写历史冻结配置。2026-11-14 起，并行运行的该上限约束**主轨迹累计 completion tokens**，与单分支 baseline 对齐：包含已选 reasoning+action 和独立 condensation，排除 prompt 以及未选候选。它不是 context window 上限，也不是全部候选的算力预算。
 
-预算绑定 `run_id/task_key/sample_key/repetition_id/attempt_id`。物理 attempt 如 `rep-000-attempt-001`，不同于 `execution/attempts/004` 的 run execution attempt。初始执行、基础设施重试、seed resample、limits retry 和 `run retry-failed` 后的正式 resume，只要分配新物理 attempt ID，就获得完整额度，不继承旧 attempt 的已用 tokens、unknown 或未结算预留。新 execution attempt 本身不会重置相同物理 attempt 的预算。
+预算绑定 `run_id/task_key/sample_key/repetition_id/attempt_id`。物理 attempt 如 `rep-000-attempt-001`，不同于 run execution attempt。初始执行、基础设施重试、seed resample、limits retry 和正式 `run retry-failed` 后的 resume，只要分配新物理 attempt ID，就获得完整额度，不继承旧 attempt。仅新建 execution attempt 不会重置同一个物理 attempt。
 
-同一物理 attempt 内，所有经过 bridge 的调用共享预算，包括 `agent_decision`、`condensation` 和并行候选。只累计精确 `usage.completion_tokens`；prompt tokens 不计入此上限，压缩 prompt 不会减少已用 completion tokens。
+baseline 保持原有 schema 2 和逐物理调用结算，包括 condensation、单分支生成及其重试。并行配置使用 schema 3、`scope: physical_attempt`、`accounting: selected_trajectory_completion_v1`：每个物理调用的 usage 都记录在 `requests`，但 agent_decision 候选只有最终选中的一条才设置 `charged: true`；独立 condensation 仍直接扣费。`completion_tokens`、`by_role` 和剩余额度仅统计 charged 项。费用、attempt `usage` / `output_tokens`、coordinator `total_usage` 继续表示全部分支实际物理消耗，可能远大于主轨迹预算；这些字段不再用于解释主轨迹剩余额度。
 
-账本位于 `runs/RUN/rollout/sample-token-budgets/SAMPLE/ATTEMPT.json`，根目录通过 `run_path(cfg, run_id)` 解析，支持冻结的物理存储根。新格式为 `schema_version: 2`、`scope: physical_attempt`，binding 包含上述五个字段；锁为同目录下 `ATTEMPT.lock`，写入沿用原子替换。未知 schema、错误 scope、binding/limit 不匹配、跨 attempt 请求证据或损坏计数均报错，不按空账本重新发放额度。
+账本位于 `runs/RUN/rollout/sample-token-budgets/SAMPLE/ATTEMPT.json`，通过冻结物理存储根解析；锁为同目录的 `ATTEMPT.lock`，沿用原子替换。旧 schema 1 sample 账本和 schema 2 历史并行 attempt 保留，不迁移、不重置、不将总消耗解释为已选长度。用新并行实现打开同一旧 schema 2 attempt 会拒绝；正式恢复应保留旧证据并分配新物理 attempt。禁止手改账本或历史 `attempt.json`。
 
-每次调用先加锁预留，实际 `max_tokens` 不超过可用额度，并同步 native request owner 约束。并发请求按“上限减已用量减未结算预留”协调；额度被占满时等待结算，不会仅因存在正常 in-flight reservation 就禁止其他调用。结算按实际 completion usage 计数并释放未用预留；API attempt ID 拒绝重复预留，同一精确 usage receipt 重复结算幂等。未经本账本预留的 API ID 不得结算或登记 unknown。
+并行候选都可以使用“主轨迹上限减已选累计值”作为各自的输出额度，实际 `max_tokens` 不超过该值及配置的单次上限，native request owner 同步该限制。互斥候选不会因为其他候选的预留而共享瓜分额度。生成完成先保留实际 usage；统一选择器选定后按 request/API attempt 精确绑定，仅结算选中的那条。重复结算幂等，同一逻辑请求的不同胜者、跨请求/attempt 结算、损坏计数或错误 schema/accounting 都拒绝。
 
-同一物理 attempt 重建 bridge 时复用原账本；未结算预留继续占用额度，不能重新发放。`usage_unknown` 阻止该 attempt 后续调用，不把未知用量计作零。重建 bridge 不代表旧预留已结束，不会自动清除预留或 unknown。已经启动但中断的历史 attempt 由统一 runner 做证据恢复或分配新物理 attempt，不重新执行其模型调用；仅预留、从未启动的 attempt 可以沿用 ID 开始执行。
+未选候选缺失 usage 时保留其 unknown 证据与整体 `usage.complete=false`，但不据此阻止已知 usage 的胜者。选中响应缺失精确 usage，或独立 condensation 的 usage 未知，则阻止该 attempt 后续调用并以 `SampleTokenBudgetUsageUnknown` 停止；不填零。单分支 baseline 的 unknown 行为保持不变。
 
-旧路径 `rollout/sample-token-budgets/SAMPLE.json` 的 schema 1 sample 账本仅保留为历史证据。新实现不读取、不迁移、不清空、不删除它，也不将旧用量导入新 attempt。历史 `attempt.json` outcome 和 `resolved-config.json` 不改写；旧运行的跨 attempt 累计语义不继续实施。
+选中响应使主轨迹额度耗尽时，保留结算与停止 receipt，但不将该响应作为可执行 action 返回，终态 `SampleTokenBudgetExceeded`。若某个候选因主轨迹剩余额度限制而以 length 结束，它作为预算受限候选退出；较短的有效胜者仍可继续。所有候选均因此失败时保留预算停止原因及 receipt。单次 generation 自身的上限、reasoning loop、选择失败和实际 context window 拒绝继续分别处理。
 
-达到额度后不把生成响应作为可执行 action 返回，终态为 `SampleTokenBudgetExceeded`；缺失精确 usage 且没有更具体的终止原因为 `SampleTokenBudgetUsageUnknown`。二者 disposition 为 failed，不属于 `LimitsExceeded` / `reasoning_loop`，不会换 seed 自动重采样。主动重跑仍须通过原有 `run retry-failed` 和 `run resume`，满足 capture recovery、spool、退出及清理完整性约束。
+`SampleTokenBudgetExceeded` 和 `SampleTokenBudgetUsageUnknown` 的 disposition 为 failed，不属于 `LimitsExceeded` / `reasoning_loop`，不自动换 seed 重采样。主动重跑使用正式 `run retry-failed --exit-status SampleTokenBudgetExceeded` 再 `run resume`；先停止并确认退出/清理，检查并恢复已有 capture，保留旧轨迹和账本。禁止覆盖冻结配置或手改 run 状态。
 
-明确的服务端上下文长度拒绝归为 `ContextWindowExceededError`（上下文超限），沿用现有 accepted 终态语义；accepted 表示接纳轨迹的结束结果，不表示任务已解决或用量完整。预算启用时，该失败请求仍记 `usage_unknown`，保留 `usage.complete=false`，不将缺失 usage 填为零。后续压缩或恢复若被同一 unknown 拦截，保留上下文超限主因；若后续请求成功完成，则不将此前可恢复的拒绝作为终态。并行调用仅在失败决策的所有实际候选均明确被上下文拒绝时归此类，成功或混合失败候选不据此强制分类。证据位于本物理 attempt 的 `diagnostics/context-window-error.json` 和模型调用记录，绑定 request/API attempt。正常与 finalization 异常路径保留该 agent 状态，capture、清理和取消约束仍独立生效；历史 attempt 和冻结快照不回写。
+真实服务端 HTTP 400 上下文长度拒绝归为 `ContextWindowExceededError`，保留 `diagnostics/context-window-error.json` 和模型调用证据。仅失败决策的所有实际候选均明确被上下文拒绝时归此类；恢复成功或混合失败不强制分类。accepted 表示接纳轨迹结束，不表示解决任务。正常及 finalization 异常路径保留主因，capture、清理和取消约束独立生效。
 
-证据包括物理 attempt 账本（API ID、role、request ID、attempt ID、预留及实际值）、物理 attempt 的 `sample-token-budget.json` 停止 receipt、模型调用的 `sample_budget`、native terminal receipts 及 `attempt.json` 中的 `sample_token_budget` 快照。预算快照和调用摘要携带 scope 与 binding，剩余额度属于该物理 attempt；运行报告可另行统计所有历史 attempt 的总模型消耗，该总量不作为单个 attempt 的预算消耗。finalization 失败时也保留预算快照。
+同一物理 attempt 重建 bridge 复用其匹配 schema 的账本；不能以重建 bridge 清除 unknown 或重新发放额度。已经启动但中断的 attempt 由统一 runner 恢复证据或分配新 attempt，不重新执行旧调用；仅预留、从未启动的 attempt 可以沿用 ID 开始执行。
 
-本修改不处理服务端 262,144 context 上限。过长输入仍可能被 HTTP 400 拒绝，context preflight 和调整 `max_tokens` 是独立任务。跨网络中断不能证明实际生成量时保留 unknown，不据此宣称精确累计完整。
+停止证据包括 `sample-token-budget.json`、attempt 账本、模型调用 `sample_budget` 和选择后的请求级 `sample_budget`、native terminal receipts、`attempt.json` 的 `sample_token_budget`。并行 ledger 的 schema/accounting 明确标识新口径；旧产物不回写。
 
-历史 canary 的 1,024 与 65,536 是触发验收与对照参数，不是生产阈值。MIG 与整卡的墙钟时间不可直接视为同硬件 token 预算收益；三项任务不足以代表全量 resolved 保留率。
+本预算不替代 `serving.max_model_len`。实际 context window 约束单次 prompt+completion，压缩可缩短后续 prompt，但不减少已经累计的 completion。context preflight 和服务端输出余量处理属于独立约束。不同硬件与墙钟时间不能直接据此比较任务质量。

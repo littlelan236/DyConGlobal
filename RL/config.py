@@ -63,6 +63,7 @@ class Runtime(Strict):
     gpus: list[NonnegativeInt] | None = None
     distributed_timeout_seconds: Annotated[int, Field(ge=30, le=86400)] = 3600
     data_preparation_async: bool = False
+    topology_policy: Literal["exact", "preserve_updates"] = "exact"
     bf16_allow_reduced_precision_reduction: bool = False
     bf16_allow_split_k: bool = True
     cuda_allocator: "CudaAllocator" = Field(default_factory=lambda: CudaAllocator())
@@ -204,7 +205,17 @@ class RatioGuard(Strict):
     threshold: Annotated[float, Field(gt=0, lt=1, allow_inf_nan=False)] = 1e-3
 
 
+class TokenDiagnostics(Strict):
+    enabled: bool = False
+    compare_full_branch: bool = False
+    compare_base: bool = False
+    k3_threshold: PositiveFloat = 10.0
+    max_tokens_per_branch: Annotated[int, Field(ge=1, le=32)] = 8
+    context_tokens: Annotated[int, Field(ge=0, le=32)] = 12
+
+
 class Grpo(Strict):
+    token_diagnostics: TokenDiagnostics = Field(default_factory=TokenDiagnostics)
     ratio_guard: RatioGuard = Field(default_factory=RatioGuard)
     prefix_reuse: PrefixReuse = Field(default_factory=PrefixReuse)
     advantage_policy: Literal["historical_topk_zero_sum_v1", "consensus_top_half_zero_sum_v1"] = "historical_topk_zero_sum_v1"
@@ -319,14 +330,19 @@ class Config(Strict):
             count = len(self.runtime.gpus or [self.runtime.gpu])
             if split != protocol:
                 raise ValueError("8x16 requires both parallel_branch_chunk_size=16 and distinct_parent_two_pass_v1")
-            if count == 8 and not split:
+            portable = self.runtime.topology_policy == "preserve_updates"
+            if portable and (count not in {2, 4, 8} or self.run.start.mode not in {"fresh", "resume"}):
+                raise ValueError("preserve_updates requires 2/4/8 GPUs and fresh or resume")
+            if count == 8 and not split and not portable:
                 raise ValueError("8 GPUs require the explicit distinct-parent 8x16 execution protocol")
-            if split and (count != 8 or self.runtime.gpus is None
+            if split and ((count not in {2, 4, 8} if portable else count != 8) or self.runtime.gpus is None
                           or self.grpo.group_batch_size != 8
                           or self.grpo.prefix_reuse.mode != "boundary_grad"):
                 raise ValueError("8x16 requires 8 distinct physical GPUs, group_batch_size=8 and boundary_grad")
             if split and self.run.start.mode == "append_resume":
                 raise ValueError("8x16 supports exact resume; append_resume execution schedules are not supported")
+        elif self.runtime.topology_policy != "exact":
+            raise ValueError("preserve_updates requires offline GRPO")
         if self.grpo and self.grpo.prefix_reuse.mode == "boundary_grad":
             if self.training.checkpoint_policy != "layer":
                 raise ValueError("boundary_grad requires layer checkpointing")
@@ -399,7 +415,7 @@ def schedule_contract(config):
         "validation": config.validation.model_dump(exclude={"stop_after_update"}),
     }
     if config.algorithm:
-        contract.update(algorithm=config.algorithm.model_dump(), grpo=config.grpo.model_dump(exclude={"reference_cache"}))
+        contract.update(algorithm=config.algorithm.model_dump(), grpo=config.grpo.model_dump(exclude={"reference_cache", "token_diagnostics"}))
         if config.grpo.parallel_branch_chunk_size is None:
             for key in ("parallel_branch_chunk_size", "parallel_branch_schedule", "branch_partition_seed"):
                 contract["grpo"].pop(key, None)
