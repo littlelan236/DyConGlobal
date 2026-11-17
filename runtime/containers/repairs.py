@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def environment_overrides(cfg: dict, instance: dict) -> dict:
+def _legacy_environment_overrides(cfg: dict, instance: dict) -> dict:
     overrides = dict(instance.get("environment_overrides") or {})
     iid = instance["instance_id"]
     # These upstream test suites fetch real HTTP resources. Dependency bootstrap
@@ -113,4 +113,48 @@ def environment_overrides(cfg: dict, instance: dict) -> dict:
     retained = [p for p in pins.get(repo, []) if p.split("==")[0] not in names]
     pins[repo] = retained + fixes[iid]
     overrides["repo_pins"] = pins
+    return overrides
+
+
+def environment_overrides(cfg: dict, instance: dict) -> dict:
+    """Apply an explicitly frozen, content-bound environment control profile.
+
+    Legacy runs have no profile variables and retain their existing policy.
+    The profile only changes dependencies/output; task patches and required IDs
+    are never read or rewritten here.
+    """
+    overrides = _legacy_environment_overrides(cfg, instance)
+    variables = cfg['environment'].get('variables', {})
+    profile_id = variables.get('DYCON_SWEBENCH_REPAIR_POLICY')
+    expected = variables.get('DYCON_SWEBENCH_REPAIR_POLICY_SHA256')
+    if not profile_id and not expected:
+        return overrides
+    from core.io import identifier, read_json, sha256
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
+    if not profile_id or not expected:
+        raise ValueError('SWE-bench repair profile requires both ID and SHA256')
+    profile_path = Path(cfg['project_root']) / 'runtime/containers/repair_profiles' / (identifier(profile_id) + '.json')
+    if sha256(profile_path) != expected:
+        raise ValueError('SWE-bench repair profile checksum mismatch')
+    profile = read_json(profile_path)
+    if profile.get('schema_version') != 1 or profile.get('policy_id') != profile_id:
+        raise ValueError('Unsupported SWE-bench repair profile identity')
+    row = profile['tasks'].get(instance['instance_id'])
+    if row is None:
+        return overrides
+    requirements = row['requirements']
+    names = {canonicalize_name(Requirement(spec).name) for spec in requirements}
+    repo = instance['repo']
+    pins = {**cfg['environment']['repo_pins'], **overrides.get('repo_pins', {})}
+    retained = [spec for spec in pins.get(repo, [])
+                if canonicalize_name(Requirement(spec).name) not in names]
+    # Let EnvironmentPolicy report contradictory global constraints instead of
+    # silently replacing a separately declared user pin.
+    pins[repo] = retained + requirements
+    overrides['repo_pins'] = pins
+    if row.get('variables'):
+        overrides['variables'] = {
+            **variables, **overrides.get('variables', {}), **row['variables']}
     return overrides

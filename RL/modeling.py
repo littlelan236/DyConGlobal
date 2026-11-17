@@ -59,6 +59,8 @@ def inject(model, settings, *, adapter=None, expected_targets=None):
 
 
 def load_base(config):
+    from RL.gdn_backend import install_gdn_backend
+    install_gdn_backend(config.model)
     from transformers import AutoTokenizer, Qwen3_5ForConditionalGeneration
 
     if not torch.cuda.is_available():
@@ -68,8 +70,10 @@ def load_base(config):
         attn_implementation=config.model.attention_backend,
     ).to(torch.device("cuda:0"))
     model.config.use_cache = False
+    model.config.use_kernels = False
     if hasattr(model.config, "text_config"):
         model.config.text_config.use_cache = False
+        model.config.text_config.use_kernels = False
     tokenizer = AutoTokenizer.from_pretrained(config.model.path, local_files_only=True)
     devices = {str(p.device) for p in model.parameters()}
     if devices != {"cuda:0"}:

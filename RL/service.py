@@ -280,6 +280,10 @@ def _train_impl(config, root, directory, base, parent, attempt, *, allocator_war
     gpu = _device_info or _select_gpu(config)  # Before importing the training stack.
     import torch
     import transformers.models.qwen3_5.modeling_qwen3_5 as qwen
+    from RL.gdn_backend import install_gdn_backend
+    # Bind before loading/instantiating Qwen: the decorated class resolves its
+    # operator globals during forward, and a late install is not auditable.
+    gdn_binding = install_gdn_backend(config.model)
 
     import core
     import RL
@@ -332,6 +336,7 @@ def _train_impl(config, root, directory, base, parent, attempt, *, allocator_war
                    **gpu, "versions": dependency_versions(), "source": source,
                    "imports": {"core": str(Path(core.__file__).resolve()), "RL": str(Path(RL.__file__).resolve())},
                    "attention_backend": config.model.attention_backend,
+                   "gdn_execution": gdn_binding.execution_contract(),
                    "linear_attention": {name: {"module": getattr(getattr(qwen, name, None), "__module__", None),
                                                "name": getattr(getattr(qwen, name, None), "__name__", None)}
                                         for name in ["causal_conv1d_fn", "torch_chunk_gated_delta_rule"]},
@@ -360,9 +365,10 @@ def _train_impl(config, root, directory, base, parent, attempt, *, allocator_war
         "blas_library": str(torch.backends.cuda.preferred_blas_library()),
     }
     environment["linear_attention"]["execution_backend"] = {
-        "causal_conv1d": "reference_pytorch" if source["dependencies"]["causal-conv1d"] is None else "installed_kernel_dispatch",
-        "gated_delta_rule": "reference_pytorch" if source["dependencies"]["flash-linear-attention"] is None else "installed_kernel_dispatch",
+        "causal_conv1d": "reference_pytorch",
+        "gated_delta_rule": gdn_binding.resolved_backend,
     }
+    environment["gdn_execution_observations"] = gdn_binding.observations()
     write_json(directory / "environment.json", environment)
     started = time.monotonic()
     attempt.update(status="loading_model")
@@ -384,6 +390,9 @@ def _train_impl(config, root, directory, base, parent, attempt, *, allocator_war
     from RL.parallel import current
     parallel = current()
     if parallel:
+        if any(identity != gdn_binding.execution_contract() for identity in
+               parallel.gather(gdn_binding.execution_contract())):
+            raise ValueError("Distributed GDN execution identities differ")
         parallel.synchronize_model(model)
     mlps = install_mlp_backend(model, config.training.memory.mlp_chunk_tokens)
     offloader = configure_checkpointing(model, config, plan["host_budget_bytes_per_rank"])
@@ -423,6 +432,7 @@ def _train_impl(config, root, directory, base, parent, attempt, *, allocator_war
     contract = {"schedule": schedule_contract(config), "input": input_identity,
                 "adapter": adapter_identity,
                 "dependencies": source["dependencies"], "attention": environment["linear_attention"]}
+    contract["gdn_execution"] = environment["gdn_execution"]
     contract["determinism"] = environment["determinism"]
     contract["memory_backend"] = {"strategy": memory_contract(config.training.memory),
                                   "checkpoint_policy": config.training.checkpoint_policy,
@@ -756,6 +766,8 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
                 "dependencies": source["dependencies"], "attention": environment.get("linear_attention"),
                 "determinism": environment.get("determinism"),
                 "qwen_implementation_sha256": environment.get("qwen_implementation_sha256")}
+    if environment.get("gdn_execution") is not None:
+        contract["gdn_execution"] = environment["gdn_execution"]
     if reader is not None:
         contract.update(prepared=binding(reader.path), prepared_schedule_id=reader.schedule["schedule_id"],
                         prepared_schedule_sha256=reader.schedule["sha256"])
@@ -767,7 +779,7 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
         from RL.grpo.prefix import EXECUTION_CONTRACT
         from RL.qwen_boundary import validate_model
         if config.preflight.verify_model_state:
-            validate_model(model)
+            validate_model(model, expected_backend=contract.get("gdn_execution"))
         contract["prefix_execution"] = dict(EXECUTION_CONTRACT)
     if streaming_mode:
         contract["streaming"] = {"version": 1, "window_queue": 2,

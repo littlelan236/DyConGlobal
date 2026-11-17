@@ -198,18 +198,28 @@ def parse_response(response, request, *, decision_id="single", branch_id=0):
 
 def canonical_trajectory(instance_id, binding, records, events, terminal):
     messages = []
+    pending_tool_ids = set()
     for record in records:
-        if record.get("role") != "agent_decision" or not record.get("selected_response"):
+        if record.get("role") != "agent_decision":
             continue
         request = record.get("effective_request", record["request"])
-        # The effective prefix is stored per decision, including condensations.
-        # Only tool observations after the preceding assistant are projected.
+        # Tool execution precedes this generation. Its observations remain valid
+        # even if the generation is cancelled, fails, or never selects a response.
+        # Use the exact SDK prefix (not ACP presentation text), restricted to
+        # outstanding selected calls so retries cannot duplicate observations.
         prefix = request["messages"]
-        if not messages:
+        if not messages and record.get("selected_response"):
             messages.extend(copy.deepcopy([m for m in prefix if m["role"] in {"system", "user"}]))
         last_assistant = max((i for i, m in enumerate(prefix) if m.get("role") == "assistant"), default=-1)
-        messages.extend(copy.deepcopy([m for m in prefix[last_assistant + 1:] if m.get("role") == "tool"]))
+        for observation in prefix[last_assistant + 1:]:
+            call_id = observation.get("tool_call_id")
+            if observation.get("role") == "tool" and call_id in pending_tool_ids:
+                messages.append(copy.deepcopy(observation))
+                pending_tool_ids.remove(call_id)
+        if not record.get("selected_response"):
+            continue
         msg = parse_response(record["selected_response"], request)
+        pending_tool_ids.update(call["id"] for call in msg.get("tool_calls") or [])
         msg["extra"].update(record.get("extra", {}))
         msg["extra"]["request"]["dycon_capture"] = record.get("capture")
         messages.append(msg)

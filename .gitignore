@@ -248,3 +248,11 @@ events.out.tfevents.*
 # Generated catalog revision evidence and task-specific selections
 /catalog/changes/
 /catalog/task-sets/
+
+# Generated catalog revisions and published reference packages (rebuild via CLI)
+/catalog/reference-solutions/
+
+# Migration release bundles and machine-local backend/cache environments
+/migration/releases/
+/runtime/backend-snapshots/
+/runtime/resource-cache-runtime/

@@ -391,20 +391,29 @@ async def install_runtime(env, cfg, output, ownership):
                           log_path=output / 'dependency-install.json', wheelhouse=profile['dependency_snapshot'])
 
 
-async def probe_runtime(env, cfg, output, ownership, workspace):
+async def probe_runtime(env, cfg, output, ownership, workspace, *, expected_user=None, expected_home=None, task_path=None):
     import shlex
     output = Path(output)
     source = Path(__file__).with_name('sandbox_probe.py').read_text()
     seconds = cfg['timeouts']['model_seconds']
-    command = 'export HOME=/home/agent LITELLM_LOCAL_MODEL_COST_MAP=true OPENHANDS_SUPPRESS_BANNER=1; '
+    user = expected_user or cfg['execution_context']['profile']['sandbox_user']
+    home = expected_home or '/home/agent'
+    if user == 'root':
+        from runtime.backends.harbor.policy import execution_policy
+        policy = execution_policy(cfg)
+        if not policy or home != policy['home']:
+            raise ValueError('Root probe requires a frozen Terminal policy')
+    command = 'export HOME=' + shlex.quote(home) + ' LITELLM_LOCAL_MODEL_COST_MAP=true OPENHANDS_SUPPRESS_BANNER=1; '
+    if task_path is not None:
+        command += 'export PATH=' + shlex.quote(task_path) + '; '
     settings = cfg['execution_context'].get('condenser', {})
     if settings.get('runtime_configurable'):
         command += ('export OPENHANDS_CONDENSER_MAX_SIZE=' + str(settings['max_size']) +
                     ' OPENHANDS_CONDENSER_KEEP_FIRST=' + str(settings['keep_first']) + '; ')
-    command += 'cd /home/agent && /opt/dycon-openhands/bin/python -c ' + shlex.quote(source)
+    command += 'cd ' + shlex.quote(home) + ' && /opt/dycon-openhands/bin/python -c ' + shlex.quote(source)
     # -c cannot run the __main__ block with arguments without sys.argv[0].
-    command += ' ' + shlex.quote(workspace) + ' ' + str(seconds)
-    result = await env.exec(command, user=cfg['execution_context']['profile']['sandbox_user'], timeout_sec=120)
+    command += ' ' + shlex.quote(workspace) + ' ' + str(seconds) + ' ' + shlex.quote(user) + ' ' + shlex.quote(home)
+    result = await env.exec(command, user=user, timeout_sec=120)
     record = {'schema_version': 1, 'ownership': ownership, 'return_code': result.return_code,
               'stdout': result.stdout, 'stderr': getattr(result, 'stderr', ''),
               'probe_sha256': sha256(Path(__file__).with_name('sandbox_probe.py')), 'at': now(), 'verified': False}
@@ -416,5 +425,5 @@ async def probe_runtime(env, cfg, output, ownership, workspace):
             pass
     write_json(output / 'agent-environment.json', record)
     if not record['verified']:
-        raise ValueError('Non-root OpenHands environment/tool initialization failed; see agent-environment.json')
+        raise ValueError('OpenHands environment/tool initialization failed; see agent-environment.json')
     return record

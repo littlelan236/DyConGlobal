@@ -13,6 +13,10 @@ Fixed checkpoint preference diagnostics are available through `dycon lora-probe`
 explicit checkpoint and fixed complete group IDs, JSON reports and optional baseline
 comparison, with no TensorBoard or training-state writes. See [FIXED_PROBE.md](FIXED_PROBE.md).
 
+BF16 FLA GDN training is available through explicit `model.gdn_backend: fla_chunk`
+using the same training CLI. See [backend setup, smoke checks and scope](FLA_BACKEND.md).
+The default remains `reference_pytorch`.
+
 Native streaming GRPO supports exact checkpoint resume through the same training CLI, retaining the original anchor and each rank's optimizer/scheduler/RNG. Unlike prepared cache reuse, streaming requires unconsumed native ledgers and raw probability sources to remain accessible. See [streaming recovery](STREAMING_RESUME.md) for complete recovery bundles, read-only historical compatibility, strict paths/topology and validation boundaries.
 
 All optional startup audits and diagnostics default to off in `preflight`:

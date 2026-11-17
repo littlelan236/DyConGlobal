@@ -10,45 +10,40 @@ paths:
   - /data3/wangtianyi/DyConGlobal
   - /data3/wangtianyi/DyConGlobal
 benchmark:
-  partition: null
-  snapshot_ref: catalog/snapshots/skillsbench-agentops-py38-py312-candidate-v2-20261111/manifest.json
-  backend: skillsbench
+  backend: terminalbench_2_1
+  snapshot_ref: catalog/snapshots/tb21-7131e437-20261115/manifest.json
+  partition: test
 sandbox:
-  memory_mb: 16384
+  memory_mb: null
 model:
-  path: /VM/wangtianyi/DyConGlobal/models/Qwen3.6-27B
-  fingerprint: 1f5eeca46580a37641928dc7cd1eeeb78d8c82b8364dcf2f2bca16223663e808
-  served_name: Qwen3.6-27B
+  path: /VM/wangtianyi/DyConGlobal/models/Qwen3.5-9B
+  fingerprint: f97643c15ea3cb04517379dd13482b48548458c3a3f6c3a7eb93dcaa6adf86a2
+  served_name: Qwen3.5-9B
   trust_remote_code: false
-  verify_identity: false
 serving:
-  startup_mode: serial
-  base_url: http://127.0.0.1:18222/v1
+  base_url: http://127.0.0.1:18240/v1
   api_key_env: DYCON_API_KEY
   management: managed
-  python: .venvs/easysteer/bin/python
-  dtype: float16
-  kv_cache_memory_bytes: null
-  max_num_seqs: 20
-  max_num_batched_tokens: 2048
+  python: /home/wangtianyi/DyConGlobal/.venvs/easysteer/bin/python
   gpus:
   - 0
-  - 1
-  - 2
   tensor_parallel_size: 1
-  gpu_memory_utilization: 0.9
-  max_model_len: 262144
+  trajectory_sharding: none
+  replica_base_urls: []
+  max_cpu_workers_per_gpu: 1
+  startup_mode: serial
+  allow_mig_sharing: false
+  gpu_memory_utilization: 0.85
+  max_model_len: 131072
   startup_seconds: 1200
   shutdown_seconds: 30
   tool_parser: qwen3_xml
   reasoning_parser: qwen3
   language_model_only: true
-  trajectory_sharding: per_gpu_tp1
-  replica_base_urls:
-  - http://127.0.0.1:18222/v1
-  - http://127.0.0.1:18223/v1
-  - http://127.0.0.1:18224/v1
-  max_cpu_workers_per_gpu: 28
+  dtype: float16
+  kv_cache_memory_bytes: null
+  max_num_seqs: 32
+  max_num_batched_tokens: 2048
 generation:
   temperature: 0.6
   top_p: 0.95
@@ -56,18 +51,18 @@ generation:
   min_p: 0.0
   presence_penalty: 0.0
   repetition_penalty: 1.0
-  max_tokens: 98304
+  max_tokens: 8192
   seed: 42
   enable_thinking: true
   preserve_thinking: true
-  thinking_token_budget: 81920
+  thinking_token_budget: null
   require_reasoning_close: true
 agent:
-  loop_repeat_limit: 8
-  loop_max_period: 7
   step_limit: 250
   cost_limit: 0.0
   max_consecutive_format_errors: 10
+  loop_repeat_limit: 8
+  loop_max_period: 7
   system_template: 'You are a helpful assistant that can interact with a computer
     shell to solve programming tasks.
 
@@ -376,17 +371,13 @@ agent:
     {%- endif %}
 
     '
-  condenser_max_size: 80
-  condenser_keep_first: 4
-  # null: serving.max_model_len - generation.max_tokens - 1, frozen per run.
-  condenser_max_tokens: null
   backend: openhands
-  profile_ref: runtime/agent-profiles/skillsbench-agentops-matrix-public-qualified-20261111/manifest.json
+  profile_ref: runtime/agent-profiles/tb21-openhands-pro6000-2-v1/manifest.json
 environment:
-  docker_host: unix:///run/user/1018/docker.sock
+  docker_host: unix:///run/user/1023/docker.sock
   docker_executable: /usr/bin/docker
   docker_data_root: /data1/wangtianyi/docker
-  wheelhouse: /home/wangtianyi/DyConGlobal/runtime/wheelhouse/unified-wheels-repaired-20261029-v4
+  wheelhouse: /home/wangtianyi/DyConGlobal/runtime/wheelhouse/terminalbench-task-wheels-20261115-v1
   cwd: /testbed
   user: root
   platform: linux/amd64
@@ -395,9 +386,10 @@ environment:
   repo_pins: {}
   variables: {}
   network_fallback: false
-  requirements_cache: runtime/cache/requirements
+  network_mode: bridge
+  requirements_cache: /home/wangtianyi/DyConGlobal/runtime/cache/requirements
 images:
-  load_workers: 8
+  load_workers: 4
   reserve_bytes: 8589934592
   expansion_factor: 1.0
   minimum_load_bytes: 0
@@ -405,6 +397,77 @@ images:
   load_seconds: 1800
   admission_seconds: 1800
   cleanup: true
+skillsbench_images:
+  source_root: benchmarks/skillsbench
+  revision: f860ecf02ef53412a030f8661c83d644b739ff01
+  store: skillsbench-f860ecf02-20261026
+  workers: 8
+  build_seconds: 7200
+  reserve_bytes: 107374182400
+  host_proxy: http://127.0.0.1:7890
+  build_proxy: http://10.249.187.9:17898
+  manage_build_proxy: true
+  task_compatibility:
+    earthquake-phase-association:
+      python_bootstrap:
+      - setuptools==80.9.0
+      note: SeisBench 0.10.2 imports pkg_resources but omits its runtime provider;
+        add verified setuptools without changing SeisBench or model weights.
+    seismic-phase-picking:
+      python_bootstrap:
+      - setuptools==80.9.0
+      note: SeisBench 0.10.2 imports pkg_resources but omits its runtime provider;
+        add verified setuptools without changing SeisBench or model weights.
+    tictoc-unnecessary-abort-detection:
+      replacements:
+      - before: tar -xzf /root/tictoc-unnecessary-abort-detection-traces.tar.gz
+        after: tar --no-same-owner -xzf /root/tictoc-unnecessary-abort-detection-traces.tar.gz
+      note: Bundled TSV files have archive UID/GID outside rootless mapping. Preserve
+        bytes, paths and modes; extract as the current container user.
+    python-scala-translation:
+      replacements:
+      - before: ./cs setup --yes
+        after: ./cs {build_proxy_jvm_args} setup --yes
+      - before: ./cs install scala:2.13.12 scalac:2.13.12
+        after: ./cs {build_proxy_jvm_args} install scala:2.13.12 scalac:2.13.12
+      note: Coursier native/JVM downloader needs explicit proxy JVM properties; keep
+        original Coursier and Scala versions.
+  verified_wheels:
+    earthquake-phase-association:
+    - package: torch
+      version: 2.14.1
+      filename: torch-2.14.1-cp312-cp312-manylinux_2_28_x86_64.whl
+      sha256: 23011fe29a99b591eabb3a31a25080c62e2c2f0690a3c798744e5489dae50451
+      path: skillsbench-f860ecf02-20261026/downloads/wheels/torch-2.14.1-cp312-cp312-manylinux_2_28_x86_64.whl
+    - package: setuptools
+      version: 80.9.0
+      filename: setuptools-80.9.0-py3-none-any.whl
+      sha256: 062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922
+      path: skillsbench-f860ecf02-20261026/downloads/wheels/setuptools-80.9.0-py3-none-any.whl
+    seismic-phase-picking:
+    - package: torch
+      version: 2.14.1
+      filename: torch-2.14.1-cp312-cp312-manylinux_2_28_x86_64.whl
+      sha256: 23011fe29a99b591eabb3a31a25080c62e2c2f0690a3c798744e5489dae50451
+      path: skillsbench-f860ecf02-20261026/downloads/wheels/torch-2.14.1-cp312-cp312-manylinux_2_28_x86_64.whl
+    - package: setuptools
+      version: 80.9.0
+      filename: setuptools-80.9.0-py3-none-any.whl
+      sha256: 062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922
+      path: skillsbench-f860ecf02-20261026/downloads/wheels/setuptools-80.9.0-py3-none-any.whl
+  source_overrides:
+    bugswarm/cached-images:AgentOps-AI-agentops-24579293289:
+      store: skillsbench-ownership-f860ecf02-20261026
+      manifest: images/skillsbench-agentops-base.json
+      manifest_sha256: 3dbf491117d44455ade1945b03f0af511bdf788dd1cfbf907de301a7da5ccd96
+      image_id: sha256:75087e446060c9f2d27caa01d66121b6002f69317fe8b8f2bb741e4da631d8ed
+  python_read_seconds: 60
+  python_index: https://mirrors.aliyun.com/pypi/simple/
+  ubuntu_mirror: http://mirrors.aliyun.com/ubuntu
+  debian_mirror: http://mirrors.aliyun.com/debian
+  mirror_no_proxy: mirrors.aliyun.com,localhost,127.0.0.1
+  docker_context: rootless
+  builder_name: rootless
 execution:
   supervisor_max_open_files: 262144
   preflight:
@@ -416,23 +479,21 @@ execution:
     kill_verify_seconds: 5.0
     cleanup_seconds: 15.0
   limits_retry:
-    enabled: false
+    enabled: true
     retry_statuses:
     - LimitsExceeded
     - reasoning_loop
     seed_policy: repetition_round_offset_v1
-  rollout_workers: 48
-  harness_workers: 8
-  infrastructure_retry_limit: 0
+  rollout_workers: 1
+  harness_workers: 4
+  infrastructure_retry_limit: 3
   pipeline_wall_seconds: 0
-  startup_failure_limit: null
-  sample_completion_token_budget: 262144
 timeouts:
   container_start_seconds: 900
-  container_lifetime_seconds: 28800
+  container_lifetime_seconds: 57600
   bootstrap_seconds: 600
   tool_command_seconds: 120
-  model_seconds: 28800
+  model_seconds: 57600
   evaluation_seconds: 300
   metadata_request_seconds: 30
 enrichment:
@@ -442,7 +503,7 @@ enrichment:
   close_occurrence: first
   token_evidence: reconstructed
 hidden:
-  python: .venvs/analysis/bin/python
+  python: /home/wangtianyi/DyConGlobal/.venvs/analysis/bin/python
   dtype: float16
   device: cpu
   chunk_size: 1024
@@ -481,7 +542,7 @@ hidden:
   - 31
   adapter: vllm_eager
   vllm:
-    python: .venvs/latent-vllm/bin/python
+    python: /home/wangtianyi/DyConGlobal/.venvs/latent-vllm/bin/python
     gpus:
     - 0
     - 1
@@ -491,17 +552,25 @@ hidden:
     max_num_seqs: 12
     max_num_batched_tokens: 4096
     max_model_len: 262144
+    max_inflight_requests: 32
     gpu_memory_utilization: 0.75
+    kv_cache_memory_bytes: null
+    allow_shared_gpus: false
+    min_free_gpu_bytes: 0
+    enable_chunked_prefill: true
+    enable_prefix_caching: true
+    moe_backend: auto
+    capture_budget_bytes: 268435456
+    fetch_bytes: 16777216
 difficulty:
   estimator: null
   ridge_probe:
     dataset_id: submission-shortest375-20261019-relocated-20261021
     dataset_receipt_sha256: 20831bccb341cde383f7063c2ed64d439d6d498cb550afd142e9950678057313
+    split_id: null
     targets:
     - submission_remaining_reasoning_tokens_log1p
     - submission_remaining_steps_linear
-    validation_fraction: 0.15
-    test_fraction: 0.15
     layers:
     - 0
     - 1
@@ -540,22 +609,29 @@ difficulty:
     - 0.001
     - 0.01
     - 0.1
-    - 1
-    - 10
-    - 100
-    - 1000
-    - 10000
-    - 100000
-    - 1000000
-    - 10000000
-    - 100000000
+    - 1.0
+    - 10.0
+    - 100.0
+    - 1000.0
+    - 10000.0
+    - 100000.0
+    - 1000000.0
+    - 10000000.0
+    - 100000000.0
     standardize: true
     split_seed: 42
     validation_tasks: 48
+    validation_fraction: 0.15
+    test_fraction: 0.15
     expected_tasks: 238
+    expected_rollouts: null
     expected_samples: 14384
     split_strategy: event_random_v1
+    parent_experiment_id: null
+    parent_receipt_sha256: null
     selection_metric: validation_pooled_r2
+    refit_train_validation: false
+    plots_enabled: true
     tie_tolerance: 1.0e-10
     blas_threads: 4
 action:
@@ -565,7 +641,7 @@ steering:
   enabled: false
   payload: null
 capture:
-  enabled: true
+  enabled: false
   backend: easysteer
   mode: online
   graph_mode: FULL
@@ -616,6 +692,12 @@ capture:
   control_port: 0
   control_seconds: 600
   receipt_workers: 64
+  control_workers: 16
+  flush_timeout_seconds: 1800
+  finalize_request_seconds: 7200
+  admission_seconds: 21600
+  finalize_seconds: 900
+  publication_seconds: 3600
   export:
     enabled: true
     root: hidden/online
@@ -629,93 +711,58 @@ capture:
     shard_max_bytes: 1073741824
     upload_workers: 24
     upload_max_elapsed_seconds: 3000
-  control_workers: 16
-  flush_timeout_seconds: 1800
-  finalize_seconds: 900
-  finalize_request_seconds: 7200
-  admission_seconds: 21600
-skillsbench_images:
-  source_root: benchmarks/skillsbench
-  revision: f860ecf02ef53412a030f8661c83d644b739ff01
-  store: skillsbench-f860ecf02-20261026
-  workers: 8
-  build_seconds: 7200
-  reserve_bytes: 107374182400
-  host_proxy: http://127.0.0.1:7890
-  build_proxy: http://10.249.187.9:17898
-  manage_build_proxy: true
-  python_index: https://mirrors.aliyun.com/pypi/simple/
-  python_read_seconds: 60
-  ubuntu_mirror: http://mirrors.aliyun.com/ubuntu
-  debian_mirror: http://mirrors.aliyun.com/debian
-  mirror_no_proxy: mirrors.aliyun.com,localhost,127.0.0.1
-  docker_context: rootless
-  builder_name: rootless
-  source_overrides:
-    bugswarm/cached-images:AgentOps-AI-agentops-24579293289:
-      store: skillsbench-ownership-f860ecf02-20261026
-      manifest: images/skillsbench-agentops-base.json
-      manifest_sha256: 3dbf491117d44455ade1945b03f0af511bdf788dd1cfbf907de301a7da5ccd96
-      image_id: sha256:75087e446060c9f2d27caa01d66121b6002f69317fe8b8f2bb741e4da631d8ed
-  verified_wheels:
-    earthquake-phase-association:
-    - &id001
-      package: torch
-      version: 2.14.1
-      filename: torch-2.14.1-cp312-cp312-manylinux_2_28_x86_64.whl
-      sha256: 23011fe29a99b591eabb3a31a25080c62e2c2f0690a3c798744e5489dae50451
-      path: skillsbench-f860ecf02-20261026/downloads/wheels/torch-2.14.1-cp312-cp312-manylinux_2_28_x86_64.whl
-    - &id002
-      package: setuptools
-      version: 80.9.0
-      filename: setuptools-80.9.0-py3-none-any.whl
-      sha256: 062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922
-      path: skillsbench-f860ecf02-20261026/downloads/wheels/setuptools-80.9.0-py3-none-any.whl
-    seismic-phase-picking:
-    - *id001
-    - *id002
-  task_compatibility:
-    earthquake-phase-association:
-      python_bootstrap:
-      - setuptools==80.9.0
-      note: SeisBench 0.10.2 imports pkg_resources but omits its runtime provider;
-        add verified setuptools without changing SeisBench or model weights.
-    seismic-phase-picking:
-      python_bootstrap:
-      - setuptools==80.9.0
-      note: SeisBench 0.10.2 imports pkg_resources but omits its runtime provider;
-        add verified setuptools without changing SeisBench or model weights.
-    tictoc-unnecessary-abort-detection:
-      replacements:
-      - before: tar -xzf /root/tictoc-unnecessary-abort-detection-traces.tar.gz
-        after: tar --no-same-owner -xzf /root/tictoc-unnecessary-abort-detection-traces.tar.gz
-      note: Bundled TSV files have archive UID/GID outside rootless mapping. Preserve
-        bytes, paths and modes; extract as the current container user.
-    python-scala-translation:
-      replacements:
-      - before: ./cs setup --yes
-        after: ./cs {build_proxy_jvm_args} setup --yes
-      - before: ./cs install scala:2.13.12 scalac:2.13.12
-        after: ./cs {build_proxy_jvm_args} install scala:2.13.12 scalac:2.13.12
-      note: Coursier native/JVM downloader needs explicit proxy JVM properties; keep
-        original Coursier and Scala versions.
-webarena_images:
-  source_root: benchmarks/webarena-verified
-  revision: 6473f72db5dcefc97b5725b59e734504edc28a21
-  store: webarena-verified150-h15-n35-20261031
-  wikipedia_build: true
-  hard_per_type: 15
-  non_hard_per_type: 35
-  seed: 20261031
-  workers: 8
-  host_proxy: http://127.0.0.1:17890
-webarena:
-  environment_pool_ref: runtime/webarena-environments/9ec76a08d0a9af6b0d37da6b126ae33054a969594b17c6f3d0295860873cd268/manifest.json
-  browser_image_ref: runtime/webarena-browser/webarena-browser-d1012c1709bf2e055d8a/reference.json
-  environment_slots: 1
-  max_browser_actions: 30
-  observation_type: accessibility_tree
-  action_protocol: bash_browser_id_v1
-  reset_policy: per_attempt
-  evaluator_python: .venvs/webarena-eval/bin/python
-  evaluator_timeout_seconds: 120
+  logprobs:
+    enabled: false
+    probability_semantics: raw_t1_sampled_token_v1
+    temperature: 1.0
+    queue_size: 64
+    max_request_tokens: 131072
+    shard_max_bytes: 4194304
+    spool_max_bytes: 1073741824
+    failure_policy: record_and_continue
+parallel:
+  enabled: false
+  mode: parallel_consensus
+  branch_count: 32
+  policy: every_step
+  every_k_steps: null
+  estimator_ref: /home/wangtianyi/DyConGlobal/runtime/parallel-artifacts/ridge-resolved106-r5-plus331-reasoning-log1p-refit-20261027/manifest.json
+  dynamic_branch_admission: true
+  admission_timeout_seconds: 28800
+  score_timeout_ms: 5000
+  control_request_seconds: 600
+  results_wait_seconds: 600
+  result_workers: 16
+  decision_ttl_seconds: 64800
+  persist_all_branch_close: true
+  save_sites:
+  - 3
+  fallback_policy: stop
+  validation_repetitions: 1
+  consensus:
+    retention_ratio: 0.5
+    min_retained_branches: 2
+    rule: exact_action
+    tie_policy: estimator_score
+  reasoning_loop:
+    enabled: true
+    include_post_close: true
+    min_generated_tokens: 2048
+    repeat_count: 8
+    max_period_tokens: 8192
+    min_repeated_tokens: 1024
+    check_interval_tokens: 64
+  loop_escape:
+    enabled: true
+harbor:
+  runtime_ref: runtime/backend-snapshots/harbor-0250-pro6000-2-v1/manifest.json
+  image_store: terminalbench21-7131e437-pro6000-2-v1
+  cpu_quota: unenforced_with_receipt
+  network_transport: unix_model_v1
+  host_proxy: http://127.0.0.1:27890
+  seed_stores:
+  - harbor-terminal-canary-v3-20261031
+  terminal_policy: terminalbench-live-v1
+  task_python_index: https://mirrors.aliyun.com/pypi/simple/
+  task_apt_mirror: https://mirrors.aliyun.com/ubuntu/
+  task_resource_cache: /data3/wangtianyi/terminalbench-resource-cache-v1/record.json

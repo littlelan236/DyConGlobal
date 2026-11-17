@@ -15,11 +15,22 @@ async def execute(request):
     from catalog.harbor import verify_package
     from core.io import write_json
 
+    if request.get("reference_revision"):
+        from runtime.backends.harbor.reference_solutions import reference_task
+        cfg = request['driver']['cfg']
+        official = cfg['selection']['tasks'][request['binding']['task_key']]
+        derived, receipt = reference_task(cfg['project_root'], request['reference_revision']['path'], official)
+        if derived != request['task'] or receipt != request['reference_revision']:
+            raise ValueError('Derived reference request differs from publication')
     verify_package(request["task"])
     output = Path(request["output"])
     operation = request["operation"]
     agent = {"import_path": "runtime.backends.harbor.openhands_acp:DyConOpenHandsACP",
              "skip_model_parsing": True, "kwargs": {"dycon": request["driver"]}}
+    from runtime.backends.harbor.policy import execution_policy
+    policy = execution_policy(request["driver"]["cfg"])
+    if policy:
+        agent["override_setup_timeout_sec"] = policy["setup_seconds"]
     if operation in {"oracle", "nop"}:
         agent = {"name": operation}
     if operation == "replay":

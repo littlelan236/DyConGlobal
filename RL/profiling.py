@@ -68,6 +68,9 @@ class UpdateTelemetry:
         # leave a profiler active or grow mask shapes across the whole run.
         self.abort()
         self.attention_masks = []
+        from RL.gdn_backend import active_binding
+        binding = active_binding()
+        self._gdn_start = binding.observations() if binding else None
         self.loss.reset()
         for mlp in self.mlps:
             mlp.forward_blocks = mlp.backward_blocks = 0
@@ -87,6 +90,16 @@ class UpdateTelemetry:
                   "mlp_forward_chunks": sum(mlp.forward_blocks for mlp in self.mlps),
                   "mlp_backward_chunks": sum(mlp.backward_blocks for mlp in self.mlps),
                   "host": host_memory()}
+        from RL.gdn_backend import active_binding
+        binding = active_binding()
+        if binding:
+            observations = binding.observations()
+            values["gdn_execution_observations"] = {
+                "backend": binding.resolved_backend,
+                "calls": {k: count - (self._gdn_start or {}).get("calls", {}).get(k, 0)
+                          for k, count in observations["calls"].items()},
+                "chunk_lengths": {k: count - (self._gdn_start or {}).get("chunk_lengths", {}).get(k, 0)
+                                  for k, count in observations["chunk_lengths"].items()}}
         if self.offloader:
             values.update(self.offloader.metrics())
         if self.profiler:
@@ -103,6 +116,11 @@ class UpdateTelemetry:
                      "flash_backward": any("flash_attention" in name and "backward" in name for name in operators),
                      "math_attention": any("attention_math" in name for name in operators),
                      "note": "Linear-attention implementation identity is frozen in environment.json; kernels are measured."}
+            audit["gdn_execution_observations"] = values.get("gdn_execution_observations")
+            audit["fla_autograd_forward"] = any("ChunkGatedDeltaRuleFunction" in n and "Backward" not in n for n in operators)
+            audit["fla_autograd_backward"] = any("ChunkGatedDeltaRuleFunctionBackward" in n for n in operators)
+            audit["fla_cuda_kernels"] = [n for n in kernels if any(key in n.lower() for key in
+                ("gated_delta", "chunk_delta", "wy_fast", "chunk_bwd", "chunk_fwd"))]
             write_json(self.directory / "kernel-audit.json", audit)
             self.profiler.export_chrome_trace(str(self.directory / "profile-first-update.json"))
             self.profiler = None

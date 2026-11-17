@@ -1,0 +1,59 @@
+schema_version: 1
+run:
+  attempt_id: grpo-fla-bf16-smoke-dry-001
+  mode: dry-run
+  seed: 42
+  start:
+    mode: fresh
+    checkpoint: null
+model:
+  path: /VM/wangtianyi/DyConGlobal/models/Qwen3.5-9B
+  dtype: bfloat16
+  attention_backend: sdpa
+  gradient_checkpointing: true
+  gdn_backend: fla_chunk
+preflight:
+  verify_identity: true
+lora:
+  rank: 16
+  alpha: 32
+  dropout: 0.0
+  target_scope: text_backbone_all_linear
+runtime:
+  gpu: 0
+  output_root: /data3/wangtianyi/DyConGlobal
+training:
+  max_updates: 2
+  gradient_accumulation_steps: 1
+  learning_rate: 0.0001
+  weight_decay: 0.0
+  grad_clip: 1.0
+  scheduler: constant
+  checkpoint_every_updates: 1
+  memory:
+    loss_chunk_tokens: 16
+    exact_length: true
+    attention_policy: flash_only
+validation:
+  fixture_id: causal-text-smoke-v1
+  max_sequence_length: 512
+  stop_after_update: null
+algorithm:
+  name: offline_grpo_k3_v1
+  dataset_root: /data3/wangtianyi/DyConGlobal
+  dataset_id: synthetic-grpo-smoke-v1
+  require_data_ready: true
+grpo:
+  prefix_reuse:
+    mode: boundary_grad
+  group_batch_size: 4
+  max_epochs: 1
+  shuffle_seed: 42
+  top_k: 4
+  top_k_fraction: null
+  score_scale_floor: 0.1
+  boundary_tie_sigma: 0.05
+  clip_epsilon: 0.1
+  kl_beta: 0.02
+  reference: initial_policy
+  probability_mode: raw_t1

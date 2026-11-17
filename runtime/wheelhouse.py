@@ -41,7 +41,13 @@ def discover_sources(cfg):
             candidates.add(path)
     tasks = read_json(root / 'catalog/manifest.json')['tasks']
     for task in tasks.values():
-        wheelhouse = environment_overrides(cfg, task['instance']).get('wheelhouse')
+        instance = task['instance']
+        instance_id = instance.get('instance_id') or task.get('instance_id')
+        if instance_id is None:
+            continue
+        if instance.get('instance_id') != instance_id:
+            instance = {**instance, 'instance_id': instance_id}
+        wheelhouse = environment_overrides(cfg, instance).get('wheelhouse')
         if wheelhouse:
             path = Path(wheelhouse)
             candidates.add(path if path.is_absolute() else root / path)

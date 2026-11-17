@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
@@ -540,6 +542,29 @@ class WebArena(Strict):
     evaluator_timeout_seconds: int = Field(default=120, gt=0)
 
 
+class HarborTaskPreparation(Strict):
+    cpu_affinity: bool = False
+    sshd_runtime_directory: bool = False
+    system_packages: list[str] = Field(default_factory=list)
+    post_verifier_diagnostics: dict[str, str] = Field(default_factory=dict)
+    python_constraints: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_packages(self):
+        if len(set(self.system_packages)) != len(self.system_packages) or any(
+                not re.fullmatch(r"[a-z0-9][a-z0-9+.-]*(?:=[A-Za-z0-9+:~.\-]+)?", p)
+                for p in self.system_packages):
+            raise ValueError("Invalid or duplicate task system package")
+        if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9_.+!-]+", item)
+               for item in self.python_constraints):
+            raise ValueError("Task Python constraints require exact package==version pins")
+        if any(not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", name)
+               or not command.strip() or len(command) > 8192
+               for name, command in self.post_verifier_diagnostics.items()):
+            raise ValueError("Invalid task diagnostic artifact name/command")
+        return self
+
+
 class Harbor(Strict):
     runtime_ref: str
     image_store: str
@@ -547,6 +572,27 @@ class Harbor(Strict):
     network_transport: Literal["unix_model_v1"] = "unix_model_v1"
     host_proxy: str | None = None
     seed_stores: list[str] = Field(default_factory=list)
+    terminal_policy: Literal["terminalbench-live-v1"] | None = None
+    task_python_index: str | None = None
+    task_apt_mirror: str | None = None
+    task_resource_cache: str | None = None
+    task_resource_cache_sha256: str | None = None
+    task_preparation: dict[str, HarborTaskPreparation] | None = None
+
+    @model_validator(mode="after")
+    def validate_task_package_mirrors(self):
+        for field, value in (("task_python_index", self.task_python_index),
+                             ("task_apt_mirror", self.task_apt_mirror)):
+            if value is None:
+                continue
+            parsed = urlsplit(value)
+            if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None or
+                    parsed.password is not None or parsed.query or parsed.fragment):
+                raise ValueError(f"harbor.{field} must be an HTTPS URL without credentials or query")
+        if self.task_apt_mirror is not None and not re.fullmatch(
+                r"https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/[A-Za-z0-9._~/-]+", self.task_apt_mirror):
+            raise ValueError("harbor.task_apt_mirror contains unsafe characters")
+        return self
 
 
 class Config(Strict):
@@ -602,6 +648,12 @@ class Config(Strict):
             raise ValueError("WebArena Verified requires webarena runtime configuration")
         if self.benchmark.backend in {"swebench_pro_v2", "terminalbench_2_1"} and self.harbor is None:
             raise ValueError("Harbor benchmarks require a pinned worker/runtime configuration")
+        if self.harbor and self.harbor.terminal_policy is not None and self.benchmark.backend != "terminalbench_2_1":
+            raise ValueError("harbor.terminal_policy requires terminalbench_2_1")
+        if self.harbor and any(getattr(self.harbor, name) is not None
+                               for name in ("task_python_index", "task_apt_mirror", "task_resource_cache", "task_preparation")) and (
+                self.benchmark.backend != "terminalbench_2_1"):
+            raise ValueError("Harbor task package mirrors require terminalbench_2_1")
         validate_generation_contract(self.model_dump())
         if self.capture.logprobs.enabled:
             if self.serving.management != "managed" or self.serving.tensor_parallel_size != 1:
@@ -737,6 +789,10 @@ def resolve_values(raw, path, *, overrides=(), run_policy=False, source_sha256=N
         cfg.pop("webarena", None)
     if "harbor" not in raw:
         cfg.pop("harbor", None)
+    else:
+        for field in ("terminal_policy", "task_python_index", "task_apt_mirror", "task_resource_cache", "task_resource_cache_sha256", "task_preparation"):
+            if field not in raw["harbor"]:
+                cfg["harbor"].pop(field, None)
     if "skillsbench_images" not in raw:
         cfg.pop("skillsbench_images", None)
     # Preserve legacy config hashes when the optional identity switch is absent.
@@ -798,6 +854,10 @@ def resolve_values(raw, path, *, overrides=(), run_policy=False, source_sha256=N
         value = cfg[section][field]
         if value is not None:
             cfg[section][field] = str((root / value).absolute())
+    if cfg.get("harbor", {}).get("task_resource_cache"):
+        cache_path = (root / cfg["harbor"]["task_resource_cache"]).resolve()
+        cfg["harbor"]["task_resource_cache"] = str(cache_path)
+        cfg["harbor"]["task_resource_cache_sha256"] = sha256(cache_path)
     cfg.update(project_root=str(root), config_source=str(path), overrides=list(overrides))
     if cfg["steering"]["enabled"]:
         cfg["steering"]["payload_sha256"] = sha256(cfg["steering"]["payload"])
