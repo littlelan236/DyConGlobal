@@ -241,3 +241,12 @@ desktop.ini
 /RL/experiments/observability-20261112/
 # Historical verifier execution evidence; catalog/verifier_patches remains source
 /analysis/pddl-airport-revalidation-*/
+
+# Generated catalog revisions and published reference packages (rebuild via CLI)
+/catalog/changes/
+/catalog/reference-solutions/
+
+# Migration release bundles and machine-local backend/cache environments
+/migration/releases/
+/runtime/backend-snapshots/
+/runtime/resource-cache-runtime/

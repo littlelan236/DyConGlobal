@@ -115,6 +115,8 @@ def select_sources(cfg, source_runs, *, rollout_ids=(), rollout_list=None, all_s
             if verify_source_hashes and sha256(trajectory) != row["trajectory_sha256"]:
                 raise ValueError(f"Canonical trajectory checksum mismatch: {run}/{rid}")
             task = selected["tasks"][row["task_key"]]
+            from benchmark_evaluation.swebench_settlement import training_label, training_exclusion
+            terminal_label = training_label(row, original, rid)
             if verify_source_hashes and row["model_fingerprint"] != source_cfg["model"]["fingerprint"]:
                 raise ValueError("Rollout model differs from frozen run model")
             snapshot["rollouts"][rid] = copy.deepcopy(original["rollouts"][rid])
@@ -141,7 +143,10 @@ def select_sources(cfg, source_runs, *, rollout_ids=(), rollout_list=None, all_s
                     "attempt_id": row.get("attempt_id"),
                     "repetition_id": row.get("repetition_id"),
                     "submission_status": row["submission_status"],
-                    "resolved": row["resolved"],
+                    "resolved": terminal_label,
+                    "terminal_reward": int(terminal_label) if type(terminal_label) is bool else None,
+                    "evaluation_status": row.get("evaluation_status"),
+                    "terminal_scoring_exclusion": training_exclusion(row, original, rid),
                 }
             )
             dependencies[str(trajectory)] = row["trajectory_sha256"]

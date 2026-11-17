@@ -49,6 +49,9 @@ class Model(Strict):
     dtype: Literal["bfloat16", "float32"]
     attention_backend: Literal["sdpa"]
     gradient_checkpointing: Literal[True]
+    # GDN is selected explicitly so installing an optional package cannot
+    # change the numerical path of an existing training configuration.
+    gdn_backend: Literal["reference_pytorch", "fla_chunk"] = "reference_pytorch"
 
 
 class Lora(Strict):
@@ -313,6 +316,8 @@ class Config(Strict):
                 raise ValueError("FP32 currently supports length <=2048 and attention_policy=auto; Flash requires BF16")
             if self.grpo and self.grpo.reference_cache.source != "model_forward":
                 raise ValueError("FP32 requires a model_forward anchor; external probability precision is not validated")
+        if self.model.gdn_backend == "fla_chunk" and self.model.dtype != "bfloat16":
+            raise ValueError("fla_chunk requires a BF16 model")
         if self.grpo:
             split = self.grpo.parallel_branch_chunk_size is not None
             protocol = self.grpo.parallel_branch_schedule is not None
@@ -415,6 +420,10 @@ def schedule_contract(config):
         # Preserve the legacy schedule byte-for-byte for the default model-forward path.
         if config.grpo.reference_cache.source != "model_forward":
             contract["grpo"]["reference_cache"] = config.grpo.reference_cache.model_dump()
+    # Historical reference schedules predate this explicit selector. New
+    # execution identity is frozen separately; retain read-only artifact hashes.
+    if config.model.gdn_backend == "reference_pytorch":
+        contract["model"].pop("gdn_backend", None)
     return contract
 
 

@@ -38,6 +38,8 @@ class GroupBatch:
             retained = [row.get("retained") for row in members]
             validate_retained(retained, len(members))
         inventory = value.get("group", {})
+        if inventory.get("terminal_scoring_exclusion") or any(r.get("terminal_scoring_exclusion") for r in members):
+            raise ValueError("terminal_evaluation_ineligible")
         if inventory.get("expected_branch_count", len(members)) != len(members):
             raise ValueError("Incomplete GRPO group inventory")
         if "branch_ids" in inventory and inventory["branch_ids"] != [r["branch_sample_id"] for r in members]:

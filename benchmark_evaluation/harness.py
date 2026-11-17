@@ -11,6 +11,7 @@ from core.io import hash_json, now, read_json, update_status, write_json
 from core.locking import exclusive_evaluation
 from runtime.containers.factory import ContainerFactory, TaskContext
 from runtime.containers.dependencies import classify_dependency_failure, from_exception, record_dependency_failure
+from benchmark_evaluation.swebench_settlement import POLICY as SCORING_POLICY, project
 
 
 FAILURE_TYPES = ("invalid_patch", "network_error", "timeout", "dependency_error", "other_error")
@@ -109,6 +110,7 @@ def install_harness_adapter(cfg: dict, factory: ContainerFactory, rows: list[dic
         for key in ["build_container", "cleanup_container", "RUN_EVALUATION_LOG_DIR", "exec_run_with_timeout"]
     }
     original_script = TestSpec.eval_script
+    script_details = {}
     original_get = sb_python.requests.get
     original_requirements = sb_python.get_requirements_by_commit
 
@@ -153,14 +155,33 @@ def install_harness_adapter(cfg: dict, factory: ContainerFactory, rows: list[dic
     official.RUN_EVALUATION_LOG_DIR = output / "harness"
     sb_python.requests.get = cached_get
     sb_python.get_requirements_by_commit = cached_requirements
-    TestSpec.eval_script = property(
-        lambda self: factory.policy_for(instances[self.instance_id]).wrap_eval(original_script.fget(self))
-    )
+    def wrapped_script(spec):
+        from benchmark_evaluation.swebench_receipts import get_test_command
+
+        raw = original_script.fget(spec)
+        script_details[spec.instance_id] = get_test_command(raw)
+        return factory.policy_for(instances[spec.instance_id]).wrap_eval(raw)
+
+    TestSpec.eval_script = property(wrapped_script)
 
     def execute_eval(container, cmd, timeout):
+        import hashlib
+
         started = time.monotonic()
         out = factory.execute(container, "source /opt/miniconda3/bin/activate && " + cmd, timeout)
-        timed_out = out["returncode"] in [124, 137]
+        # 137 proves SIGKILL, not whether timeout/OOM/cancellation caused it.
+        timed_out = out["returncode"] == 124
+        iid = container.instance["instance_id"]
+        command_info = script_details.get(iid)
+        write_json(container.context.output_dir / "eval-execution.json", {
+            "schema_version": 1, "instance_id": iid,
+            "evaluation_task_id": container.context.attempt_id,
+            "command": cmd, "returncode": out["returncode"], "timed_out": timed_out,
+            "elapsed_seconds": time.monotonic() - started,
+            "output_sha256": hashlib.sha256(out["output"].encode()).hexdigest(),
+            "test_command_sha256": command_info["command_sha256"] if command_info else None,
+            "test_command": command_info, "at": now(),
+        })
         if not timed_out:
             try:
                 factory.probe(container, "environment-after-eval.json")
@@ -236,11 +257,24 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None, incremental=False):
                 "resolved": None,
             }
             if not patch.strip():
-                return rid, {
+                from benchmark_evaluation.swebench_verifier import POLICY_VERSION, digest
+                empty = {
                     **result, "status": "completed", "resolved": False,
                     "reason": "MissingPatch", **classify_harness_failure(evidence="MissingPatch"),
                     "attempts": [],
                 }
+                audit = {"policy_version": POLICY_VERSION,
+                    "official_result": {"completed": False, "resolved": None},
+                    "classification": "VerifierError" if gold else "ValidOutcome",
+                    "reason_code": "gold_reference_patch_missing" if gold else "missing_patch",
+                    "effective_resolved": None if gold else False,
+                    "evidence_digest": digest({"instance_id": iid, "patch_sha256": result["patch_sha256"], "empty": True}),
+                    "cause_confirmed": True, "diagnostic_status": "confirmed"}
+                audit_path = output / "verifier" / "submission" / f"{rid}.json"
+                write_json(audit_path, audit)
+                empty = project(empty, audit)
+                empty["verifier_audit"].update(path=str(audit_path), sha256=sha256(audit_path))
+                return rid, empty
             prediction = {"instance_id": iid, "model_name_or_path": rid, "model_patch": patch}
             timeout = rows[iid].get("evaluation_timeout_seconds", cfg["timeouts"]["evaluation_seconds"])
             attempts = []
@@ -250,6 +284,7 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None, incremental=False):
                     identity["attempt"] = attempt + 1
                 evaluation_task_id = "task-" + hash_json(identity)[:24]
                 started_at = now()
+                graded = None
                 try:
                     factory.deadline.check()
                     # Spec construction can fetch metadata and must also be retried.
@@ -285,6 +320,24 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None, incremental=False):
                     attempt_result.update(status="ConnectionError", resolved=None)
                 elif failure_type:
                     attempt_result.update(status="infra_error", resolved=None)
+                # Retry policy uses physical execution facts, before projecting
+                # score eligibility. A failed retry must not contaminate a later
+                # success with stale audit, status or dependency fields.
+                retryable = attempt_result['status'] == 'ConnectionError' or (
+                    attempt_result.get('dependency_failure', {}).get('reason') == 'dependency_download_network_error')
+                from benchmark_evaluation.swebench_audit import collect
+                from benchmark_evaluation.swebench_verifier import classify
+
+                audit_input = collect(output, evaluation_task_id, rid, rows[iid],
+                                      {"patch_sha256": result["patch_sha256"], **attempt_result,
+                                       **({"official_result": {"completed": graded["completed"],
+                                                              "resolved": graded["resolved"]}}
+                                          if graded is not None else {})}, gold=gold)
+                audit = classify(audit_input)
+                audit_path = output / "verifier" / evaluation_task_id / f"{rid}.json"
+                write_json(audit_path, audit)
+                attempt_result = project(attempt_result, audit)
+                attempt_result["verifier_audit"].update(path=str(audit_path), sha256=sha256(audit_path))
                 attempts.append({
                     "attempt": attempt + 1, "evaluation_task_id": evaluation_task_id,
                     "started_at": started_at, "finished_at": now(), **attempt_result,
@@ -292,8 +345,6 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None, incremental=False):
                 # Replace the final outcome so successful retries cannot retain
                 # stale network failure_type/error fields.
                 result = {"patch_sha256": result["patch_sha256"], **attempt_result}
-                retryable = result['status'] == 'ConnectionError' or (
-                    result.get('dependency_failure', {}).get('reason') == 'dependency_download_network_error')
                 if not retryable or attempt == MAX_NETWORK_RETRIES:
                     break
                 time.sleep(NETWORK_RETRY_DELAY_SECONDS * (attempt + 1))
@@ -329,6 +380,16 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None, incremental=False):
                         historical_rows.update(prior_sel.get("rollouts", {}))
                 except (OSError, ValueError, TypeError):
                     continue
+        for rid, row in list(cumulative_outcomes.items()):
+            if row.get("scoring_policy") != SCORING_POLICY:
+                # Carrying an old unprojected score into a new incremental
+                # evaluation must not bypass current settlement. Re-evaluation
+                # can replace it; historical artifacts remain unchanged.
+                cumulative_outcomes[rid] = project(row, {
+                    "classification": "Review", "reason_code": "legacy_unsettled_evaluation",
+                    "effective_resolved": None, "policy_version": None,
+                    "official_result": {"completed": row.get("status") == "completed",
+                                        "resolved": row.get("resolved")}})
         resolved = sum(row["resolved"] is True for row in cumulative_outcomes.values())
         summary = {
             "evaluation_id": eval_id,
@@ -344,6 +405,13 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None, incremental=False):
             "dependency_failure_count": sum(row.get("failure_type") == "dependency_error" for row in cumulative_outcomes.values()),
             "dependency_reason_counts": dict(Counter(row["dependency_failure"]["reason"] for row in cumulative_outcomes.values()
                                                       if row.get("dependency_failure"))),
+            "verifier_audit_mode": "settlement",
+            "scoring_policy": SCORING_POLICY,
+            "scoring_eligible": sum(row.get("scoring_eligible") is True for row in cumulative_outcomes.values()),
+            "reward_unknown": sum(row.get("resolved") is None for row in cumulative_outcomes.values()),
+            "verifier_classification_counts": dict(Counter(
+                row.get("verifier_audit", {}).get("classification", "NotAudited")
+                for row in cumulative_outcomes.values())),
             "outcomes": cumulative_outcomes,
             "finished_at": now(),
         }

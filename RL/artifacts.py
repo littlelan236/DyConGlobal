@@ -112,6 +112,23 @@ def resume_contract_matches(expected, actual):
     actual = dict(actual)
     expected.pop("source_fingerprint", None)
     actual.pop("source_fingerprint", None)
+    # Only an explicitly selected reference path may ignore unused optional
+    # kernels. Core package versions and every other contract field stay strict.
+    def reference(contract):
+        identity = contract.get("gdn_execution")
+        if identity is not None:
+            return (identity.get("resolved_backend") == "reference_pytorch"
+                    and identity.get("conv_backend") == "reference_pytorch")
+        historical = (contract.get("attention") or {}).get("execution_backend", {})
+        return historical == {"causal_conv1d": "reference_pytorch", "gated_delta_rule": "reference_pytorch"}
+    if reference(expected) and reference(actual):
+        if "gdn_execution" not in expected:
+            # Interpret historical reference metadata without editing its bytes.
+            actual.pop("gdn_execution", None)
+        for contract in (expected, actual):
+            if "dependencies" in contract:
+                contract["dependencies"] = {k:v for k,v in contract["dependencies"].items()
+                    if k not in {"causal-conv1d", "flash-linear-attention"}}
     return expected == actual
 
 

@@ -37,3 +37,27 @@
 例如 `default-address-pools: [{"base":"172.16.0.0/16","size":23}]` 可提供 128 个自动分配子网；
 必须先确认网段与现有网络和访问目标无冲突。生效需要重启对应用户 Docker daemon，已有网络不会缩小。
 重启前通过正式 cancel/wait 停止目标 run，并核对同一 daemon 上的其他工作。
+
+## 补齐官方 Verified / dev 镜像
+
+`dycon swebench images-pull STORE_ID --plan PLAN.json --proxy HTTP_PROXY --workers 2 --attempts 3`
+按固定官方版本的完整 ID 集校验补齐计划；`--check-only` 只校验计划、已有记录哈希和 NAS 图引用。
+计划 schema 1 包含 `source`（dataset/revision/split）、`official_images`（ID 到官方镜像名）、
+`existing`（ID 到 store/path/manifest_sha256）和 `missing_ids`，两组必须严格覆盖官方完整集合。
+当前支持固定 Verified-500 与 dev-225 版本，来源见 `runtime/images/swebench_pull.py`。
+
+命令复用 registry 下载、Range 续传、SHA256 校验和 OCI 发布格式；保留完整平台/attestation 图。
+每项首次取得的 manifest digest 存入 `dataset/metadata/`，重试或重启均复用它，避免 latest 漂移。
+仅在全部 blob 校验通过后写入公开 `images/ID.json`；相同 store 的排他锁防止重复进程写入。
+任务失败后继续其他任务，最多执行指定轮数；再次运行相同命令即可恢复。
+仅准备 NAS 镜像，不导入 catalog、不启动 Docker，不代表 harness/gold 通过。
+
+NAS 产物：`dataset/plan.json`、`download-status.json`、`transfer-progress.json`、
+`attempts/`、成功后的 `coverage.json` 和 `completion.json`。
+首次网络正文到达时原子写入 `transfer-started.json`，可用 inotify 做一次性启动确认；
+该历史事件需结合当前 systemd 进程状态判断存活，不要将它作为持续进度。
+新镜像做完整 SHA256 校验；已有镜像复核记录哈希及图引用存在性/大小，不重新读取全部大层。
+
+## Terminal-Bench 2.1 容器语义
+
+显式 `terminalbench-live-v1` 策略只在 Terminal-Bench 2.1 任务容器内使用 root，保留官方 workspace 权限及 PATH；不需要宿主 sudo，不向容器挂载宿主 Docker socket。agent 退出只清理有 PID/start-ticks 身份的 ACP/relay，服务由同一容器的官方 verifier 评分后再整体清理。环境回执记录 Docker inspect 的实际 CPU/内存配置，当前不承诺 storage_mb 磁盘硬配额。旧策略和其他 benchmark 的用户约束保留原行为。详见 [Terminal-Bench 操作指南](TERMINALBENCH-CN.md)。

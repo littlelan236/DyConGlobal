@@ -1,0 +1,14 @@
+{
+  "instance_id": "pyvista__pyvista-3675",
+  "repo": "pyvista/pyvista",
+  "version": "0.38",
+  "required": {
+    "group": "FAIL_TO_PASS",
+    "test": "tests/mappers/test_mapper.py::test_init",
+    "state": "FAILED"
+  },
+  "test_output": "+ : '>>>>> Start Test Output'\n__________ test_init __________\n\nsphere = PolyData (0x7fd722eef940)\n  N Cells:    840\n  N Points:   422\n  N Strips:   0\n  X Bounds:   -1.260e+02, 1.250e+02\n  Y Bounds:   -1.270e+02, 1.260e+02\n  Z Bounds:   -1.270e+02, 1.270e+02\n  N Arrays:   0\n\n\n    def test_init(sphere):\n>       mapper = DataSetMapper()\n\ntests/mappers/test_mapper.py:16: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nself = DataSetMapper (0x7fd71e364160)\n  Scalar visibility:           1\n  Scalar range:                (0.0, 1.0)\n  Interpolate before mapping:  False\n  Scalar map mode:             default\n  Color mode:                  0\n\nAttached dataset:\nNone\ndataset = None, theme = None\n\n    def __init__(\n        self,\n        dataset: Optional['pv.DataSet'] = None,\n        theme: Optional['pv.themes.DefaultTheme'] = None,\n    ):\n        \"\"\"Initialize this class.\"\"\"\n>       super().__init__(theme=theme)\nE       TypeError: Unexpected keyword argument 'theme' for 'DataSetMapper' constructor\n\npyvista/plotting/mapper.py:359: TypeError\n\n+ : '>>>>> End Test Output'\n",
+  "original_sha256": "3a17dacb0a569b3f87001f7bf6f2d89cd4f6e4f05c882434bd21f31ab0fd2118",
+  "original_path": "/home/wangtianyi/DyConGlobal/runs/swebench-full-gold-20261116/harness/harness/task-ba6b238579bc9b1210cbc00e/r-ba8a13337a1f28cab2d9c3d2110a64ca/pyvista__pyvista-3675/test_output.txt",
+  "fixture_note": "One actual required failure traceback, shortened only when indicated; not a complete run."
+}

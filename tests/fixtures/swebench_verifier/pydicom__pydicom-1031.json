@@ -1,0 +1,14 @@
+{
+  "instance_id": "pydicom__pydicom-1031",
+  "repo": "pydicom/pydicom",
+  "version": "1.4",
+  "required": {
+    "group": "FAIL_TO_PASS",
+    "test": "pydicom/tests/test_filewriter.py::TestWriteFile::test_write_empty_sequence",
+    "state": "FAILED"
+  },
+  "test_output": "+ : '>>>>> Start Test Output'\n__________ TestWriteFile.test_write_empty_sequence __________\n\nself = <pydicom.tests.test_filewriter.TestWriteFile object at 0x7fee8b089d60>\n\n    def test_write_empty_sequence(self):\n        \"\"\"Make sure that empty sequence is correctly written.\"\"\"\n        # regression test for #1030\n        ds = read_file(get_testdata_file('test-SR.dcm'))\n>       ds.save_as(self.file_out)\nE       AttributeError: 'TestWriteFile' object has no attribute 'file_out'\n\npydicom/tests/test_filewriter.py:211: AttributeError\n\n+ : '>>>>> End Test Output'\n",
+  "original_sha256": "d88c1324a6e706dc91186ff2b7fac9f78aa10b02dcde84836d6b476736e9d29e",
+  "original_path": "/home/wangtianyi/DyConGlobal/runs/swebench-full-gold-20261116/harness/harness/task-9a86aac020a5c058630392ba/r-8cb04a37410bae25835f00910683ad9c/pydicom__pydicom-1031/test_output.txt",
+  "fixture_note": "One actual required failure traceback, shortened only when indicated; not a complete run."
+}

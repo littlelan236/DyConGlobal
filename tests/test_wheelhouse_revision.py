@@ -4,8 +4,8 @@ import pytest
 
 from application.execution.config_revision import revise_config
 from application.execution.run_plan import load_plan
-from core.io import read_json, sha256
-from runtime.wheelhouse import build
+from core.io import read_json, sha256, write_json
+from runtime.wheelhouse import build, discover_sources
 from tests.test_capture_budget_revision import make_run
 
 
@@ -53,3 +53,18 @@ def test_wheelhouse_revision_rejects_unverified_path_without_mutation(cfg, tmp_p
 
     assert sha256(run / 'resolved-config.json') == before
     assert not (run / 'config-revisions/bad-wheelhouse').exists()
+
+
+def test_wheelhouse_discovery_accepts_catalog_instance_id_at_task_level(tmp_path, monkeypatch):
+    import runtime.containers.repairs as repairs
+
+    root = tmp_path
+    write_json(root / 'catalog/manifest.json', {'tasks': {
+        'task-key': {'instance_id': 'terminal-task', 'instance': {'metadata': {}}}}})
+    seen = []
+    monkeypatch.setattr(repairs, 'environment_overrides',
+                        lambda cfg, instance: seen.append(instance) or {})
+
+    assert discover_sources({'project_root': str(root),
+                             'environment': {'wheelhouse': None}}) == []
+    assert seen == [{'metadata': {}, 'instance_id': 'terminal-task'}]

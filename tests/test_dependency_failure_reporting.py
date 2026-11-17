@@ -45,7 +45,7 @@ def test_identical_missing_requirement_and_constraint_are_not_reported_as_versio
 
 def test_rollout_preflight_conflict_is_structured_before_container_creation(cfg, tmp_path):
     from runtime.containers.rollout_adapter import RolloutEnvironment
-    def spec(instance):
+    def spec(instance, **kwargs):
         raise ValueError('Conflicting offline requirement pins for pytest: 4.6.11 vs 8.0.0')
     factory = SimpleNamespace(cfg=cfg, spec=spec)
     context = TaskContext('preflight-run', 't-1', 'attempt-000', 'rollout', tmp_path / 'preflight')
@@ -135,11 +135,13 @@ def test_harness_keeps_dependency_failure_unknown_even_if_official_parser_says_u
     factory = SimpleNamespace(client=None, deadline=Deadline(), lock_images=lambda x: None, cleanup_owned=lambda x: None)
     summary = harness.evaluate(cfg, Path(cfg['project_root']) / 'runs/negative-harness', 'negative-eval', factory=factory)
     result = summary['outcomes'][rid]
-    assert result['status'] == 'infra_error' and result['resolved'] is None
+    assert result['status'] in {'VerifierError', 'Review'} and result['resolved'] is None
     assert result['failure_type'] == 'dependency_error'
     assert summary['dependency_failure_count'] == 1
     assert summary['dependency_reason_counts'] == {'missing_distribution': 1}
-    assert failure_status(cfg['project_root'], 'negative-harness')['count'] == 1
+    import hashlib
+    owner = 'harness-' + hashlib.sha256(b'negative-harness:negative-eval').hexdigest()[:24]
+    assert failure_status(cfg['project_root'], owner)['count'] == 1
     assert read_json(Path(cfg['project_root']) / 'runs/negative-harness/harness/status.json')['stage'] == 'incomplete'
 
 

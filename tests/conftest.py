@@ -23,6 +23,13 @@ def cfg(tmp_path):
     raw["environment"]["wheelhouse"] = None  # Published host caches are not unit fixtures.
     raw["model"].update(path=None, fingerprint="fixture-model", served_name="fixture")
     raw["capture"]["enabled"] = False
+    raw["capture"].pop("logprobs", None)
+    if raw.get("harbor"):
+        raw["harbor"].pop("terminal_policy", None)
+        raw["harbor"].pop("task_python_index", None)
+        raw["harbor"].pop("task_apt_mirror", None)
+        raw["harbor"].pop("task_resource_cache", None)
+        raw["harbor"].pop("task_resource_cache_sha256", None)
     raw["hidden"]["adapter"] = "vllm_eager"
     raw["hidden"]["vllm"] = {"gpus": [0], "tensor_parallel_size": 1}
     raw["steering"].update(enabled=False, payload=None)

@@ -132,7 +132,9 @@ def run(root, run_id, eval_id, gold=False, incremental=False):
     from core.config import resolve
     current_config = resolve(Path(root) / "config.yaml")
     current_wheelhouse = current_config["environment"].get("wheelhouse")
-    if current_wheelhouse:
+    same_backend = (current_config.get("benchmark", {}).get("backend", "swebench")
+                    == cfg.get("benchmark", {}).get("backend", "swebench"))
+    if current_wheelhouse and same_backend:
         from runtime.wheelhouse import verify
         verify(current_wheelhouse)
         cfg["environment"] = {**cfg.get("environment", {}), "wheelhouse": current_wheelhouse}

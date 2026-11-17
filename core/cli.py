@@ -53,6 +53,20 @@ def main(argv=None):
     hb.add_argument("--control-id", required=True)
     hb.add_argument("--agent", choices=["oracle", "nop", "gold-replay", "empty-replay"], required=True)
     hb.add_argument("--task-id", action="append", default=[])
+    hb = hb_sub.add_parser("controls-audit", help="Reclassify saved Terminal-Bench controls into a new audit receipt")
+    hb.add_argument("run_id")
+    hb.add_argument("--control-id", required=True)
+    hb.add_argument("--audit-id", required=True)
+    from runtime.backends.harbor.resource_cache import register as register_resource_cache
+    register_resource_cache(hb_sub)
+    hb = hb_sub.add_parser("reference-publish", help="Publish an explicit derived oracle solution with unchanged verifier")
+    hb.add_argument("run_id")
+    hb.add_argument("--task-id", required=True)
+    hb.add_argument("--reference-id", required=True)
+    hb.add_argument("--source", type=Path, required=True)
+    hb.add_argument("--reason", required=True)
+    hb_sub.choices["controls"].add_argument("--reference-ref", type=Path,
+        help="Explicit derived reference publication; single oracle task only")
     webarena = sub.add_parser("webarena", help="WebArena Verified import, runtime and frozen-run preflight")
     wa_sub = webarena.add_subparsers(dest="webarena_command", required=True)
     wa = wa_sub.add_parser("import", help="Import public tasks and isolate pinned official evaluation definitions")
@@ -170,6 +184,23 @@ def main(argv=None):
     sw.add_argument("--task-cwd", default="/testbed")
     sw.add_argument("--patch-max-bytes", type=int, default=16 * 1024 * 1024)
     sw_sub.add_parser("preflight", help="Validate a frozen SWE-bench OpenHands run").add_argument("run_id")
+    sw = sw_sub.add_parser("catalog-sync", help="Regroup SWE tasks and register verified NAS images from pinned sources")
+    sw.add_argument("--source", type=Path, required=True)
+    sw.add_argument("--image-plan", type=Path, action="append", required=True)
+    sw.add_argument("--output", type=Path, required=True)
+    sw.add_argument("--apply", action="store_true")
+    sw = sw_sub.add_parser("catalog-list", help="Summarize or export SWE catalog tasks by official group")
+    sw.add_argument("--group", choices=["verified", "dev", "nonverified"])
+    sw.add_argument("--output", type=Path)
+
+    sw = sw_sub.add_parser("images-pull", help="Resume pinned official Verified/dev missing images to NAS")
+    sw.add_argument("store_id")
+    sw.add_argument("--plan", type=Path, required=True)
+    sw.add_argument("--proxy")
+    sw.add_argument("--workers", type=int, default=4)
+    sw.add_argument("--attempts", type=int, default=3)
+    sw.add_argument("--check-only", action="store_true")
+
     sb = sb_sub.add_parser("cleanup-network", help="Reconcile a stopped run owned legacy proxy")
     sb.add_argument("run_id")
     sb = sb_sub.add_parser("audit", help="Verify real tools, native capture and winner-only execution")
@@ -311,6 +342,12 @@ def main(argv=None):
     q.add_argument("--incremental", action="store_true", help="Evaluate newly submitted trajectories and retain prior evaluations")
     q = harness_sub.add_parser("status")
     q.add_argument("run_id")
+    q = harness_sub.add_parser("audit", help="Write an immutable SWE-bench validity sidecar without rerunning tests")
+    q.add_argument("run_id")
+    q.add_argument("--output", type=Path, required=True)
+    q.add_argument("--scope", choices=["all", "positive", "negative", "infra"], default="all")
+    q.add_argument("--rollout-id", action="append", default=[])
+    q.add_argument("--labels", type=Path, help="Explicit evidence-bound attribution findings")
     q = harness_sub.add_parser("metadata-prefetch", help="Cache exact official requirements before harness execution")
     q.add_argument("--instances", type=Path, required=True)
     q.add_argument("--output", type=Path, required=True)
@@ -841,6 +878,16 @@ def main(argv=None):
             raise SystemExit(3)
         return
     explicit_run = a.analysis_run_id or getattr(a, "run_id", None)
+    if a.command == "harness" and a.harness_command == "audit":
+        if a.analysis_run_id or a.set:
+            parser.error("harness audit reads frozen evidence without configuration overrides")
+        from benchmark_evaluation.swebench_audit import audit_run
+        result = audit_run(Path(a.config).resolve().parent, a.run_id, a.output,
+                           rollout_ids=a.rollout_id, scope=a.scope, labels=a.labels)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if not result["complete"]:
+            raise SystemExit(3)
+        return
     if a.command == "harness" and a.harness_command == "metadata-prefetch":
         if a.analysis_run_id or a.set:
             parser.error("metadata-prefetch reads root config.yaml without run overrides")
@@ -902,7 +949,7 @@ def main(argv=None):
                     or (a.command in run_commands and not (
                         a.command == "artifact" and getattr(a, "scope", "run") != "run"))
                     or (a.command == "webarena" and a.webarena_command == "preflight")
-                    or (a.command == "harbor" and a.harbor_command in {"preflight", "controls"})
+                    or (a.command == "harbor" and a.harbor_command in {"preflight", "controls", "controls-audit"})
                     or a.analysis_run_id is not None
                     or (a.command in {"enrich", "token-trace", "trajectory-token-audit", "hidden", "dataset-index", "token-join"} and explicit_run is not None))
     if use_snapshot:
@@ -919,7 +966,13 @@ def main(argv=None):
         if a.set or a.analysis_run_id:
             parser.error("harbor registry commands use the root configuration")
         from runtime.backends.harbor.dependencies import prepare_runtime, probe_schemas, verify_runtime
-        if a.harbor_command == "runtime-prepare":
+        if a.harbor_command == "resource-cache":
+            from runtime.backends.harbor.resource_cache import dispatch
+            result = dispatch(cfg["project_root"], a, cfg)
+        elif a.harbor_command == "reference-publish":
+            from runtime.backends.harbor.reference_solutions import publish_reference
+            result = publish_reference(cfg["project_root"], a.run_id, a.task_id, a.reference_id, a.source, a.reason)
+        elif a.harbor_command == "runtime-prepare":
             result = prepare_runtime(cfg, a.publication_id, a.source, a.uv, a.python)
         elif a.harbor_command == "runtime-verify":
             result = verify_runtime(a.publication)
@@ -937,9 +990,12 @@ def main(argv=None):
         elif a.harbor_command == "preflight":
             from runtime.backends.harbor.operations import preflight
             result = preflight(cfg["project_root"], a.run_id)
+        elif a.harbor_command == "controls-audit":
+            from runtime.backends.harbor.operations import audit_controls
+            result = audit_controls(cfg["project_root"], a.run_id, a.control_id, a.audit_id)
         else:
             from runtime.backends.harbor.operations import controls
-            result = controls(cfg["project_root"], a.run_id, a.control_id, a.agent, a.task_id)
+            result = controls(cfg["project_root"], a.run_id, a.control_id, a.agent, a.task_id, reference_ref=a.reference_ref)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         if a.harbor_command == "preflight" and not result["passed"]:
             raise SystemExit(2)
@@ -1268,6 +1324,20 @@ def main(argv=None):
     if a.command == "swebench":
         if a.set or a.analysis_run_id:
             parser.error("swebench profile/preflight commands use the root or frozen configuration")
+        if a.swebench_command in {"catalog-sync", "catalog-list"}:
+            from catalog.swebench_sync import sync, list_tasks
+            if a.swebench_command == "catalog-sync":
+                result = sync(cfg, source_path=a.source, image_plans=a.image_plan, output=a.output, apply=a.apply)
+            else:
+                result = list_tasks(cfg, group=a.group, output=a.output)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return
+        if a.swebench_command == "images-pull":
+            from runtime.images.swebench_pull import pull
+            result = pull(cfg, a.store_id, plan_path=a.plan, proxy=a.proxy,
+                          workers=a.workers, attempts=a.attempts, check_only=a.check_only)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return
         if a.swebench_command == "openhands-profile":
             from core.io import identifier
             from runtime.agents.swebench_openhands import SWEOpenHandsProfile, validate_profile

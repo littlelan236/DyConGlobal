@@ -53,7 +53,7 @@ class _LayerCache:
         return value
 
 
-def validate_model(model):
+def validate_model(model, expected_backend=None):
     import transformers
     from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5TextModel
     text = text_backbone(model)
@@ -69,6 +69,12 @@ def validate_model(model):
             raise ValueError("Unsupported Qwen boundary layer")
     if getattr(text.config, 'use_kernels', False):
         raise ValueError("boundary_grad optional GDN/conv kernels have not been validated")
+    from RL.gdn_backend import active_binding
+    binding = active_binding()
+    if binding is None:
+        raise ValueError("boundary_grad requires an installed GDN backend")
+    if expected_backend is not None and binding.execution_contract() != expected_backend:
+        raise ValueError("Model boundary GDN backend differs from the execution contract")
     return text
 
 

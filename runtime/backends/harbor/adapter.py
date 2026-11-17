@@ -13,9 +13,12 @@ from core.deadline import Deadline
 from core.io import hash_json, now, read_json, sha256, write_json
 from runtime.backends.base import BackendAdapter
 from runtime.backends.contracts import PreflightFacts
+from runtime.backends.harbor.task_dependencies import apt_mirror_warmup_required
 
 
 def worker_request(cfg, run_id, factory, task, binding, output, operation="execute", channel_dir=None):
+    from runtime.backends.harbor.policy import execution_policy, phase_budgets
+    policy = execution_policy(cfg)
     profile = cfg["execution_context"]["profile"]
     requested_cpu = task["instance"]["metadata"]["environment"].get("cpus", 1)
     if not factory.cpu_supported and cfg["harbor"]["cpu_quota"] == "strict":
@@ -23,10 +26,43 @@ def worker_request(cfg, run_id, factory, task, binding, output, operation="execu
     cpu_mode = "limit" if factory.cpu_supported else "ignore"
     owner = {"run": run_id, "task": task["instance_id"], "sample": binding["sample_key"],
              "attempt": binding["attempt_id"]}
-    env = {"images": factory.images, "owner_id": factory.owner_id, "benchmark": cfg["benchmark"]["backend"],
-           "ownership": owner, "run_id": run_id,
+    task_python_index = cfg.get("harbor", {}).get("task_python_index")
+    task_apt_mirror = cfg.get("harbor", {}).get("task_apt_mirror")
+    apt_warmup = apt_mirror_warmup_required(task) if task_apt_mirror else False
+    task_wheelhouse = None
+    task_wheelhouse_manifest_sha256 = None
+    configured_wheelhouse = cfg.get("environment", {}).get("wheelhouse")
+    if task_python_index and configured_wheelhouse:
+        task_wheelhouse_path = Path(configured_wheelhouse)
+        if not task_wheelhouse_path.is_absolute():
+            task_wheelhouse_path = Path(cfg["project_root"]) / task_wheelhouse_path
+        task_wheelhouse_path = task_wheelhouse_path.resolve()
+        manifest_path = task_wheelhouse_path / "manifest.json"
+        if not manifest_path.is_file():
+            raise ValueError("Configured Harbor task wheelhouse has no manifest.json")
+        manifest = read_json(manifest_path)
+        expected = manifest.get("manifest_sha256")
+        if not isinstance(expected, str) or hash_json({k: v for k, v in manifest.items()
+                                                       if k != "manifest_sha256"}) != expected:
+            raise ValueError("Configured Harbor task wheelhouse manifest is invalid")
+        task_wheelhouse = str(task_wheelhouse_path)
+        task_wheelhouse_manifest_sha256 = sha256(manifest_path)
+    resource_cache = None
+    cache_path = cfg.get("harbor", {}).get("task_resource_cache")
+    if cache_path:
+        from runtime.backends.harbor.resource_cache import validate_descriptor
+        if sha256(cache_path) != cfg["harbor"].get("task_resource_cache_sha256"):
+            raise ValueError("Resource cache descriptor changed after run creation")
+        resource_cache = validate_descriptor(cache_path)
+    preparation = cfg.get("harbor", {}).get("task_preparation") or {}
+    task_preparation = {**preparation.get("*", {}), **preparation.get(task["instance_id"], {})}
+    env = {"task_preparation": task_preparation, "task_resource_cache": resource_cache, "images": factory.images, "owner_id": factory.owner_id, "benchmark": cfg["benchmark"]["backend"],
+           "ownership": owner, "run_id": run_id, "terminal_policy": policy,
            "sample_key": binding["sample_key"], "attempt_id": binding["attempt_id"],
            "output": str(output), "dependency_snapshot": profile["dependency_snapshot"],
+           "task_python_index": task_python_index, "task_wheelhouse": task_wheelhouse,
+           "task_wheelhouse_manifest_sha256": task_wheelhouse_manifest_sha256,
+           "task_apt_mirror": task_apt_mirror, "task_apt_mirror_warmup": apt_warmup,
            "channel_dir": str(channel_dir) if channel_dir else None, "cpu_enforcement_policy": cpu_mode,
            "resources": {"requested_cpus": requested_cpu, "applied_cpus": requested_cpu if factory.cpu_supported else None,
                          "memory_enforcement": "limit", "cpu_deviation": cpu_mode == "ignore"}}
@@ -35,7 +71,9 @@ def worker_request(cfg, run_id, factory, task, binding, output, operation="execu
             "output": str(output), "environment": env,
             "disable_verifier": operation == "probe" or (operation == "execute" and task["benchmark"] == "swebench_pro_v2"),
             "driver": {"cfg": cfg, "ownership": owner, "output": str(output), "agent_environment": {},
-                       "agent_seconds": max(1, agent_seconds - 60), "probe": operation == "probe",
+                       "agent_seconds": agent_seconds if policy else max(1, agent_seconds - 60),
+                       "phase_budgets": phase_budgets(cfg, task["instance"]["metadata"]),
+                       "probe": operation == "probe",
                        "probe_host": socket.gethostbyname(socket.gethostname())}}
 
 
@@ -50,6 +88,10 @@ def run_worker_bridge(context, task, binding, output, runtime, operation="execut
     seconds = metadata.get("agent", {}).get("timeout_sec", 600)
     seconds += metadata.get("environment", {}).get("build_timeout_sec", 600)
     seconds += metadata.get("verifier", {}).get("timeout_sec", 600) + 120
+    from runtime.backends.harbor.policy import phase_budgets
+    budgets = phase_budgets(cfg, metadata)
+    if budgets:
+        seconds = sum(budgets.values())
     deadline = Deadline(min(seconds, context.factory.deadline.remaining(seconds)))
     # Unix socket addresses have a 108-byte kernel limit; run/task paths are
     # deliberately long. Keep the ephemeral endpoint in the project's temp/.
@@ -96,6 +138,11 @@ class HarborAdapter(BackendAdapter):
                 if task["benchmark"] == "swebench_pro_v2":
                     if not network.is_file() or not read_json(network).get("verified"):
                         raise ValueError("Harbor offline network policy probe failed; see " + str(network))
+                from runtime.backends.harbor.policy import execution_policy
+                if execution_policy(context.cfg):
+                    channel = output / "model-channel-probe.json"
+                    if not channel.is_file() or not read_json(channel).get("verified"):
+                        raise ValueError("Terminal model-channel probe failed; see " + str(channel))
                 receipts.append({"task_key": key, "path": str(output / "worker-response.json"),
                                  "sha256": sha256(output / "worker-response.json"), "model_requests": 0})
             except Exception as exc:
@@ -171,7 +218,8 @@ class HarborAdapter(BackendAdapter):
                 "attempt_context": attempt.context, "run_local": True, **spec})
             outcome = None
             if task["benchmark"] == "terminalbench_2_1":
-                outcome = trial_outcome(result, task=task, attempt_id=binding["attempt_id"], subject=spec["subject_sha256"])
+                outcome = trial_outcome(result, task=task, attempt_id=binding["attempt_id"],
+                    subject=spec["subject_sha256"], evidence_dir=output, operation="execute")
                 report = output / "evaluation-report.json"
                 write_json(report, outcome)
                 from application.execution.evidence import RunEvidence

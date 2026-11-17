@@ -417,3 +417,11 @@ events, heartbeats and indexes stay outside sealed artifact directories. See
 [RL observability](../RL/OBSERVABILITY.md) for forwarding, pagination, snapshot
 fields, inherited resume metrics and evidence limits.
 See [RL observability validation](../RL/OBSERVABILITY_VALIDATION.md) for test and deployment evidence.
+
+### Terminal-Bench verifier health
+
+`dycon harbor controls-audit RUN_ID --control-id CONTROL_ID --audit-id AUDIT_ID`
+reclassifies saved Terminal-Bench oracle/nop evidence through the same verifier health
+policy used by live rollout. It writes a new immutable audit receipt under the run;
+original control results and frozen configuration remain intact. See
+[Terminal-Bench](TERMINALBENCH-CN.md) for error, valid negative, and Review semantics.

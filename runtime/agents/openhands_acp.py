@@ -28,7 +28,7 @@ class ACPEvents:
         return RequestPermissionResponse(outcome=AllowedOutcome(outcome="selected", option_id=option.option_id))
 
 
-async def run_session(command, args, env, cwd, instruction, *, seconds, probe=False, record=None):
+async def run_session(command, args, env, cwd, instruction, *, seconds, probe=False, record=None, session_cwd=None):
     import json
     client = ACPEvents()
     result = record if record is not None else {}
@@ -85,12 +85,13 @@ async def run_session(command, args, env, cwd, instruction, *, seconds, probe=Fa
         initialize = await request("initialize", {"protocolVersion": 1,
             "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False},
             "clientInfo": {"name": "dycon-harbor", "version": "1"}})
-        session = await request("session/new", {"cwd": cwd, "mcpServers": []})
+        session = await request("session/new", {"cwd": session_cwd or cwd, "mcpServers": []})
         result.update({"initialize": initialize, "session": session, "events": client.events,
                        "model_requests": 0 if probe else None})
         if not probe:
-            result["response"] = await request("session/prompt", {"sessionId": session["sessionId"],
-                "prompt": [{"type": "text", "text": instruction}]}, timeout=seconds)
+            async with asyncio.timeout(seconds if session_cwd is not None else None):
+                result["response"] = await request("session/prompt", {"sessionId": session["sessionId"],
+                    "prompt": [{"type": "text", "text": instruction}]}, timeout=seconds)
         try:
             await request("session/cancel", {"sessionId": session.get("sessionId")}, timeout=3)
         except Exception:

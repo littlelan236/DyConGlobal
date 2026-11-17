@@ -15,6 +15,22 @@ from core.deadline import Deadline
 from core.io import hash_json, read_json, write_json
 
 
+def cpu_quota_supported(info, docker_host):
+    if info.get("CpuCfsQuota") is False or info.get("CpuCfsPeriod") is False:
+        return False
+    if any("No cpu cfs quota support" in str(w) for w in (info.get("Warnings") or [])):
+        return False
+    # Rootless Docker can advertise host CPU support even when systemd has
+    # delegated only memory/pids to this user. Check the local delegation too.
+    if (str(docker_host).startswith("unix://") and str(info.get("CgroupVersion")) == "2"
+            and "name=rootless" in (info.get("SecurityOptions") or [])):
+        uid = os.getuid()
+        controllers = Path(f"/sys/fs/cgroup/user.slice/user-{uid}.slice/user@{uid}.service/cgroup.controllers")
+        if controllers.is_file() and "cpu" not in controllers.read_text().split():
+            return False
+    return True
+
+
 class HarborFactory:
     def __init__(self, cfg, run_id):
         import docker
@@ -28,7 +44,7 @@ class HarborFactory:
         self.stack, self.images = contextlib.ExitStack(), {}
         self.processes, self.lock = {}, threading.Lock()
         info = self.client.info()
-        self.cpu_supported = not any("No cpu cfs quota support" in str(w) for w in info.get("Warnings", []))
+        self.cpu_supported = cpu_quota_supported(info, cfg["environment"]["docker_host"])
         self.started = False
 
     def lock_images(self, tasks):

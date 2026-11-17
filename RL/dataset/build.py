@@ -146,7 +146,9 @@ def build_dataset(cfg, config_file, *, dry_run=False, recover=False):
                     sessions[sid] = load_token_session(source, scfg, sid, deps, audit=audit)
                 session, missing = sessions[sid]
                 base = {k: source.get(k) for k in ("source_run_id", "rollout_id", "trajectory_sha256", "task_key", "benchmark", "revision", "instance_id", "attempt_id", "repetition_id")}
-                base.update(session_id=sid, decision_id=did, message_index=mi, agent_step=embedded.get("step_id"), parent_prefix_sha256=embedded.get("parent_prefix_sha256"))
+                base.update(session_id=sid, decision_id=did, message_index=mi, agent_step=embedded.get("step_id"), parent_prefix_sha256=embedded.get("parent_prefix_sha256"),
+                            terminal_reward=source.get("terminal_reward"),
+                            terminal_scoring_exclusion=source.get("terminal_scoring_exclusion"))
                 if session:
                     decision_path = owned_path(session["base"], "parallel/decisions/" + did + ".json")
                     if not decision_path.is_file():
@@ -235,7 +237,8 @@ def build_dataset(cfg, config_file, *, dry_run=False, recover=False):
                     rows.append(row)
                 base["prompt_sha256"] = prompt_sha
                 gid = group_id(base)
-                ready = n >= dc.quality.min_branches and all(r["token_usable"] for r in rows)
+                scoring_exclusion = source.get("terminal_scoring_exclusion")
+                ready = n >= dc.quality.min_branches and all(r["token_usable"] for r in rows) and not scoring_exclusion
                 origin = tuple(r["native_request_id"] for r in rows)
                 origin_signature = (sid, did, prompt_sha, hash_json([
                     {k:r.get(k) for k in ("completion_sha256","tokenizer_fingerprint","native_finish","action_hash")} for r in rows]))
@@ -273,7 +276,10 @@ def build_dataset(cfg, config_file, *, dry_run=False, recover=False):
                 json_line(streams["groups"], group)
                 counts["training_groups"] += int(ready)
                 if not ready:
-                    json_line(streams["exclusions"], {"group_id": gid, "reason": "incomplete_native_group" if n >= 2 else "single_branch", "severity": "group"})
+                    group_reason = scoring_exclusion or ("incomplete_native_group" if n >= 2 else "single_branch")
+                    if scoring_exclusion:
+                        excluded[scoring_exclusion] += 1
+                    json_line(streams["exclusions"], {"group_id": gid, "reason": group_reason, "severity": "group"})
                 for stream in streams.values():
                     stream.flush()
                 write_json(stage / "progress.json", {"state": "building", "rollout_id": source["rollout_id"],

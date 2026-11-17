@@ -95,6 +95,100 @@ def test_worker_request_preserves_task_timeout_and_explicit_cpu_deviation(cfg, t
     assert not request["disable_verifier"]
 
 
+def test_terminal_task_python_sources_are_bound_to_worker_request(cfg, tmp_path):
+    wheelhouse = tmp_path / "wheels"
+    wheelhouse.mkdir()
+    manifest = {"schema_version": 1, "publication_id": "test-wheels"}
+    manifest["manifest_sha256"] = hash_json(manifest)
+    write_json(wheelhouse / "manifest.json", manifest)
+    cfg.update(execution_context={"profile": {"dependency_snapshot": "/offline"}},
+        harbor={"cpu_quota": "strict", "task_python_index": "https://mirrors.aliyun.com/pypi/simple/",
+                "task_apt_mirror": "https://mirrors.aliyun.com/ubuntu/"},
+        environment={**cfg["environment"], "wheelhouse": str(wheelhouse)})
+    factory = SimpleNamespace(cpu_supported=True, owner_id="owner", images={})
+    binding = {"sample_key": "sample", "attempt_id": "physical"}
+    request = worker_request(cfg, "run", factory, harbor_task(), binding, tmp_path)
+    environment = request["environment"]
+    assert environment["task_python_index"] == "https://mirrors.aliyun.com/pypi/simple/"
+    assert environment["task_apt_mirror"] == "https://mirrors.aliyun.com/ubuntu/"
+    assert environment["task_wheelhouse"] == str(wheelhouse)
+    assert environment["task_wheelhouse_manifest_sha256"] == sha256(wheelhouse / "manifest.json")
+
+
+def test_task_dependency_overlay_uses_mirror_and_read_only_wheels(tmp_path):
+    from runtime.backends.harbor.task_dependencies import task_dependency_overlay
+
+    wheelhouse = tmp_path / "wheels"
+    wheelhouse.mkdir()
+    manifest = wheelhouse / "manifest.json"
+    manifest.write_text("{}")
+    dycon = {"task_python_index": "https://mirrors.aliyun.com/pypi/simple/",
+             "task_wheelhouse": str(wheelhouse),
+             "task_wheelhouse_manifest_sha256": sha256(manifest)}
+    mounts, environment = task_dependency_overlay(dycon, "public")
+    assert mounts == [{"type": "bind", "source": str(wheelhouse.resolve()),
+                       "target": "/opt/dycon-task-wheels", "read_only": True}]
+    assert environment == {
+        "PIP_FIND_LINKS": "/opt/dycon-task-wheels",
+        "UV_FIND_LINKS": "/opt/dycon-task-wheels",
+        "PIP_INDEX_URL": "https://mirrors.aliyun.com/pypi/simple/",
+        "UV_INDEX_URL": "https://mirrors.aliyun.com/pypi/simple/",
+        "UV_DEFAULT_INDEX": "https://mirrors.aliyun.com/pypi/simple/",
+    }
+    _, offline_environment = task_dependency_overlay(dycon, "none")
+    assert "UV_DEFAULT_INDEX" not in offline_environment
+    assert offline_environment["UV_FIND_LINKS"] == "/opt/dycon-task-wheels"
+
+
+def test_task_dependency_overlay_rejects_changed_wheelhouse(tmp_path):
+    from runtime.backends.harbor.task_dependencies import task_dependency_overlay
+
+    wheelhouse = tmp_path / "wheels"
+    wheelhouse.mkdir()
+    (wheelhouse / "manifest.json").write_text("{}")
+    with pytest.raises(ValueError, match="identity changed"):
+        task_dependency_overlay({"task_wheelhouse": str(wheelhouse),
+                                 "task_wheelhouse_manifest_sha256": "wrong"}, "public")
+
+
+def test_apt_mirror_command_preserves_update_policy_and_only_warms_when_needed():
+    from runtime.backends.harbor.task_dependencies import apt_mirror_setup_command
+
+    mirror = "https://mirrors.aliyun.com/ubuntu/"
+    rewritten = apt_mirror_setup_command(mirror, warmup=False)
+    assert "archive|security" in rewritten
+    assert "Signed-By" not in rewritten
+    assert "apt-get update" not in rewritten
+    warmed = apt_mirror_setup_command(mirror, warmup=True)
+    assert "apt-get update -o Acquire::Retries=2" in warmed
+
+
+def test_apt_mirror_warmup_detects_install_before_update(tmp_path):
+    from runtime.backends.harbor.task_dependencies import apt_mirror_warmup_required
+
+    task_path = tmp_path / "task"
+    script = task_path / "solution/solve.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("apt-get update\napt-get install -y make\n")
+    assert not apt_mirror_warmup_required({"instance": {"task_path": str(task_path)}})
+    script.write_text("apt-get install -y make\napt-get update\n")
+    assert apt_mirror_warmup_required({"instance": {"task_path": str(task_path)}})
+
+
+def test_task_python_index_requires_https_without_credentials():
+    from core.config import Harbor
+
+    with pytest.raises(ValueError, match="HTTPS URL"):
+        Harbor(runtime_ref="runtime.json", image_store="images-v1",
+               task_python_index="http://mirrors.aliyun.com/pypi/simple/")
+    with pytest.raises(ValueError, match="HTTPS URL"):
+        Harbor(runtime_ref="runtime.json", image_store="images-v1",
+               task_python_index="https://user:secret@mirror.example/simple/")
+    with pytest.raises(ValueError, match="HTTPS URL"):
+        Harbor(runtime_ref="runtime.json", image_store="images-v1",
+               task_apt_mirror="http://mirrors.aliyun.com/ubuntu/")
+
+
 def live_subject(root, *, wrong_sample=False):
     task = harbor_task()
     binding = {"run_id": "terminal", "task_key": hash_json({k: task[k] for k in ("benchmark", "revision", "instance_id")}),
@@ -149,3 +243,32 @@ def test_unix_model_channel_reaches_only_authenticated_bridge_without_generation
                     assert expected in client.recv(4096).split(b"\r\n")[0]
             assert bridge.records == []
         assert not path.exists()
+
+
+@pytest.mark.parametrize("warnings,expected", [(None, True), ([], True),
+    (["No cpu cfs quota support"], False)])
+def test_factory_accepts_null_docker_warnings(cfg, monkeypatch, warnings, expected):
+    import docker
+    import runtime.images.nas
+    client = SimpleNamespace(info=lambda: {"Warnings": warnings})
+    monkeypatch.setattr(docker, "DockerClient", lambda **kw: client)
+    monkeypatch.setattr(runtime.images.nas, "ImageLeaseManager", lambda *args: None)
+    factory = HarborFactory(cfg, "warnings-test")
+    assert factory.cpu_supported is expected
+
+
+@pytest.mark.parametrize("controllers,expected", [("memory pids", False), ("cpu memory pids", True)])
+def test_cpu_quota_checks_rootless_user_delegation(monkeypatch, controllers, expected):
+    from pathlib import Path
+    from runtime.backends.harbor.factory import cpu_quota_supported
+    monkeypatch.setattr(Path, "is_file", lambda p: True)
+    monkeypatch.setattr(Path, "read_text", lambda p: controllers)
+    info = {"Warnings": None, "CpuCfsQuota": True, "CpuCfsPeriod": True,
+            "CgroupVersion": "2", "SecurityOptions": ["name=rootless"]}
+    assert cpu_quota_supported(info, "unix:///run/user/1023/docker.sock") is expected
+    assert cpu_quota_supported(info, "tcp://remote:2375") is True
+
+
+def test_cpu_quota_respects_explicit_daemon_capability():
+    from runtime.backends.harbor.factory import cpu_quota_supported
+    assert not cpu_quota_supported({"CpuCfsQuota": False}, "unix:///socket")

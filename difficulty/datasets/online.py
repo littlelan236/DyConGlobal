@@ -42,7 +42,9 @@ def build_published_index(cfg, run_id, index_id, rollout_ids=(), rollout_list=No
             raise ValueError("Published event does not bind an eligible canonical trajectory")
         action = requests[event['request_id']].get('is_action_response', True)
         exact = event.get('alignment_status') == 'exact'
-        eligible = rollout["resolved"] is True and not event["censored"] and action and exact
+        from difficulty.datasets.eligibility import eligible_evaluation
+        eligible = (eligible_evaluation(rollout, catalog, event["rollout_id"], "resolved_only")
+                    and not event["censored"] and action and exact)
         samples.append(
             {
                 **event,

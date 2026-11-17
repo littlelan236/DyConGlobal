@@ -74,6 +74,12 @@ class RunEvidence:
                     raise ValueError("Evaluation subject mismatch")
                 row.update(evaluation_status=result["status"], resolved=result["resolved"],
                            selected_evaluation_id=eval_id)
+                from benchmark_evaluation.swebench_settlement import validate as validate_scoring
+                validate_scoring(result)
+                for field in ("scoring_policy", "scoring_eligible", "reward", "effective_resolved", "verifier_audit"):
+                    row.pop(field, None)
+                    if field in result:
+                        row[field] = copy.deepcopy(result[field])
             data["evaluations"][eval_id] = {
                 "report_path": artifact_reference(self.root, report),
                 "report_sha256": sha256(report), "outcomes": outcomes, "provenance": provenance,
@@ -96,7 +102,7 @@ class RunEvidence:
             for field in artifact_kinds(row):
                 owned_path(self.root, row[field + "_path"])
             status, resolved = row["evaluation_status"], row["resolved"]
-            if status not in ("not_run", "running", "completed", "completed_unknown", "infra_error", "ConnectionError"):
+            if status not in ("not_run", "running", "completed", "completed_unknown", "infra_error", "ConnectionError", "VerifierError", "Review"):
                 raise ValueError("Invalid evaluation status")
             if status == "completed" and type(resolved) is not bool:
                 raise ValueError("Completed evaluation requires a boolean resolved outcome")
@@ -113,9 +119,15 @@ class RunEvidence:
                     raise ValueError("Evaluation must bind the exact rollout subject")
                 if outcome["status"] != status or outcome["resolved"] != resolved:
                     raise ValueError("Rollout outcome disagrees with selected evaluation")
+                if outcome.get("scoring_policy"):
+                    for field in ("scoring_policy", "scoring_eligible", "reward", "effective_resolved", "verifier_audit"):
+                        if row.get(field) != outcome.get(field):
+                            raise ValueError("Rollout scoring projection disagrees with selected evaluation")
         for evaluation in data["evaluations"].values():
             owned_path(self.root, evaluation["report_path"])
             for rid, outcome in evaluation["outcomes"].items():
+                from benchmark_evaluation.swebench_settlement import validate as validate_scoring
+                validate_scoring(outcome)
                 if rid not in data["rollouts"] or outcome.get(subject_digest(data["rollouts"][rid])[0]) != subject_digest(data["rollouts"][rid])[1]:
                     raise ValueError("Evaluation outcome binds an unknown rollout or different subject")
 
