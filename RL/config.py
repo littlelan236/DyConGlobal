@@ -232,6 +232,7 @@ class Grpo(Strict):
     boundary_tie_sigma: NonnegativeFloat = 0.05
     clip_epsilon: Literal[0.1] = 0.1
     kl_beta: NonnegativeFloat = 0.02
+    k3_cap: Annotated[float, Field(gt=0, le=3.4028234663852886e38, allow_inf_nan=False)] | None = None
     reference: Literal["initial_policy"] = "initial_policy"
     probability_mode: Literal["raw_t1"] = "raw_t1"
     reference_cache: ReferenceCache = Field(default_factory=ModelForwardCache)
@@ -424,6 +425,8 @@ def schedule_contract(config):
         contract["grpo"].pop("shuffle_algorithm", None)
         if not config.grpo.ratio_guard.enabled:
             contract["grpo"].pop("ratio_guard")
+        if config.grpo.k3_cap is None:
+            contract["grpo"].pop("k3_cap")
         if config.grpo.prefix_reuse.mode == "disabled":
             contract["grpo"].pop("prefix_reuse")
         if config.grpo.advantage_policy == "historical_topk_zero_sum_v1":

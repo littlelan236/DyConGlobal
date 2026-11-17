@@ -44,11 +44,15 @@ def _masked_branch_mean(values, mask):
 
 
 def grpo_objective(logp_theta, logp_reference, advantages, loss_mask, *, clip_epsilon=0.1,
-                   kl_beta=0.02, group_slices=None, ratio_guard_enabled=False, ratio_guard_threshold=1e-3):
+                   kl_beta=0.02, group_slices=None, ratio_guard_enabled=False, ratio_guard_threshold=1e-3,
+                   k3_cap=None):
     """Compute one or more groups with branch-then-group mean reduction."""
     import math
     if not math.isfinite(ratio_guard_threshold) or not 0 < ratio_guard_threshold < 1:
         raise ValueError("ratio_guard_threshold must be finite and between 0 and 1")
+    if k3_cap is not None and (isinstance(k3_cap, bool) or not math.isfinite(k3_cap)
+                              or not 0 < k3_cap <= torch.finfo(torch.float32).max):
+        raise ValueError("k3_cap must be a finite positive float32 value or None")
     if logp_theta.shape != logp_reference.shape or logp_theta.ndim != 2:
         raise ValueError("logprob tensors must have equal [branch,token] shapes")
     mask = loss_mask.to(device=logp_theta.device, dtype=torch.bool)
@@ -75,7 +79,17 @@ def grpo_objective(logp_theta, logp_reference, advantages, loss_mask, *, clip_ep
     surrogate = torch.minimum(weighted, clipped)
     branch_policy = _masked_branch_mean(surrogate.masked_fill(rejected, 0), mask)
     delta = -objective_log_ratio
-    k3 = torch.expm1(delta) - delta
+    if k3_cap is None:
+        k3 = raw_k3 = torch.expm1(delta) - delta
+    else:
+        # Find saturation without attaching an overflowing inverse ratio to
+        # autograd. clamp(expm1(delta), ...) alone can produce 0 * inf in backward.
+        with torch.no_grad():
+            raw_k3 = torch.expm1(delta.detach()) - delta.detach()
+            saturated = (raw_k3 > k3_cap) & mask & ~rejected
+        safe_delta = delta.masked_fill(saturated, 0)
+        k3 = torch.where(saturated, torch.full_like(delta, k3_cap),
+                         torch.expm1(safe_delta) - safe_delta)
     branch_k3 = _masked_branch_mean(k3.masked_fill(rejected, 0), mask)
     if group_slices is None:
         group_slices = [slice(0, logp_theta.shape[0])]
@@ -101,6 +115,21 @@ def grpo_objective(logp_theta, logp_reference, advantages, loss_mask, *, clip_ep
     ratio = raw_ratio
     positive_tokens = mask & (adv[:, None] > 0)
     negative_tokens = mask & (adv[:, None] < 0)
+    cap_metrics = {}
+    if k3_cap is not None:
+        with torch.no_grad():
+            retained = mask & ~rejected
+            raw_branch = _masked_branch_mean(raw_k3.double().masked_fill(rejected, 0), mask)
+            raw_mean = torch.stack([raw_branch[indices].mean() for indices in group_indices]).mean()
+            cap_metrics = {
+                "k3_cap": float(k3_cap),
+                "k3_cap_clipped_tokens": int(saturated.sum()),
+                "k3_cap_eligible_tokens": int(retained.sum()),
+                "k3_cap_clipped_fraction": float(saturated.sum() / retained.sum()) if retained.any() else 0.,
+                "k3_raw_penalty_mean": float(raw_mean) if torch.isfinite(raw_mean) else None,
+                "k3_raw_nonfinite_tokens": int((~torch.isfinite(raw_k3) & retained).sum()),
+                "k3_capped_penalty_max": float(k3[mask].max()),
+            }
     return ObjectiveResult(loss, policy_loss, k3_penalty, {
         "ratio_guard_enabled": ratio_guard_enabled,
         "ratio_guard_threshold": ratio_guard_threshold,
@@ -123,6 +152,7 @@ def grpo_objective(logp_theta, logp_reference, advantages, loss_mask, *, clip_ep
         "negative_logprob_change": float((theta-ref)[mask & (adv[:, None] < 0)].mean().detach()) if (adv < 0).any() else None,
         "positive_branches": int((adv > 0).sum()), "negative_branches": int((adv < 0).sum()),
         "branch_count": int(logp_theta.shape[0]), "token_count": int(mask.sum()),
-        **token_statistics(k3, mask, rejected, group_indices),
+        **token_statistics(raw_k3, mask, rejected, group_indices),
+        **cap_metrics,
         **token_signals(raw_log_ratio, raw_ratio, adv, mask, rejected, clip_epsilon),
     }, len(group_slices), int(logp_theta.shape[0]), int(mask.sum()))
