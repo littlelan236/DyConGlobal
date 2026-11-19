@@ -1,6 +1,166 @@
-# Capture 操作与证据
+# 在线采集、发布与恢复
 
-## Capture spool 用量（只读）
+按配置采集、spool 落盘、正式发布和恢复的顺序操作。发布后可核验 coverage，随后按相应资格构建[离线分析](ANALYSIS-CN.md)或 [RL 数据](../RL/dataset/README.md)。
+
+## 详细参考
+
+- [配置与采集](#配置与采集) · [Rollout 生命周期](#rollout-生命周期)、[在线 raw T1 采集与 sidecar](#在线-raw-t1-采集与-sidecar)
+- [落盘与发布](#落盘与发布) · [Spool 用量和预算](#spool-用量和预算)、[非并行 think_close 正式发布](#非并行-think_close-正式发布)、[并行可视化发布](#并行可视化发布)、[层号映射、完整性与索引](#层号映射完整性与索引)
+- [诊断与恢复](#诊断与恢复) · [状态诊断与已采纳样本重跑](#状态诊断与已采纳样本重跑)、[Resume 期间的既有采集恢复](#resume-期间的既有采集恢复)、[离线 token 核验](#离线-token-核验)
+
+## 配置与采集
+
+### Rollout 生命周期
+
+在线 capture 在 rollout 的模型请求链中运行，并绑定冻结 run、sample、attempt、rollout 与 session 身份。Capture finalize 产生标签、coverage、索引和 publication receipt；大张量可以放在 `paths.nas_root` 指向的 NAS。run 目录保留 locator、hash 和 receipt，使下游流程可以验证远端数据。
+
+普通 rollout、capture rollout、steering rollout，以及 steering+capture rollout 均使用统一 `dycon rollout`/run 生命周期。通过受支持的根配置选择开关，并在创建 run 时冻结；不要为 capture 单独启动 worker 或 launcher。
+
+### 在线 raw T1 采集与 sidecar
+
+在线采集在正在生成 token 的同一次模型前向中，记录每个实际输出 token 的原始 T=1 概率。正式入口仍是 `dycon run` / `dycon rollout`，配置开关为 `capture.logprobs.enabled`，默认关闭。数据集构建将已发布 sidecar 绑定为中性的 `raw_t1_output_tokens` stream；训练用途由训练配置选择。
+
+本文说明当前实现、使用方式和验证边界。完整 rollout、capture writer、NAS 发布的三组吞吐 pilot 尚未验收，FP16 在线值与 BF16 训练值的真实模型误差也尚未量化。历史测试结果不能作为新 run 的覆盖率或性能证明。
+
+#### 概率语义与支持范围
+
+```text
+raw_t1[t] = log_softmax(pre_transform_logits[t].float())[output_token_id[t]]
+```
+
+`pre_transform_logits` 位于 grammar mask 和 sampler processor 之前。归一化使用完整词表，最终只导出每个 sampled output token 的一个 FP32 标量。现有生成 temperature、top-p/top-k、penalties、thinking budget 和 grammar 继续决定采样；例如生成 temperature=0.6 时，记录值仍然是 raw T=1。该概率不等于经过采样变换后的历史行为概率。
+
+当前接入 pinned vLLM 0.29.0 的 **V2 model runner**。请求启用后，runner 在 grammar mask 原地修改前复制该请求当前步的 logits；采样后用 Triton 分块 FP32 max/sum reduction 和 target gather 计算标量，随后释放单步缓存。不会再运行一次 prompt/completion 前向，也不生成全词表概率 artifact。内部复用 sampled-token logprob 输出槽，插件只传输对齐的目标值，不要求客户端设置 OpenAI `logprobs=true`。
+
+配置要求 `capture.enabled: true`、`capture.export.enabled: true`、managed serving、TP=1，并拒绝启用 steering。首版的已测试模型路径为 Qwen3.5-9B FP16、单 worker、FULL CUDA Graph；其他模型、PP/DP/CP 拓扑及 adapter serving 不属于该次验收。采集请求要求 native `n=1`；并行候选沿用现有多个独立 `n=1` 请求。speculative decoding 的多目标采样路径会在 observer 中报错，不属于支持范围。
+
+#### 配置与正式入口
+
+在创建新 run 前，将以下片段合并到根 `config.yaml` 的对应节点。它不是完整配置；保留已有 model、capture layers、anchors、GPU、端口及 export/NAS 参数。
+
+```yaml
+capture:
+  enabled: true
+  export:
+    enabled: true
+  logprobs:
+    enabled: true
+    probability_semantics: raw_t1_sampled_token_v1
+    temperature: 1.0
+    queue_size: 64
+    max_request_tokens: 131072
+    shard_max_bytes: 4194304
+    spool_max_bytes: 1073741824
+    failure_policy: record_and_continue
+```
+
+| `capture.logprobs` 字段 | 默认值 | 含义及校验 |
+|---|---|---|
+| `enabled` | `false` | 默认不为普通 capture 请求收集概率 |
+| `probability_semantics` | `raw_t1_sampled_token_v1` | 仅接受该语义；不提供 processed 模式 |
+| `temperature` | `1.0` | 固定评分温度，独立于生成 temperature |
+| `queue_size` | `64` | 独立 writer 的有界待写请求容量，范围 1–4096 |
+| `max_request_tokens` | `131072` | 单请求概率向量的 token 上限，不截断实际输出 |
+| `shard_max_bytes` | `4194304` | 单请求 FP32 sidecar 的最大字节数 |
+| `spool_max_bytes` | `1073741824` | 概率独立逻辑预算；物理 spool 仍受 `capture.export` 总预算治理 |
+| `failure_policy` | `record_and_continue` | 仅支持记录概率采集失败并保留原生输出 |
+
+启用时需满足 `max_request_tokens * 4 <= shard_max_bytes` 和 `2 * shard_max_bytes < spool_max_bytes`，为原子写入保留空间；预算还会计入临时写入开销。未知字段、processed 语义或非 1 评分温度会被配置校验拒绝。managed serving 启动时还会深度读取 checkpoint inventory，并核对冻结的 model fingerprint。
+
+```bash
+cd /home/wangtianyi/DyConGlobal
+.venvs/runner/bin/dycon config-check
+.venvs/runner/bin/dycon run create RUN_ID --operation rollout --task-id INSTANCE_ID
+.venvs/runner/bin/dycon run start RUN_ID --detach
+.venvs/runner/bin/dycon run wait RUN_ID
+.venvs/runner/bin/dycon capture status RUN_ID
+```
+
+`RUN_ID`、`INSTANCE_ID` 为占位符。创建时冻结开关和预算，resume 使用原快照；修改当前根配置不会给历史 run 补上概率。已有 run 的显式配置修订遵循[统一配置修订](MINIMUM-RUN-CN.md#配置修订和事务恢复)，不能手改 `resolved-config.json`。
+
+#### Request sidecar、发布与恢复
+
+```text
+vLLM V2 pre-grammar logits -> 原生采样 token + raw FP32 target scalar
+  -> plugin 按 native request 对齐输出，终态批量传输 float32 payload
+  -> capture 独立有界 writer -> requests/<request-hash>.raw_t1.f32
+  -> 原 request JSON 的 raw_t1_probability locator/hash/身份
+  -> 既有 spool/upload/session publication ACK
+  -> rl-dataset build -> dataset receipt 内的中性 raw stream
+```
+
+概率 bytes 采用 little-endian float32，持久化数值成本为每 token 4 bytes，另有 receipt/索引开销。插件终态控制请求使用 base64 编码的 float32 bytes，可传递 `-inf`，ledger 不保留概率 JSON 数组；概率不混入 hidden activation NPZ。最终写入和上传在 GPU 采样路径外完成。
+
+`raw_t1_probability` descriptor 记录 `status: sealed`、语义、固定温度、transform 前/target-only 标记、locator、dtype、count、byte size、SHA256、prompt/output token hashes、tokenizer、native request/run/session/decision/branch/step/API attempt 身份、source model/checkpoint inventory、serving dtype、runtime hash、实际 generation/grammar hashes 和 collector 版本。`sample_key` 等可选身份字段按来源实际可用性保存，可能为 null。
+
+`sealed` 只证明本地 sidecar 写入封存；NAS 可用性还依赖原 capture 的上传 ACK 和 session publication。spool 发布时将 request ledger 与关联的 sealed sidecar 纳入同一文件集合；恢复也检查 sidecar bytes。缺失或校验失败的文件不能作为完整概率发布。相同 request、相同值的重试幂等；冲突的值不能覆盖首份 ledger/sidecar。
+
+队列、token 上限、shard/quota、缺值或非法数值导致概率写入失败时，原生 token ledger 仍保留，descriptor 记录 `status: failed` 和受限错误摘要；该请求的概率保持不可用，不将缺值补零。概率失败本身不改变 branch 选择或 rollout 任务成功状态，普通 hidden capture 状态也不能替代 raw 覆盖率。NaN、+inf 和正的 logprob 被拒绝；`-inf` 保留并统计，训练 shared-anchor reader 要求所选值全部有限。
+
+`capture recover RUN_ID` 复用现有已封存 bytes、spool 和上传任务，不请求模型、不补算缺失向量。历史缺少 raw 的轨迹应使用正式[离线 raw replay](../RL/dataset/README.md#replay-semantics)；不能把 processed artifact 改标签当作 raw。
+
+#### 数据集与共享读取合同
+
+`rl-dataset build` 沿原 native request/branch 绑定在线 sidecar。概率本身的语义、长度、checksum、prompt/output hashes、request/branch、tokenizer、model/dtype 校验始终执行，即使数据集的一般 native source audit 配为 `audit.enabled: false`。
+
+| 层次 | 字段或文件 | 含义 |
+|---|---|---|
+| branch | `probability_streams.raw_t1_output_tokens` | 原 sidecar descriptor 和 source receipt proof |
+| branch | `raw_probability_available` | 此 branch 是否有可验证的在线 raw 值 |
+| group | `raw_probability_complete` | 此组所有分支是否有在线 raw 值；独立于 token `data_ready` |
+| dataset | `raw-t1-probability.json` | schema 2、中性语义、raw contract、scoring identity |
+| dataset | `raw-t1-probability-branches.jsonl` | 固定 group/branch/token/mask 绑定与 `values_ref` |
+| dataset | `shards/*` | 按 dataset `storage.max_shard_bytes` 重分块的 `<f4` 数值 |
+| dataset | `dataset.json.probability_streams.raw_t1_output_tokens` | `manifest`、`index` 与 `dataset_binding`，由 dataset receipt 覆盖 |
+
+没有任何可用在线值时，dataset 不声明该 stream。只有部分分支有值时可封存部分索引，原 group/token inventory 仍保留；训练显式选择该 stream 后，要求所有训练 eligible branches 完整覆盖，缺值报错，不静默改资格或回退模型前向。当前 builder 拒绝同一 stream 中混合不同 scoring identities。
+
+```bash
+.venvs/runner/bin/dycon rl-dataset build --dataset-config DATASET.yaml
+.venvs/runner/bin/dycon rl-dataset check DATASET_ID --dataset-root DATASET_ROOT --level full
+.venvs/runner/bin/dycon artifact verify DATASET_ID --scope rl-dataset --storage-root DATASET_ROOT
+```
+
+`check --level full` 还会沿在线 source proof 校验原 ledger/sidecar；训练中性 reader 读取的是 dataset receipt 内的 manifest/index/值副本。`RL.dataset.online_probabilities.OnlineProbabilityReader` 用于追溯来源，`RL.dataset.probability.ProbabilityStream` / `open_probability_stream` 是训练与离线 raw artifact 共用的中性读取合同，详见[概率 stream 合同](../RL/dataset/README.md#raw-概率流的身份与读取接口)。
+
+训练侧在自己的 YAML 中选择：
+
+```yaml
+grpo:
+  reference_cache:
+    source: dataset_probability
+    stream: raw_t1_output_tokens
+    dtype_compatibility: fp16_source_bf16_training
+```
+
+该片段合并到现有训练配置；完整参数和兼容性见 [GRPO 指南](../RL/README.md#离线-grpo-分组共享锚点与目标)。采集端记录实际无 adapter 的基座身份，训练端判定 fresh LoRA 或 warm-start 是否兼容。一个导入缓存可承担 ratio 分母和 K3 reference，current 仍实时计算；这些角色仅属于训练 attempt。允许 FP16→BF16 不表示初始 ratio 必须为 1，也不代替误差量化。
+
+#### 与缺失离线补评统一对齐
+
+部分在线值可以直接复用。`rl-dataset probability-plan --probability-config YAML`
+对已封存 dataset 冻结 target/missing 清单和来源 receipts；在现有 replay YAML
+绑定 `selection.coverage_plan` 后，只提交缺失 native branches。再通过
+`probability-build --probability-config YAML` 将在线和离线值封存为
+`ROOT/RL/probabilities/ID/` 的 schema-3 `rl-probability`，online-only 导出也走此入口。
+无 missing 时不启动 GPU worker；不是重新采集、改写历史 ledger 或重算已有在线值。
+
+原 branch `raw_probability_available` 和 group `raw_probability_complete` 继续描述
+dataset 构建时的在线状态；补齐后的总体 coverage 由新 artifact 表达。在线
+`raw_t1_sampled_token_v1` 经显式 raw contract adapter 转成统一消费语义
+`raw_t1_output_tokens_v1`，原始语义和 receipt bytes 保留。每条分支的 origin、
+来源 receipt/value hash 和 execution cohort 均可追溯；离线分支保留 replay estimate
+和 `historical_behavior_verified=false`。同一 scoring function、相同 collector
+compute dtype 才能合并；多个 runtime cohorts 需显式允许，不能以 FP32 存储格式
+推定其计算口径相同。
+
+训练可只绑定最终 `scope: rl-probability` 的 ID/root；本地验证和 checkpoint cache
+恢复不需要原 NAS 在线。完整 CLI、配置、缺值/冲突和迁移说明见
+[统一概率产物](../RL/dataset/README.md#coverage-plan缺失补评与可携带封存)；本次 CPU 合同验收见
+[对齐验收报告](../RL/dataset/README.md#验证范围)。
+
+## 落盘与发布
+
+### Spool 用量和预算
 
 ```bash
 # 全项目配额、当前本地文件占用和所在文件系统空间，JSON 输出
@@ -21,123 +181,7 @@
 
 查询会统计当前配置 spool 根和账本中仍有 capture reservation 的历史根；已无 reservation 且根配置也不再引用的旧目录不自动发现。允许跟随迁移后的 spool 根软链接，跳过其内部所有软链接（包括归档 run 的 NAS 链接），不读取 tensor 内容或 hash。`--ledger-only` 时 `local_usage` 为 null。扫描超时、并发删除或权限错误会令 `local_usage.complete=false` 并返回受限错误摘要，此时文件字节数是已扫描部分的下界；活跃写入期间账本和文件扫描也不是同一时刻的原子快照。查询不支持 `--set` 或全局 `--run-id`，run 使用上面的显式位置参数。
 
-## Parallel 可视化发布
-
-启用持久化 `think_close` capture 且 `parallel.branch_count > 1` 时，run 在
-producer、writer、serving 和 backend 停止后，按最终 accepted canonical
-selection 执行独立 pointwise 审计和自动 publication。运行结束摘要中的
-`purpose=visualization` 和 `eligible_for_training=false` 标识该制品只能用于
-可视化；不创建训练 index、dataset、split、checkpoint 或 predictor。原始
-session、decision、rollout 和历史 publication 均不回写。
-
-`canonical_coverage` 描述实际 winner 路径，`all_candidate_coverage` 描述所有
-候选。候选 inventory 没有完整 receipt 时 `expected_count_complete=false`，摘要
-保守显示 partial。canonical hidden、native truth、候选 hidden 和 stored score
-分别保存；native response 缺失只截断不可证明的前缀 token truth，已验证 hidden
-仍可预测。无 close、缺 hidden、缺 native receipt 与候选未封存分别记录。
-只有原 branch receipt 绑定的 stored score 才用于绘图；其余 decision 保留审计证据。
-
-```bash
-.venvs/runner/bin/dycon capture status RUN_ID
-.venvs/runner/bin/dycon capture finalize RUN_ID
-.venvs/analysis/bin/dycon difficulty-plot-parallel RUN_ID PLOT_ID --rollout-id ROLLOUT_ID --publication-id PUBLICATION_ID
-.venvs/analysis/bin/dycon difficulty-plot-trajectories RUN_ID PLOT_ID --rollout-id ROLLOUT_ID --publication-id PUBLICATION_ID --attempt-id EXISTING_FIT_ATTEMPT --target submission_remaining_reasoning_tokens_log1p
-```
-
-轨迹图复用已存在且模型、layer、target 匹配的 checkpoint；无兼容 checkpoint 时
-不能生成预测曲线，分支 stored-score 图仍可单独使用。轨迹图的 truth 是实际
-agent 终点 remainder，缺失处保持 null，不能解释为成功标签。可选 `--repair-id`
-会与 publication 所绑定的 repair 核对；不指定时由 receipt 自动定位。
-
-## 生命周期
-
-在线 capture 在 rollout 的模型请求链中运行，并绑定冻结 run、sample、attempt、rollout 与 session 身份。Capture finalize 产生标签、coverage、索引和 publication receipt；大张量可以放在 `paths.nas_root` 指向的 NAS。run 目录保留 locator、hash 和 receipt，使下游流程可以验证远端数据。
-
-普通 rollout、capture rollout、steering rollout，以及 steering+capture rollout 均使用统一 `dycon rollout`/run 生命周期。通过受支持的根配置选择开关，并在创建 run 时冻结；不要为 capture 单独启动 worker 或 launcher。
-
-## 在线 Raw T=1 Logprob 采集
-
-新 run 可通过 `capture.logprobs.enabled: true` 在同一次生成前向中旁路采集每个实际 output token 的 FP32 raw T=1 logprob；默认关闭。完整词表归一化发生在 grammar mask 和其他采样变换前，生成 policy 保持原样。要求持久化 capture、managed TP=1 和未启用 steering，沿现有 run/rollout lifecycle 执行。配置默认值、支持范围和测试证据见[在线 raw logprob 指南](ONLINE-RAW-LOGPROBS-CN.md)。
-
-概率保存在独立的 `requests/<request-hash>.raw_t1.f32` sidecar，request ledger 的 `raw_t1_probability` 只保留 locator、hash、长度、语义与来源身份。它使用独立 writer/quota，并复用物理 spool、上传 ACK、session publication 与恢复。`sealed` 是本地封存状态，不能替代 NAS publication；概率失败记录为 `failed`，不填零、不改变 rollout 任务成功状态。`-inf` 保留统计，训练锚点仍要求有限值。
-
-`rl-dataset build` 将在线值封存为中性 `raw_t1_output_tokens` stream；概率校验即使在 native `audit.enabled=false` 时仍执行。缺少/失败的 sidecar 保持 unavailable，group 的 `raw_probability_complete` 与 token 的 `data_ready` 分开。训练通过 `grpo.reference_cache.source: dataset_probability` 显式选择 stream，源 run/dataset 不写入训练角色。完整 managed rollout→NAS 性能 pilot 尚未验收。
-
-## 检查和恢复
-
-### 公开层号、原生层号与 receipt 路径合同
-
-公开最后一层 `N-1` 表示 final norm；vLLM `tact_states` 对应的原生 site
-为 `N`。历史在线 NPZ 保留原生键（例如 `layer_32`），pointwise 审计通过
-模型 `config.json` 的 decoder 层数及既有 `native_layers` 映射验证完整集合，
-不接受缺层、额外层或凭猜测改名。派生 point row 的 `layer_binding` 记录公开键到
-存储键的映射、模型指纹和 model config 哈希；模型配置加入 source proofs。
-`hidden.artifacts.read_arrays` 和 grouped reader 按此绑定向消费者提供公开键，
-原始 NPZ、checksum、storage_shapes 和 storage_dtypes 保持不变。
-
-正式自动发布的 selection 绑定 `repair_contract` 版本；修正审计规则后生成新的
-repair/publication/index ID，不复用历史失败审计。旧 receipt 和数据仍保留，
-同版本同 selection 重试保持幂等。历史 publication 不因代码更新自动改变资格。
-
-repair receipt 的 `files`、`session_receipts` 以 capture run 根为基准；本地
-staging 副本对应 `hidden/capture-repairs/ID/payload/`，`dependencies` 对应冻结
-NAS capture run 根。正式 artifact verifier 按 staging 命名空间和 run/repair
-身份选定这些根，不按 receipt 所在目录重复拼接，不以文件是否存在猜测根。
-普通 receipt 仍按其原有相对目录合同校验。完整性失败不会被跳过。
-
-升级后先对已停止 run 执行 `dycon capture finalize RUN_ID`，核对其 summary、
-publication receipt 和 `dycon artifact verify RUN_ID`。活动 run 须等待生产者
-及清理流程退出；无需为修复发布合同重跑模型。
-
-```bash
-.venvs/runner/bin/dycon capture status RUN_ID
-.venvs/runner/bin/dycon capture recover RUN_ID
-.venvs/runner/bin/dycon artifact verify RUN_ID
-.venvs/analysis/bin/dycon online-index RUN_ID INDEX_ID
-```
-
-先检查 capture 状态和已登记 publication。`capture recover` 恢复已有 spool/finalization/upload，不会重新调用模型。只在确认原进程结束且 recovery 状态可解释后继续 run；保留未 ACK spool，直到 publication receipt 确认数据已安全发布。
-
-capture 的控制预算或 receipt 并发若需修改已有 run，必须使用显式的 capture control revision 入口，填写 revision ID 和原因。它生成审计记录并保留旧快照；不能直接编辑 run snapshot 或重写根配置来伪装历史执行条件。
-
-## 标签与下游分析
-
-Capture publication 只证明指定 hidden 数据按其 receipt 发布；它不证明 rollout 成功或 patch 解决任务。在线索引和标签需绑定所选 trajectory、评测及 patch。未评测、unresolved 和基础设施失败的成功剩余量标签保持 null。
-
-Parallel capture 使用 decision、branch、request 和 sample 身份关联候选。选中 winner 的标签不能传播给未选分支；未生成 close、close 已生成但 hidden 缺失、发布失败应分别统计。重分类只能基于已 finalized 的 native token evidence，通过专用入口写独立修订证据。
-
-可复用的 sealed native session 可显式建立 trace index；选用的 session、run 和发布物由 receipt 冻结。不要把局部隐藏样本数相等当作 capture 完整性验收。
-
-## 证据边界
-
-- Exact native token IDs 与 tokenizer 重建结果必须分开标识。
-- Receipt 可验证登记文件与 hash；外盘上的 tensor 内容需按相应 verify 命令显式检查。
-- Artifact verify、capture coverage、环境 gold 和模型质量评测回答不同问题。
-- capture 恢复、capture 重分类和主动重跑是不同操作；只有最后一项会重新请求模型。
-
-完整子命令和 revision 参数见 `dycon capture --help`、`dycon capture-reclassify --help` 及 `dycon run revise-config --help`。例如同一次修订可传 `--set capture.control_seconds=120 --set capture.receipt_workers=16`，详见[配置修订](CONFIG-REVISION-CN.md)。
-停止的单个 run 可使用 `dycon capture archive RUN_ID --archive-id ID --destination DIRECTORY` 归档到指定目录；省略 `--destination` 时使用 run 快照中的 NAS 根目录。归档会校验文件并释放该 run 的 spool reservation，原路径保留指向归档的软链接；如需再次运行该 run，须先恢复本地 spool。
-
-
-## Capture 诊断摘要（只读）
-
-启用 capture 的物理 attempt 会在 runs/<RUN_ID>/rollout/tasks/<INSTANCE_ID>/repetitions/<REPETITION_ID>/attempts/<PHYSICAL_ATTEMPT_ID>/capture-diagnostics.json 保存派生摘要。session 的 finalization-diagnostics.json 记录阶段汇总；控制 API 失败时，sessions/<SESSION_ID>/control-errors/<CORRELATION_ID>.json 保存异常类型、调用栈帧、阶段耗时及该 session 的队列前后快照。run 级 capture-finalization-error.json 记录 coverage 数量和受限的缺失点诊断；完整 missing 坐标仍以 coverage.json 为准。
-
-stages 按 expected、selector_seen、capture_row、submit、persist、indexed 统计。missing 只包含受限的异常点及 request、position、stage、reason_code；truncated_count 表示超出上限的点数。正常 attempt 只保留聚合计数，队列快照只包含目标 session。HTTP 错误摘要最多 512 字节并过滤敏感字段。诊断不保存 prompt、模型输出、tensor、凭据或完整 token 数组。诊断文件可能包含 run/session/request 标识，应按普通运行证据控制访问。
-
-只读查看示例：
-
-    python -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps({k:d.get(k) for k in ("stages","by_anchor","missing_count","truncated_count","missing")}, ensure_ascii=False, indent=2))' runs/<RUN_ID>/rollout/tasks/<INSTANCE_ID>/repetitions/<REPETITION_ID>/attempts/<PHYSICAL_ATTEMPT_ID>/capture-diagnostics.json
-    .venvs/runner/bin/dycon capture status <RUN_ID>
-
-Session/物理 attempt 的 `indexed` 在 online finalizer 执行前为 null，`indexed_scope=pending_online_finalizer`；queued sample 不能当作 indexed。最终 accepted index 的阶段摘要位于 `enrichment/online/capture-diagnostics.json`。`selector_evidence_unavailable` 表示观察器失效或证据不足，不能解释为 selector 未命中。
-
-截断保留完整聚合计数，逐点证据按 execution attempt 共用 256 个异常身份预算；session、物理 attempt 和 run 级重复视图复用同一点的名额，控制错误也占用预算。预算账本位于 `execution/attempts/<EXECUTION_ATTEMPT_ID>/capture-diagnostic-budget.json`，仅在错误或收尾时加文件锁并原子写入，不进入逐 token 热路径。若诊断存储故障，业务结果保持原规则，诊断证据可标记 unavailable。
-
-Engine flush 的异常证据保存在 capture export/spool 根目录的 `control-errors/<CORRELATION_ID>.json`，响应头 `X-DyCon-Correlation-ID` 与客户端异常摘要关联；它只保存异常类型、受限堆栈位置与耗时，不保存异常 locals、源码行或请求正文。
-
-
-## Run 自动正式发布（非并行 think_close）
+### 非并行 think_close 正式发布
 
 Run 在所有 worker、serving、capture writer 与 backend 退出后，对正式最终选择的
 accepted 且 submitted canonical result 批量做 pointwise integrity audit，再正式发布。
@@ -202,8 +246,115 @@ stage 独立。摘要记录 repair/publication/index ID、selection hash、完�
 `capture.export.upload_max_elapsed_seconds` 限制。中断或预算耗尽后使用同一 finalize
 命令继续。该预算不是对不可中断内核/NFS I/O 的强制终止保证。
 
+### 并行可视化发布
 
-## accepted partial capture 的显式重跑
+启用持久化 `think_close` capture 且 `parallel.branch_count > 1` 时，run 在
+producer、writer、serving 和 backend 停止后，按最终 accepted canonical
+selection 执行独立 pointwise 审计和自动 publication。运行结束摘要中的
+`purpose=visualization` 和 `eligible_for_training=false` 标识该制品只能用于
+可视化；不创建训练 index、dataset、split、checkpoint 或 predictor。原始
+session、decision、rollout 和历史 publication 均不回写。
+
+`canonical_coverage` 描述实际 winner 路径，`all_candidate_coverage` 描述所有
+候选。候选 inventory 没有完整 receipt 时 `expected_count_complete=false`，摘要
+保守显示 partial。canonical hidden、native truth、候选 hidden 和 stored score
+分别保存；native response 缺失只截断不可证明的前缀 token truth，已验证 hidden
+仍可预测。无 close、缺 hidden、缺 native receipt 与候选未封存分别记录。
+只有原 branch receipt 绑定的 stored score 才用于绘图；其余 decision 保留审计证据。
+
+```bash
+.venvs/runner/bin/dycon capture status RUN_ID
+.venvs/runner/bin/dycon capture finalize RUN_ID
+.venvs/analysis/bin/dycon difficulty-plot-parallel RUN_ID PLOT_ID --rollout-id ROLLOUT_ID --publication-id PUBLICATION_ID
+.venvs/analysis/bin/dycon difficulty-plot-trajectories RUN_ID PLOT_ID --rollout-id ROLLOUT_ID --publication-id PUBLICATION_ID --attempt-id EXISTING_FIT_ATTEMPT --target submission_remaining_reasoning_tokens_log1p
+```
+
+轨迹图复用已存在且模型、layer、target 匹配的 checkpoint；无兼容 checkpoint 时
+不能生成预测曲线，分支 stored-score 图仍可单独使用。轨迹图的 truth 是实际
+agent 终点 remainder，缺失处保持 null，不能解释为成功标签。可选 `--repair-id`
+会与 publication 所绑定的 repair 核对；不指定时由 receipt 自动定位。
+
+### 层号映射、完整性与索引
+
+#### 检查和恢复
+
+##### 公开层号、原生层号与 receipt 路径合同
+
+公开最后一层 `N-1` 表示 final norm；vLLM `tact_states` 对应的原生 site
+为 `N`。历史在线 NPZ 保留原生键（例如 `layer_32`），pointwise 审计通过
+模型 `config.json` 的 decoder 层数及既有 `native_layers` 映射验证完整集合，
+不接受缺层、额外层或凭猜测改名。派生 point row 的 `layer_binding` 记录公开键到
+存储键的映射、模型指纹和 model config 哈希；模型配置加入 source proofs。
+`hidden.artifacts.read_arrays` 和 grouped reader 按此绑定向消费者提供公开键，
+原始 NPZ、checksum、storage_shapes 和 storage_dtypes 保持不变。
+
+正式自动发布的 selection 绑定 `repair_contract` 版本；修正审计规则后生成新的
+repair/publication/index ID，不复用历史失败审计。旧 receipt 和数据仍保留，
+同版本同 selection 重试保持幂等。历史 publication 不因代码更新自动改变资格。
+
+repair receipt 的 `files`、`session_receipts` 以 capture run 根为基准；本地
+staging 副本对应 `hidden/capture-repairs/ID/payload/`，`dependencies` 对应冻结
+NAS capture run 根。正式 artifact verifier 按 staging 命名空间和 run/repair
+身份选定这些根，不按 receipt 所在目录重复拼接，不以文件是否存在猜测根。
+普通 receipt 仍按其原有相对目录合同校验。完整性失败不会被跳过。
+
+升级后先对已停止 run 执行 `dycon capture finalize RUN_ID`，核对其 summary、
+publication receipt 和 `dycon artifact verify RUN_ID`。活动 run 须等待生产者
+及清理流程退出；无需为修复发布合同重跑模型。
+
+```bash
+.venvs/runner/bin/dycon capture status RUN_ID
+.venvs/runner/bin/dycon capture recover RUN_ID
+.venvs/runner/bin/dycon artifact verify RUN_ID
+.venvs/analysis/bin/dycon online-index RUN_ID INDEX_ID
+```
+
+先检查 capture 状态和已登记 publication。`capture recover` 恢复已有 spool/finalization/upload，不会重新调用模型。只在确认原进程结束且 recovery 状态可解释后继续 run；保留未 ACK spool，直到 publication receipt 确认数据已安全发布。
+
+capture 的控制预算或 receipt 并发若需修改已有 run，必须使用显式的 capture control revision 入口，填写 revision ID 和原因。它生成审计记录并保留旧快照；不能直接编辑 run snapshot 或重写根配置来伪装历史执行条件。
+
+#### 标签与下游分析
+
+Capture publication 只证明指定 hidden 数据按其 receipt 发布；它不证明 rollout 成功或 patch 解决任务。在线索引和标签需绑定所选 trajectory、评测及 patch。未评测、unresolved 和基础设施失败的成功剩余量标签保持 null。
+
+Parallel capture 使用 decision、branch、request 和 sample 身份关联候选。选中 winner 的标签不能传播给未选分支；未生成 close、close 已生成但 hidden 缺失、发布失败应分别统计。重分类只能基于已 finalized 的 native token evidence，通过专用入口写独立修订证据。
+
+可复用的 sealed native session 可显式建立 trace index；选用的 session、run 和发布物由 receipt 冻结。不要把局部隐藏样本数相等当作 capture 完整性验收。
+
+#### 证据边界
+
+- Exact native token IDs 与 tokenizer 重建结果必须分开标识。
+- Receipt 可验证登记文件与 hash；外盘上的 tensor 内容需按相应 verify 命令显式检查。
+- Artifact verify、capture coverage、环境 gold 和模型质量评测回答不同问题。
+- capture 恢复、capture 重分类和主动重跑是不同操作；只有最后一项会重新请求模型。
+
+完整子命令和 revision 参数见 `dycon capture --help`、`dycon capture-reclassify --help` 及 `dycon run revise-config --help`。例如同一次修订可传 `--set capture.control_seconds=120 --set capture.receipt_workers=16`，详见[配置修订](MINIMUM-RUN-CN.md#配置修订和事务恢复)。
+停止的单个 run 可使用 `dycon capture archive RUN_ID --archive-id ID --destination DIRECTORY` 归档到指定目录；省略 `--destination` 时使用 run 快照中的 NAS 根目录。归档会校验文件并释放该 run 的 spool reservation，原路径保留指向归档的软链接；如需再次运行该 run，须先恢复本地 spool。
+
+## 诊断与恢复
+
+### 状态诊断与已采纳样本重跑
+
+#### Capture 诊断摘要（只读）
+
+启用 capture 的物理 attempt 会在 runs/<RUN_ID>/rollout/tasks/<INSTANCE_ID>/repetitions/<REPETITION_ID>/attempts/<PHYSICAL_ATTEMPT_ID>/capture-diagnostics.json 保存派生摘要。session 的 finalization-diagnostics.json 记录阶段汇总；控制 API 失败时，sessions/<SESSION_ID>/control-errors/<CORRELATION_ID>.json 保存异常类型、调用栈帧、阶段耗时及该 session 的队列前后快照。run 级 capture-finalization-error.json 记录 coverage 数量和受限的缺失点诊断；完整 missing 坐标仍以 coverage.json 为准。
+
+stages 按 expected、selector_seen、capture_row、submit、persist、indexed 统计。missing 只包含受限的异常点及 request、position、stage、reason_code；truncated_count 表示超出上限的点数。正常 attempt 只保留聚合计数，队列快照只包含目标 session。HTTP 错误摘要最多 512 字节并过滤敏感字段。诊断不保存 prompt、模型输出、tensor、凭据或完整 token 数组。诊断文件可能包含 run/session/request 标识，应按普通运行证据控制访问。
+
+只读查看示例：
+
+    python -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps({k:d.get(k) for k in ("stages","by_anchor","missing_count","truncated_count","missing")}, ensure_ascii=False, indent=2))' runs/<RUN_ID>/rollout/tasks/<INSTANCE_ID>/repetitions/<REPETITION_ID>/attempts/<PHYSICAL_ATTEMPT_ID>/capture-diagnostics.json
+    .venvs/runner/bin/dycon capture status <RUN_ID>
+
+Session/物理 attempt 的 `indexed` 在 online finalizer 执行前为 null，`indexed_scope=pending_online_finalizer`；queued sample 不能当作 indexed。最终 accepted index 的阶段摘要位于 `enrichment/online/capture-diagnostics.json`。`selector_evidence_unavailable` 表示观察器失效或证据不足，不能解释为 selector 未命中。
+
+截断保留完整聚合计数，逐点证据按 execution attempt 共用 256 个异常身份预算；session、物理 attempt 和 run 级重复视图复用同一点的名额，控制错误也占用预算。预算账本位于 `execution/attempts/<EXECUTION_ATTEMPT_ID>/capture-diagnostic-budget.json`，仅在错误或收尾时加文件锁并原子写入，不进入逐 token 热路径。若诊断存储故障，业务结果保持原规则，诊断证据可标记 unavailable。
+
+Engine flush 的异常证据保存在 capture export/spool 根目录的 `control-errors/<CORRELATION_ID>.json`，响应头 `X-DyCon-Correlation-ID` 与客户端异常摘要关联；它只保存异常类型、受限堆栈位置与耗时，不保存异常 locals、源码行或请求正文。
+
+
+
+#### accepted partial capture 的显式重跑
 
 正式入口 run retry-failed 支持 --accepted-capture-partial，选择当前 disposition 为
 accepted 且 capture_status 恰为 partial 的 sample。与 --exit-status TimeoutError
@@ -221,13 +372,35 @@ attempt，保留原 seed round；accepted 且 capture complete 不属于该新�
 
 独立采样次数扩展使用 run add-repetitions --count N：向每个冻结 task 追加 N 个
 repetition，保留旧样本与 capture 证据；与上述重跑可以在同一次 resume 中调度。
-完整预览、哈希校验及恢复用法见 [最小运行指南](MINIMUM-RUN-CN.md#追加-repetition-与重跑-accepted-partial-capture)。
+完整预览、哈希校验及恢复用法见[追加和重跑的审计证据](MINIMUM-RUN-CN.md#追加和重跑的审计证据)。
 
-
-## Resume 与历史 capture 并行恢复
+### Resume 期间的既有采集恢复
 
 正式 `dycon run resume RUN_ID --detach` 在后台恢复启动前已有的 capture，模型服务启动和新轨迹 rollout 同时继续，无需等待历史 NAS 发布完成；新轨迹仍受既有 spool 配额和 admission 水位约束。恢复复用 `capture recover` 的校验、封装、上传和 ACK 清理逻辑，不重跑模型，也不改变 sample/repetition 或源 capture 身份。
 
 后台恢复只使用服务启动前冻结的文件路径清单；有 spill 待重放的历史 session 交给现有 export queue，后台不同时封装这些 session。每个会话的 request/index 元数据通过一次清单扫描分组，避免逐会话重复扫描整个 run。`runs/RUN_ID/capture-recovery.json` 记录当前 execution、running/complete/stopped/failed；complete 表示本轮恢复扫描结束，不代表所有 capture 均已完整发布，deferred_sessions、pending_upload 和 partial 仍需检查。异常另记 capture-recovery-error.json，不改变 rollout 成败。
 
 取消或 rollout 退出时，恢复扫描/发布等待协作停止，未 ACK 的本地 bytes 保留；先收拢后台恢复，再关闭后端并执行原有 run-end capture publication，run 锁始终覆盖后台写入。独立 `dycon capture recover RUN_ID` 仍同步运行并独占 run 锁。
+
+### 离线 token 核验
+
+#### 在线采集和 token 分析
+
+需要 rollout 同步保存 raw T=1 logprobs 时，在创建新 run 前于根配置启用 `capture.logprobs.enabled: true`，同时保留 `capture.enabled: true`、`capture.export.enabled: true`、managed TP=1 和现有 layers/anchors 配置；当前不支持 steering。生成 temperature、top-p/top-k 无需改成评分参数。通过上文同一 `run create/start/wait` 生命周期运行，resume 使用冻结开关。完整配置、预算、sidecar receipt 和验证范围见[在线 raw logprob 指南](#在线-raw-t1-采集与-sidecar)。
+
+`capture status` 或 hidden capture complete 不能单独证明 raw 概率覆盖。`rl-dataset build` 绑定可用 sidecar 后，检查 branch 的 `raw_probability_available`、group 的 `raw_probability_complete`，并运行 `rl-dataset check DATASET_ID --dataset-root DATASET_ROOT --level full`。概率失败保留原生 token；`capture recover` 只恢复已有 bytes 的发布，不补算缺值。
+
+```bash
+.venvs/runner/bin/dycon capture status RUN_ID
+.venvs/runner/bin/dycon capture spool-usage
+.venvs/runner/bin/dycon capture spool-usage RUN_ID --ledger-only
+.venvs/analysis/bin/dycon online-index RUN_ID INDEX_ID
+.venvs/analysis/bin/dycon enrich RUN_ID
+.venvs/analysis/bin/dycon trajectory-token-audit RUN_ID
+```
+
+在线采集在生成阶段绑定 run、sample、attempt、rollout 和 session。大张量可存于配置的 NAS 根目录，run 中保存 publication、locator 和 receipt。先确认 capture 发布完整，再建立下游索引；不要用训练标签推断缺失的 native token 证据。
+
+## 验证范围
+
+同一请求的 token/sidecar 对齐、spool 恢复和发布完整性，以及完整 rollout 吞吐与实际 FP16→BF16 概率差异，分别检查。历史验收范围为 pinned vLLM V2、Qwen3.5-9B FP16 单 worker 与 FULL CUDA Graph，相关覆盖和性能需按新 workload 核验。
