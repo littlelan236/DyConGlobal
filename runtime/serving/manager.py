@@ -15,7 +15,7 @@ import requests
 
 from core.io import hash_json, now, sha256, write_json
 from runtime.serving.capture import CaptureControlServer, OnlineCaptureController
-from runtime.serving.resources import reserve_serving_devices
+from runtime.serving.resources import cuda_visible_devices, reserve_serving_devices
 
 
 class ServingManager:
@@ -296,7 +296,7 @@ class ServingManager:
                 )
                 if candidates:
                     env["PATH"] = str(candidates[0].parent) + os.pathsep + env.get("PATH", "")
-            env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, s["gpus"]))
+            env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices(s["gpus"])
             request_control = cfg.get('agent', {}).get('backend') == 'openhands'
             self.runtime['request_control_enabled'] = request_control
             env["VLLM_PLUGINS"] = "dycon_capture" if capture_cfg.get("enabled") or request_control else ""

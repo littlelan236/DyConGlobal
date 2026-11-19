@@ -15,19 +15,11 @@ import time
 
 from core.io import hash_json, read_json, sha256, write_json
 from RL.dataset.schema import MASK_POLICY
-from .advantage import CONSENSUS_ADVANTAGE_VERSION, compute_advantages, validate_retained
-from .data import source_groups, freeze_group, tensor_groups
+from .advantage import SAME_ACTION_ADVANTAGE_VERSION, advantage_settings
+from .data import source_groups, tensor_groups
+from .grouping import exclusion_record, lineage, same_action_group_id, training_groups
+from .groups import advantages_for_members
 from .schedule import order_groups, shuffle_metadata
-
-
-def _advantages(value, config):
-    settings = config.grpo.model_dump(include={"top_k", "top_k_fraction", "score_scale_floor",
-                                                "boundary_tie_sigma"})
-    if config.grpo.advantage_policy == CONSENSUS_ADVANTAGE_VERSION:
-        retained = [row.get("retained") for row in value["members"]]
-        validate_retained(retained, len(value["members"]))
-        settings.update(advantage_policy=config.grpo.advantage_policy, retained=retained)
-    return compute_advantages([row.get("historical_score") for row in value["members"]], **settings)
 
 
 def _eligible(value, config):
@@ -37,7 +29,9 @@ def _eligible(value, config):
     if group["expected_branch_count"] != len(members) or group["branch_ids"] != [r["branch_sample_id"] for r in members]:
         raise ValueError("Incomplete/misordered streaming group inventory")
     if len(members) < 2:
-        return "GRPO groups require at least two branches", None
+        reason = ("singleton_action_group" if config.grpo.advantage_policy == SAME_ACTION_ADVANTAGE_VERSION
+                  else "GRPO groups require at least two branches")
+        return reason, None
     if any(row["prompt_count"] + row["completion_count"] > config.validation.max_sequence_length for row in members):
         raise ValueError("Group exceeds explicit sequence limit; no truncation is allowed")
     if any(row["prompt_count"] < 1 or row["completion_count"] < 1 for row in members):
@@ -46,7 +40,7 @@ def _eligible(value, config):
         raise ValueError("Streaming group prompt identities differ")
     if any(not row.get("action") for row in members):
         return "missing_action", None
-    result = _advantages(value, config)
+    result = advantages_for_members(members, **advantage_settings(config.grpo))
     return (None, result) if result.metadata["status"] == "ok" else (result.metadata["skip_reason"], None)
 
 
@@ -55,19 +49,25 @@ def _compact(value):
     group_keys = ("group_id", "branch_ids", "expected_branch_count", "data_ready")
     row_keys = ("group_id", "branch_sample_id", "native_request_id", "prompt_sha256",
                 "completion_sha256", "prompt_count", "completion_count", "tokenizer_fingerprint",
-                "mask_spans", "native_evidence", "action", "historical_score", "retained",
+                "mask_spans", "native_evidence", "action", "action_hash", "historical_score", "retained",
                 "session_id", "decision_id", "branch_id", "agent_step", "message_index")
-    return {"group": {key: value["group"][key] for key in group_keys},
+    return {"group": {**{key: value["group"][key] for key in group_keys}, **lineage(value["group"])},
             "members": [{key: row[key] for key in row_keys if key in row} for row in value["members"]],
             "frozen_advantages": list(value["frozen_advantages"]),
             "advantage_diagnostics": copy.deepcopy(value["advantage_diagnostics"])}
 
 
 def _plan_entry(value):
-    return {"group_id": value["group"]["group_id"],
-            "branch_ids": list(value["group"]["branch_ids"]),
-            "frozen_advantages": list(value["frozen_advantages"]),
-            "advantage_diagnostics": copy.deepcopy(value["advantage_diagnostics"])}
+    group = value["group"]
+    entry = {"group_id": group["group_id"],
+             "branch_ids": list(group["branch_ids"]),
+             "frozen_advantages": list(value["frozen_advantages"]),
+             "advantage_diagnostics": copy.deepcopy(value["advantage_diagnostics"])}
+    if "source_group_id" in group:
+        keys = ("branch_sample_id", "branch_id", "agent_step", "historical_score", "retained",
+                "prompt_count", "completion_count")
+        entry.update(lineage(group), members=[{k: row[k] for k in keys if k in row} for row in value["members"]])
+    return entry
 
 
 def create_plan(config):
@@ -78,19 +78,22 @@ def create_plan(config):
     eligible, exclusions, advantages = [], [], []
     seen_groups, seen_branches = set(), set()
     total = 0
-    for value in raw:
+    for value, reason in training_groups(raw, config.grpo.advantage_policy, proof=proof,
+                                         max_sequence_length=config.validation.max_sequence_length):
         total += 1
         gid = value["group"]["group_id"]
         bids = [r["branch_sample_id"] for r in value["members"]]
         if gid in seen_groups or seen_branches.intersection(bids) or len(set(bids)) != len(bids):
             raise ValueError("Duplicate streaming group/branch identity")
         seen_groups.add(gid); seen_branches.update(bids)
-        reason, result = _eligible(value, config)
+        if reason is None:
+            reason, result = _eligible(value, config)
         if reason:
-            exclusions.append({"group_id": gid, "reason": reason})
+            exclusions.append(exclusion_record(value, reason))
             continue
         value["frozen_advantages"] = result.advantages
-        value["advantage_diagnostics"] = {**result.metadata, "order": result.order, "ranks": result.ranks}
+        value["advantage_diagnostics"] = {**result.metadata, **lineage(value["group"]),
+                                          "order": result.order, "ranks": result.ranks}
         advantages.extend(result.advantages)
         eligible.append(_compact(value))
     if not eligible:
@@ -100,9 +103,7 @@ def create_plan(config):
                            prompt_length=lambda value: value["members"][0]["prompt_count"])
     plan_groups = [_plan_entry(value) for value in ordered]
     ids = [value["group_id"] for value in plan_groups]
-    settings = config.grpo.model_dump(include={"top_k", "top_k_fraction", "score_scale_floor", "boundary_tie_sigma"})
-    if config.grpo.advantage_policy == CONSENSUS_ADVANTAGE_VERSION:
-        settings["advantage_policy"] = config.grpo.advantage_policy
+    settings = advantage_settings(config.grpo)
     proof.update(objective_version="offline_grpo_k3_v1", preflight=config.preflight.model_dump(),
                  mask_policy=MASK_POLICY, advantage_policy=config.grpo.advantage_policy,
                  advantage_config_sha256=hash_json(settings), group_order_seed=config.grpo.shuffle_seed,
@@ -133,6 +134,12 @@ def validate_plan(plan):
             or len(ids) != proof["group_count"] or len(set(ids)) != len(ids)
             or hash_json(plan["groups"]) != proof["group_order_sha256"]):
         raise ValueError("Streaming plan identity/order checksum mismatch")
+    if proof.get("advantage_policy") == SAME_ACTION_ADVANTAGE_VERSION:
+        for entry in plan["groups"]:
+            if (entry["group_id"] != same_action_group_id(entry["source_group_id"], entry["action_hash"])
+                    or entry["branch_ids"] != [row["branch_sample_id"] for row in entry["members"]]
+                    or len(entry["frozen_advantages"]) != len(entry["branch_ids"])):
+                raise ValueError("Streaming same-action group lineage mismatch")
     if "execution_plan" in proof:
         from .execution import validate
         execution = validate(proof["execution_plan"])
@@ -182,7 +189,13 @@ class StreamingGroups:
         self._metadata_hashes = {name: receipt["files"][name]["sha256"]
                                  for name in ("dataset.json", "groups.jsonl", "branches.jsonl")}
         raw, source_proof = source_groups(config)
-        raw_by_id = {value["group"]["group_id"]: value for value in raw}
+        policy = config.grpo.advantage_policy
+        if policy != self.proof["advantage_policy"]:
+            raise ValueError("Streaming advantage policy differs from the frozen plan")
+        raw_by_id = {value["group"]["group_id"]: value
+                     for value, reason in training_groups(raw, policy,
+                         max_sequence_length=config.validation.max_sequence_length)
+                     if reason is None}
         if source_proof.get("dataset_receipt_sha256") != self.proof.get("dataset_receipt_sha256"):
             raise ValueError("Streaming dataset receipt differs from the frozen plan")
         self.execution_plan = self.proof.get("execution_plan")
@@ -194,6 +207,8 @@ class StreamingGroups:
                 raise ValueError("Streaming source group differs from the frozen plan")
             value["frozen_advantages"] = entry["frozen_advantages"]
             value["advantage_diagnostics"] = entry["advantage_diagnostics"]
+            if policy == SAME_ACTION_ADVANTAGE_VERSION and _plan_entry(value) != entry:
+                raise ValueError("Streaming source step/action/score mapping differs from the frozen plan")
             self._ordered.append(value)
             self._branch_prefix.append(self._branch_prefix[-1] + len(value["members"]))
             self._token_prefix.append(self._token_prefix[-1] + sum(r["completion_count"] for r in value["members"]))

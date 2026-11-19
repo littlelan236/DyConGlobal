@@ -221,6 +221,8 @@ def receipt_metadata(contract, state):
                  "schedule_id":contract["prepared_schedule_id"],
                  "schedule_manifest_sha256":contract["prepared_schedule_sha256"],
                  **{k:state[k] for k in ("segment_id", "segment_ordinal", "last_consumed_group_id", "consumed_group_ids_sha256")}}
+    if "same_action_grouping" in proof:
+        extra["same_action_grouping"] = proof["same_action_grouping"]
     if proof.get("execution_plan"):
         from .execution import validate, validate_state
         validate(proof["execution_plan"])

@@ -602,6 +602,14 @@ Run through the formal interfaces:
 ```
 
 
+#### 同 action 策略的 2/4/8 卡调度
+
+`same_action_top_half_v1` 先在每个 source step 内按 canonical action 分组并冻结优势，再使用现有的完整逻辑组更新窗口。
+
+LoRA 可显式设置 `runtime.topology_policy: preserve_updates`，在 2/4/8 卡执行或恢复。每组按原生顺序切成最多 16 条分支的物理任务，按 `task_ordinal % world_size` 分配。K 组窗口中规模为 N 的组保留每分支 `1/(K*N)` 权重，所有任务在同一参数状态完成后同步更新。该路径沿用无训练 RNG 消耗的约束。2/4 卡也可继续使用 exact 的整组分配，但恢复需要相同卡数。
+
+全参 FSDP2 使用 prepared 和 exact 拓扑，现有逐分支 microstep 表支持变长的 action 组，空闲 rank 使用零贡献占位。两种训练均不接受 `distinct_parent_two_pass_v1` 或 `append_resume`。配置示例与数据复用规则见 [训练手册](README.md#同-action-组内固定-top-half)。
+
 #### Opt-in 8x16 execution
 
 In [8x16 mode](#两轮-distinct-parent-816), the prefix lifecycle belongs to one

@@ -21,8 +21,9 @@ from RL.artifacts import source_identity, verify_receipt
 from RL.config import schedule_contract
 from RL.dataset.artifacts import directory, publication, seal, verify_local
 from RL.dataset.schema import MASK_POLICY
-from .advantage import CONSENSUS_ADVANTAGE_VERSION
+from .advantage import SAME_ACTION_ADVANTAGE_VERSION, advantage_settings
 from .data import freeze_group, source_groups, tensor_groups
+from .grouping import exclusion_record, order_record, training_groups
 from .schedule import LEGACY_SHUFFLE, order_groups, shuffle_metadata
 
 VERSION = 1
@@ -88,15 +89,6 @@ def source_record(value):
     # locators. Synthetic inputs carry tokens directly and bind them here too.
     return {"group": value["group"], "members": [
         {k: v for k, v in row.items() if k != "audit_enabled"} for row in value["members"]]}
-
-
-def order_record(value, consensus=False):
-    keys = ("branch_sample_id", "prompt_token_ids", "completion_token_ids", "historical_score")
-    if consensus:
-        keys += ("retained",)
-    return {"group_id": value["group"]["group_id"],
-            "branches": [{k: row[k] for k in keys} for row in value["members"]],
-            "advantages": value["frozen_advantages"]}
 
 
 def segment(ids, batch, seed, ordinal, parent=None, *, algorithm=LEGACY_SHUFFLE):
@@ -336,7 +328,7 @@ class PreparedReader:
         if (len(value["members"]) != value["group"]["expected_branch_count"]
                 or value["group"].get("branch_ids", [r["branch_sample_id"] for r in value["members"]])
                    != [r["branch_sample_id"] for r in value["members"]]
-                or hash_json(order_record(value, self.proof["advantage_policy"] == CONSENSUS_ADVANTAGE_VERSION))
+                or hash_json(order_record(value, self.proof["advantage_policy"]))
                    != self.records[group_id]["content_sha256"]):
             raise ValueError("Prepared branch/token/mask/advantage content mismatch")
         return value
@@ -438,7 +430,7 @@ def verify_prepared(path):
         expected_order = hash_json({"parent":reader.parent.proof["group_order_sha256"],
             "appended":[reader.records[g]["content_sha256"] for g in reader.schedule["segments"][-1]["group_ids"]]})
     else:
-        expected_order = hash_sequence(order_record(reader.raw(g), reader.proof["advantage_policy"] == CONSENSUS_ADVANTAGE_VERSION)
+        expected_order = hash_sequence(order_record(reader.raw(g), reader.proof["advantage_policy"])
                                        for g in reader.ids)
     if expected_order != reader.proof["group_order_sha256"]:
         raise ValueError("Prepared frozen group order/content hash mismatch")
@@ -450,13 +442,24 @@ def materialize(config, project_root, artifact_id, *, shard_groups=16, parent=No
     """Freeze one group at a time, shuffle only compact IDs, then atomically seal."""
     if type(shard_groups) is not int or shard_groups < 1:
         raise ValueError("shard_groups must be positive")
+    policy = config.grpo.advantage_policy
+    if parent and policy == SAME_ACTION_ADVANTAGE_VERSION:
+        raise ValueError("Same-action groups do not support appending to a prepared schedule")
     if parent:
         validate_config(parent, config, exact=False)
     from .execution import enabled, parent_record, from_config, apply_proof
     if parent and (enabled(config) or parent.proof.get("execution_plan")):
         raise ValueError("8x16 append execution schedules are not supported")
     execution_parents = []
-    raw, proof = source_groups(config) if legacy is None else (iter(legacy), copy.deepcopy(legacy.proof))
+    if legacy is None:
+        raw, proof = source_groups(config)
+        candidates = training_groups(raw, policy, proof=proof,
+                                     max_sequence_length=config.validation.max_sequence_length)
+    else:
+        if legacy.proof["advantage_policy"] != policy:
+            raise ValueError("Legacy materialization must preserve the frozen advantage policy")
+        proof = copy.deepcopy(legacy.proof)
+        candidates = ((value, None) for value in legacy)
     producer = source_identity(project_root)["fingerprint"]
     root = config.runtime.output_root
     with publication(root, "rl-prepared", artifact_id, signature=hash_json(schedule_contract(config))) as (stage, destination):
@@ -483,7 +486,7 @@ def materialize(config, project_root, artifact_id, *, shard_groups=16, parent=No
                            "group_count": min(shard_groups, len(ids) - (len(shards) * shard_groups))})
             streams = None
         try:
-            for value in raw:
+            for value, reason in candidates:
                 group_id = value["group"]["group_id"]
                 if group_id in seen_source:
                     raise ValueError("Duplicate group identity in dataset")
@@ -495,11 +498,9 @@ def materialize(config, project_root, artifact_id, *, shard_groups=16, parent=No
                     overlap += 1
                     continue
                 total += 1
-                if legacy is None:
+                if legacy is None and reason is None:
                     reason = freeze_group(value, config)
                     native_scanned += 1
-                else:
-                    reason = None
                 for row in value["members"]:
                     branch_id = row["branch_sample_id"]
                     if parent and branch_id in parent.branch_ids:
@@ -509,7 +510,7 @@ def materialize(config, project_root, artifact_id, *, shard_groups=16, parent=No
                     except sqlite3.IntegrityError as exc:
                         raise ValueError("Duplicate branch identity") from exc
                 if reason:
-                    exclusions.append({"group_id": group_id, "reason": reason})
+                    exclusions.append(exclusion_record(value, reason))
                     db.execute("INSERT INTO groups VALUES (?,?,?,?,?,?,?,?)", (group_id, 0, source_hash, None, None, 0, 0, None))
                     continue
                 if enabled(config):
@@ -554,7 +555,7 @@ def materialize(config, project_root, artifact_id, *, shard_groups=16, parent=No
                         write_values("scores-advantages.bin", [row["historical_score"], value["frozen_advantages"][i]], "<d")]
                     payload["members"].append(member)
                     tokens += len(c)
-                digest = hash_json(order_record(value, config.grpo.advantage_policy == CONSENSUS_ADVANTAGE_VERSION))
+                digest = hash_json(order_record(value, policy))
                 db.execute("INSERT INTO groups VALUES (?,?,?,?,?,?,?,?)", (group_id, 1, source_hash, digest,
                     folder.relative_to(stage).as_posix(), len(value["members"]), tokens, _json(payload)))
                 ids.append(group_id); advantages.extend(value["frozen_advantages"])
@@ -589,9 +590,7 @@ def materialize(config, project_root, artifact_id, *, shard_groups=16, parent=No
         schedule["sha256"] = hash_json(schedule)
         if parent:
             validate_extension_schedule(parent.schedule, schedule)
-        settings = config.grpo.model_dump(include={"top_k", "top_k_fraction", "score_scale_floor", "boundary_tie_sigma"})
-        if config.grpo.advantage_policy == CONSENSUS_ADVANTAGE_VERSION:
-            settings["advantage_policy"] = config.grpo.advantage_policy
+        settings = advantage_settings(config.grpo)
         all_ids = (parent.ids if parent else []) + ids
         all_exclusions = (parent.proof["exclusions"] if parent else []) + exclusions
         branch_count = (parent.proof["branch_count"] if parent else 0) + len(advantages)
@@ -619,7 +618,8 @@ def materialize(config, project_root, artifact_id, *, shard_groups=16, parent=No
             "shards": shards, "token_dtype": "<i8", "score_advantage_dtype": "<f8",
             "mask_encoding": "all_native_completion_targets_v1", "source_attempt": source_attempt,
             "group_inventory_sha256": hash_json({g: records[g]["content_sha256"] for g in sorted(records)}),
-            "observations": {"source_scan_groups": total+overlap, "native_scan_groups": native_scanned,
+            "observations": {"source_scan_groups": proof.get("same_action_grouping", {}).get("source_step_count", total+overlap),
+                "native_scan_groups": native_scanned,
                 "materialized_groups": len(ids), "old_groups_compared": overlap}}
         # Temporarily read our unpublished arrays through the same bounds/hash reader.
         # No receipt is published until all consistency checks and order hashes pass.
@@ -628,7 +628,7 @@ def materialize(config, project_root, artifact_id, *, shard_groups=16, parent=No
         provisional.local_ids, provisional.records, provisional.proof = set(ids), records, proof
         proof["group_order_sha256"] = (hash_json({"parent":parent.proof["group_order_sha256"],
             "appended":[records[g]["content_sha256"] for g in ids]}) if parent else
-            hash_sequence(order_record(provisional.raw(g), config.grpo.advantage_policy == CONSENSUS_ADVANTAGE_VERSION) for g in ids))
+            hash_sequence(order_record(provisional.raw(g), policy) for g in ids))
         if legacy is not None and proof["group_order_sha256"] != legacy.proof["group_order_sha256"]:
             raise ValueError("Legacy frozen-group order/content hash differs; migration rejected")
         # Distribution combines compact frozen floats; token arrays remain bounded.

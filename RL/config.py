@@ -307,7 +307,7 @@ class Grpo(Strict):
     token_diagnostics: TokenDiagnostics = Field(default_factory=TokenDiagnostics)
     ratio_guard: RatioGuard = Field(default_factory=RatioGuard)
     prefix_reuse: PrefixReuse = Field(default_factory=PrefixReuse)
-    advantage_policy: Literal["historical_topk_zero_sum_v1", "consensus_top_half_zero_sum_v1"] = "historical_topk_zero_sum_v1"
+    advantage_policy: Literal["historical_topk_zero_sum_v1", "consensus_top_half_zero_sum_v1", "same_action_top_half_v1"] = "historical_topk_zero_sum_v1"
     group_batch_size: PositiveInt = 4
     parallel_branch_chunk_size: Literal[16] | None = None
     parallel_branch_schedule: Literal["distinct_parent_two_pass_v1"] | None = None
@@ -335,6 +335,11 @@ class Grpo(Strict):
         if self.advantage_policy == "consensus_top_half_zero_sum_v1" and (
                 self.top_k is not None or self.top_k_fraction != 0.5 or self.boundary_tie_sigma != 0):
             raise ValueError("Consensus top-half requires top_k=null, top_k_fraction=0.5 and boundary_tie_sigma=0")
+        if self.advantage_policy == "same_action_top_half_v1":
+            if self.top_k is not None or self.top_k_fraction != 0.5 or self.boundary_tie_sigma != 0:
+                raise ValueError("Same-action top-half requires top_k=null, top_k_fraction=0.5 and boundary_tie_sigma=0")
+            if self.parallel_branch_chunk_size is not None or self.parallel_branch_schedule is not None:
+                raise ValueError("Same-action groups do not support distinct_parent_two_pass_v1")
         return self
 
 
@@ -475,15 +480,23 @@ class Config(Strict):
         if self.model.gdn_backend == "fla_chunk" and self.model.dtype != "bfloat16":
             raise ValueError("fla_chunk requires a BF16 model")
         if self.grpo:
+            if self.grpo.advantage_policy == "same_action_top_half_v1" and self.run.start.mode == "append_resume":
+                raise ValueError("Same-action groups do not support append_resume")
             split = self.grpo.parallel_branch_chunk_size is not None
             protocol = self.grpo.parallel_branch_schedule is not None
             count = len(self.runtime.gpus or [self.runtime.gpu])
             if split != protocol:
                 raise ValueError("8x16 requires both parallel_branch_chunk_size=16 and distinct_parent_two_pass_v1")
             portable = self.runtime.topology_policy == "preserve_updates"
-            if portable and (count not in {2, 4, 8} or self.run.start.mode not in {"fresh", "resume"}):
-                raise ValueError("preserve_updates requires 2/4/8 GPUs and fresh or resume")
+            portable_modes = {"fresh", "resume"}
+            if self.grpo.advantage_policy == "same_action_top_half_v1":
+                portable_modes.add("warm_start")
+            if portable and (count not in {2, 4, 8} or self.run.start.mode not in portable_modes):
+                raise ValueError("preserve_updates requires 2/4/8 GPUs and a supported start mode: "
+                                 + ", ".join(sorted(portable_modes)))
             if count == 8 and not split and not portable and not full:
+                if self.grpo.advantage_policy == "same_action_top_half_v1":
+                    raise ValueError("8-GPU LoRA same-action groups require runtime.topology_policy=preserve_updates")
                 raise ValueError("8 GPUs require the explicit distinct-parent 8x16 execution protocol")
             required_prefix = "disabled" if full else "boundary_grad"
             if split and ((count not in {2, 4, 8} if portable or full else count != 8) or self.runtime.gpus is None
@@ -617,6 +630,8 @@ def schedule_contract(config):
             contract["grpo"].pop("prefix_reuse")
         if config.grpo.advantage_policy == "historical_topk_zero_sum_v1":
             contract["grpo"].pop("advantage_policy")
+        elif config.grpo.advantage_policy == "same_action_top_half_v1":
+            contract["grpo"].pop("score_scale_floor")
         # Preserve the legacy schedule byte-for-byte for the default model-forward path.
         if config.grpo.reference_cache.source != "model_forward":
             contract["grpo"]["reference_cache"] = config.grpo.reference_cache.model_dump()

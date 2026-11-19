@@ -64,16 +64,21 @@ def render_advantages(result, fmt):
     if fmt == 'csv':
         output = io.StringIO()
         fields = ('group_id','group_ordinal','native_ordinal','branch_id','score','retained','advantage','rank','sign','provenance','consumption','total','returned','truncated','next_offset')
+        if any('source_group_id' in group for group in result['groups']):
+            fields += ('source_group_id', 'action_hash')
         writer = csv.DictWriter(output, fieldnames=fields, extrasaction='ignore')
         writer.writeheader()
         for group in result['groups']:
             for branch in group.get('branches', []):
                 writer.writerow({**branch,'group_id':group['group_id'],'group_ordinal':group.get('group_ordinal'),
-                                 **{key:group.get(key) for key in ('total','returned','truncated','next_offset')}})
+                                 **{key:group.get(key) for key in
+                                    ('total','returned','truncated','next_offset','source_group_id','action_hash')}})
         return output.getvalue().rstrip('\r\n')
     lines = []
     for group in result['groups']:
         lines.append(f"group {group['group_id']} ordinal={group.get('group_ordinal')} {group.get('consumption')} provenance={group.get('provenance')}")
+        if 'source_group_id' in group:
+            lines.append(f"source_group_id={group['source_group_id']} action_hash={group['action_hash']}")
         if group.get('exclusion_reason'):
             lines.append('excluded: '+group['exclusion_reason'])
         if 'branches' in group:
@@ -121,13 +126,13 @@ def execute(args, cfg):
         from RL.observability_tensorboard import manage
         return manage(cfg,args.attempt_id,action=args.action,storage_root=args.storage_root,
                       port=args.port,host=args.host,lease_seconds=args.lease_seconds)
-    from RL.grpo.observability import build_index, index_status, query
+    from RL.grpo.observability import advantage_index_status, build_index, query
     if args.build_index:
         return build_index(cfg,args.attempt_id,args.storage_root)
     if args.index_status:
         from RL.observability import source
         directory,attempt,_,cache=source(cfg,args.attempt_id,args.storage_root)
-        return {'state':'ready','source':'frozen_prepared_artifact'} if 'prepared' in attempt.get('contract',{}) else index_status(cache,directory)
+        return advantage_index_status(directory, attempt.get('contract', {}), cache)
     if args.format == 'csv' and not (args.group_id or args.group_ordinal is not None or args.branch_id):
         raise ValueError('CSV requires an explicit group or branch filter')
     result=query(cfg,args.attempt_id,storage_root=args.storage_root,group_id=args.group_id,

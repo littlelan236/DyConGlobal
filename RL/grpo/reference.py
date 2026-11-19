@@ -264,6 +264,8 @@ def import_reference(model, groups, raw_groups, directory, proof, base, adapter_
     rows = {}
     for raw in raw_groups:
         for row in raw["members"]:
+            # Reindex training outputs by logical group. The unchanged row below
+            # still addresses the original dataset group in the probability stream.
             key = (raw["group"]["group_id"], row["branch_sample_id"])
             if key in rows:
                 raise ValueError("Duplicate frozen branch identity")

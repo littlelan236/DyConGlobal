@@ -803,9 +803,27 @@ Policy/version, settings, retained membership, scores, frozen advantages and gro
 order are bound to the input/checkpoint contracts. Policy or membership changes
 reject exact resume. Omitted `advantage_policy` retains the legacy top-K behavior.
 
+##### 同 action 组内固定 top-half
+
+使用 [grpo-same-action-top-half.yaml](experiments/grpo-same-action-top-half.yaml) 或在训练 YAML 中设置下面的策略。
+
+```yaml
+grpo:
+  advantage_policy: same_action_top_half_v1
+  top_k: null
+  top_k_fraction: 0.5
+  boundary_tie_sigma: 0.0
+```
+
+每个原始 decision 内按 dataset 中的 canonical `action_hash` 分组，历史 `retained` 和 `selected` 标记不影响组成员。组内按 `historical_score` 升序排列，取前 `ceil(n/2)` 条为 `+1`，其余为 `-1`。部分同分按原生分支顺序处理。单分支、整组同分或分数无效的组跳过。原始 step 必须具备完整的原生证据和 action 身份。
+
+源 `rl-dataset` 和覆盖所需分支的概率产物可直接复用。启用策略后由训练入口生成新的 prepared 或流式计划，也可用 `dycon lora-prepare` 事先封存 prepared。每个 optimizer update 包含最多 `grpo.group_batch_size` 个 action 组，`training.max_updates` 按一个 epoch 的新组数计算。窗口有 K 个组、某组有 N 条分支时，该组每条分支的权重为 `1/(K*N)`。奇数组的 advantage 和为 1。
+
+LoRA 可用 `runtime.topology_policy: preserve_updates` 在 2/4/8 卡执行，并保留逻辑更新窗口。全参 FSDP2 使用 prepared 和固定卡数恢复。两条路径均拒绝 `distinct_parent_two_pass_v1`，该策略也不接受 `append_resume`。从旧策略切换时可新开训练或使用显式 warm start。精确 resume 使用已冻结的新策略组、优势和顺序。可通过 `dycon lora-advantages` 查看 LoRA 训练组的原 decision ID 和 action hash。
+
 #### Configuration and one epoch
 
-The two templates are:
+The task and smoke templates are:
 
 - `RL/experiments/grpo-offline-k3-smoke.yaml`: defaults to dry-run and explicitly
   uses the built-in synthetic token fixture (five groups, three branches each).

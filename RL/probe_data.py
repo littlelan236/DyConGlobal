@@ -75,12 +75,12 @@ class ProbeGroups:
         # Historical files can be tens of GiB. Scan one group at a time and
         # verify the original frozen order/advantages/token digest, never rerank.
         from RL.observability import streaming_json
-        from RL.grpo.prepared import hash_sequence, order_record
-        from RL.grpo.advantage import CONSENSUS_ADVANTAGE_VERSION
+        from RL.grpo.prepared import hash_sequence
+        from RL.grpo.grouping import order_record
         parser = streaming_json()
         proof = self.contract["input"]
         selected, seen = {}, []
-        consensus = proof["advantage_policy"] == CONSENSUS_ADVANTAGE_VERSION
+        policy = proof["advantage_policy"]
         def records(stream):
             for value in parser.items(stream, "item", use_float=True):
                 gid = value["group"]["group_id"]
@@ -89,7 +89,7 @@ class ProbeGroups:
                     if gid in selected:
                         raise ValueError("Duplicate legacy probe group")
                     selected[gid] = value
-                yield order_record(value, consensus)
+                yield order_record(value, policy)
         with (self.checkpoint.parent.parent / "frozen-groups.json").open("rb") as stream:
             digest = hash_sequence(records(stream))
         if seen != proof["eligible_group_ids"] or digest != proof["group_order_sha256"]:

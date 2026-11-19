@@ -13,6 +13,8 @@ import time
 from core.io import hash_json, now, read_json, sha256, write_json
 from core.locking import file_lock
 from RL.observability import matches, process, snapshot, source, streaming_json
+from .advantage import SAME_ACTION_ADVANTAGE_VERSION
+from .grouping import lineage, order_record
 
 
 def file_identity(path):
@@ -125,10 +127,41 @@ def index_status(cache, directory):
     return record
 
 
+def streaming_index(directory, contract):
+    """The same-action stream plan contains the frozen scores and branch diagnostics."""
+    if ("streaming" not in contract
+            or contract["input"].get("advantage_policy") != SAME_ACTION_ADVANTAGE_VERSION):
+        return None
+    from .stream_resume import PLAN, checked_path
+    from .streaming import validate_plan
+    path = checked_path(directory, PLAN)
+    if not path.is_file():
+        raise ValueError("Frozen streaming advantage plan is missing")
+    if sha256(path) != contract["streaming"]["plan_sha256"]:
+        raise ValueError("Frozen streaming advantage plan checksum mismatch")
+    plan = validate_plan(read_json(path))
+    if plan["proof"] != contract["input"]:
+        raise ValueError("Frozen streaming advantage proof differs from the training contract")
+    return plan["groups"]
+
+
+def advantage_index_status(directory, contract, cache):
+    if "prepared" in contract:
+        return {"state": "ready", "source": "frozen_prepared_artifact"}
+    streaming = streaming_index(directory, contract)
+    if streaming is not None:
+        return {"state": "ready", "source": "frozen_stream_plan", "groups": len(streaming)}
+    return index_status(cache, directory)
+
+
 def build_index(cfg, attempt_id, storage_root=None):
     directory, attempt, identity, cache = source(cfg, attempt_id, storage_root)
-    if 'prepared' in attempt.get('contract', {}):
+    contract = attempt.get('contract', {})
+    if 'prepared' in contract:
         return {'state': 'ready', 'source': 'frozen_prepared_artifact', 'message': 'Prepared artifact already has an index'}
+    streaming = streaming_index(directory, contract)
+    if streaming is not None:
+        return {'state': 'ready', 'source': 'frozen_stream_plan', 'groups': len(streaming)}
     path = directory / 'frozen-groups.json'
     if not path.exists() or attempt.get('status') == 'preparing_data':
         raise ValueError('Frozen source is missing or still being prepared')
@@ -209,10 +242,7 @@ def index_worker(descriptor):
                         if advantages is not None:
                             if len(advantages) != len(members) or any(type(a) not in (int,float) or not math.isfinite(a) for a in advantages):
                                 raise ValueError('Frozen advantages are invalid')
-                            keys = ('branch_sample_id','prompt_token_ids','completion_token_ids','historical_score')
-                            if proof['advantage_policy'] == 'consensus_top_half_zero_sum_v1':
-                                keys += ('retained',)
-                            record = {'group_id':gid, 'branches':[{k:m[k] for k in keys} for m in members], 'advantages':advantages}
+                            record = order_record(value, proof['advantage_policy'])
                             if count:
                                 order_digest.update(b',')
                             canonical_hash(order_digest, record, spool)
@@ -302,7 +332,8 @@ def group_view(value, ordinal, proof, progress, *, schedule_id=None, segment_id=
             item['token_preview'] = {key: row.get(key, [])[:token_preview] for key in ('prompt_token_ids','completion_token_ids')}
         branches.append(item)
     values = advantages or []
-    return {'group_id':value['group']['group_id'], 'group_ordinal':ordinal, 'schedule_id':schedule_id,
+    return {'group_id':value['group']['group_id'], **lineage(value['group']),
+            'group_ordinal':ordinal, 'schedule_id':schedule_id,
             'segment_id':segment_id, 'segment_local_ordinal':segment_ordinal, 'consumption':consumption,
             'provenance':provenance, 'advantage_policy':proof.get('advantage_policy'),
             'advantage_config_sha256':proof.get('advantage_config_sha256'),
@@ -321,7 +352,8 @@ def query(cfg, attempt_id, *, storage_root=None, group_id=None, group_ordinal=No
     contract = attempt['contract']
     proof = contract['input']
     progress = snapshot(cfg, attempt_id, storage_root, recent=0)
-    exclusions = {r['group_id']:r['reason'] for r in proof.get('exclusions', [])}
+    exclusions = {r['group_id']:r for r in proof.get('exclusions', [])}
+    stream_groups = streaming_index(directory, contract)
     ids = proof['eligible_group_ids']
     reader = None
     db = None
@@ -346,6 +378,14 @@ def query(cfg, attempt_id, *, storage_root=None, group_id=None, group_ordinal=No
                 owner = owner.parent
             else:
                 raise ValueError('Unknown branch ID')
+    elif stream_groups is not None:
+        if token_preview:
+            raise ValueError('Stream plan excludes tokens; token preview requires a prepared artifact')
+        if branch_id:
+            owners = [entry['group_id'] for entry in stream_groups if branch_id in entry['branch_ids']]
+            if len(owners) != 1 or (group_id and group_id != owners[0]):
+                raise ValueError('Unknown branch ID or branch/group mismatch')
+            group_id = owners[0]
     else:
         index = index_status(cache, directory)
         if index['state'] != 'ready' or index.get('contract_sha256') != identity['contract_sha256']:
@@ -371,12 +411,15 @@ def query(cfg, attempt_id, *, storage_root=None, group_id=None, group_ordinal=No
             group_id = ids[group_ordinal]
         if group_id in exclusions:
             return {'schema_version':1, 'attempt_id':attempt_id, 'groups':[{'group_id':group_id,
-                    'exclusion_reason':exclusions[group_id], 'advantage':None, 'provenance':'unavailable', 'branches':[]}], 'has_more':False}
+                    **lineage(exclusions[group_id]), 'exclusion_reason':exclusions[group_id]['reason'],
+                    'advantage':None, 'provenance':'unavailable', 'branches':[]}], 'has_more':False}
         selected = group_id is not None
         if selected and group_id not in ids:
             raise ValueError('Unknown group ID')
         selected_ids = [group_id] if selected else ids[offset:offset+(limit or 20)]
         results = []
+        provenance = ('frozen_prepared_artifact' if reader else
+                      'frozen_stream_plan' if stream_groups is not None else 'frozen_groups_json')
         for gid in selected_ids:
             ordinal = ids.index(gid)
             schedule_id = segment_id = local = None
@@ -389,6 +432,10 @@ def query(cfg, attempt_id, *, storage_root=None, group_id=None, group_ordinal=No
                         segment_id, local = segment['segment_id'], ordinal-base
                         break
                     base += len(segment['group_ids'])
+            elif stream_groups is not None:
+                entry = stream_groups[ordinal]
+                value = {**entry, 'group': {'group_id': gid, **lineage(entry)}}
+                segment_id, local = 'streaming', ordinal
             else:
                 row = db.execute('SELECT payload FROM groups WHERE id=?',(gid,)).fetchone()
                 if not row:
@@ -396,7 +443,7 @@ def query(cfg, attempt_id, *, storage_root=None, group_id=None, group_ordinal=No
                 value = json.loads(row[0])
             result = group_view(value, ordinal, proof, progress, schedule_id=schedule_id,
                 segment_id=segment_id, segment_ordinal=local,
-                provenance='frozen_prepared_artifact' if reader else 'frozen_groups_json', token_preview=token_preview)
+                provenance=provenance, token_preview=token_preview)
             if selected:
                 branches = result['branches']
                 if branch_id:
@@ -410,7 +457,8 @@ def query(cfg, attempt_id, *, storage_root=None, group_id=None, group_ordinal=No
                 result.pop('branches')
             results.append(result)
         return {'schema_version':1, 'attempt_id':attempt_id, 'source':identity,
-                'source_integrity':index.get('source_integrity') if index else 'prepared_metadata_receipts_verified',
+                'source_integrity':(index.get('source_integrity') if index else
+                    'stream_plan_sha256_verified' if stream_groups is not None else 'prepared_metadata_receipts_verified'),
                 'groups':results, 'total_groups':len(ids), 'returned':len(results),
                 'has_more':not selected and offset+len(results)<len(ids),
                 'next_offset':offset+len(results) if not selected and offset+len(results)<len(ids) else None}

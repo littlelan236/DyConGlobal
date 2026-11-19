@@ -6,7 +6,8 @@ import math
 from core.io import hash_json, read_json, sha256
 from RL.dataset.schema import MASK_POLICY
 from .groups import GroupBatch
-from .advantage import CONSENSUS_ADVANTAGE_VERSION, validate_retained
+from .advantage import CONSENSUS_ADVANTAGE_VERSION, SAME_ACTION_ADVANTAGE_VERSION, advantage_settings, validate_retained
+from .grouping import exclusion_record, order_record, training_groups
 from .schedule import LEGACY_SHUFFLE, order_groups, shuffle_metadata
 
 SYNTHETIC_DATASET = "synthetic-grpo-smoke-v1"
@@ -16,6 +17,8 @@ def source_groups(config):
     """Open sealed source metadata; native payloads are read one group at a time."""
     binding = config.algorithm
     if binding.dataset_id == SYNTHETIC_DATASET:
+        if config.grpo.advantage_policy == SAME_ACTION_ADVANTAGE_VERSION:
+            raise ValueError("Same-action GRPO requires sealed native action identities")
         fixture = Path(__file__).parents[1] / "fixtures/grpo-native-smoke-v1.json"
         value = read_json(fixture)
         raw = value["groups"]
@@ -59,6 +62,8 @@ def source_groups(config):
 
 def freeze_group(value, config):
     """The single eligibility/advantage implementation, shared by both formats."""
+    if config.grpo.advantage_policy == SAME_ACTION_ADVANTAGE_VERSION and len(value["members"]) < 2:
+        return "singleton_action_group"
     if value["group"].get("data_ready"):
         from RL.dataset.loader import native_tokens
         for row in value["members"]:
@@ -79,9 +84,8 @@ def freeze_group(value, config):
             if (not config.algorithm.dataset_id == SYNTHETIC_DATASET
                     and not row.get("tokenizer_fingerprint")):
                 raise ValueError("Dataset group tokenizer identity mismatch")
-    settings = config.grpo.model_dump(include={"top_k", "top_k_fraction", "score_scale_floor", "boundary_tie_sigma"})
+    settings = advantage_settings(config.grpo)
     if config.grpo.advantage_policy == CONSENSUS_ADVANTAGE_VERSION:
-        settings["advantage_policy"] = config.grpo.advantage_policy
         validate_retained([r.get("retained") for r in value["members"]], len(value["members"]))
     try:
         prepared = GroupBatch.from_dataset_group(value, as_tensors=False, collate=False, **settings)
@@ -96,19 +100,16 @@ def freeze_group(value, config):
 
 def prepare(config, *, validate_updates=True, shuffle_algorithm=None):
     raw, proof = source_groups(config)
-    settings = config.grpo.model_dump(include={"top_k", "top_k_fraction", "score_scale_floor", "boundary_tie_sigma"})
+    settings = advantage_settings(config.grpo)
     proof["preflight"] = config.preflight.model_dump()
-    consensus = config.grpo.advantage_policy == CONSENSUS_ADVANTAGE_VERSION
-    if consensus:
-        settings["advantage_policy"] = config.grpo.advantage_policy
     eligible = []; exclusions = []
     total_groups = 0
-    for value in raw:
+    for value, reason in training_groups(raw, config.grpo.advantage_policy, proof=proof,
+                                         max_sequence_length=config.validation.max_sequence_length):
         total_groups += 1
-        group = value["group"]
-        reason = freeze_group(value, config)
+        reason = reason or freeze_group(value, config)
         if reason:
-            exclusions.append({"group_id": group["group_id"], "reason": reason})
+            exclusions.append(exclusion_record(value, reason))
         else:
             eligible.append(value)
     if not eligible:
@@ -119,10 +120,7 @@ def prepare(config, *, validate_updates=True, shuffle_algorithm=None):
         prompt_length=lambda g: len(g["members"][0]["prompt_token_ids"]))
     if shuffle_algorithm != LEGACY_SHUFFLE:
         proof.update(shuffle_metadata(shuffle_algorithm))
-    records = [{"group_id": g["group"]["group_id"], "branches": [
-        {k: r[k] for k in (("branch_sample_id", "prompt_token_ids", "completion_token_ids", "historical_score")
-                           + (("retained",) if consensus else ()))}
-        for r in g["members"]], "advantages": g["frozen_advantages"]} for g in eligible]
+    records = [order_record(group, config.grpo.advantage_policy) for group in eligible]
     if len({r["group_id"] for r in records}) != len(records):
         raise ValueError("Duplicate group identity in dataset")
     advantages = [a for g in eligible for a in g["frozen_advantages"]]

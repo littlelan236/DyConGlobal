@@ -622,7 +622,7 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
         proof = stream_groups.proof
         groups = stream_groups
         preparation = {"prepared_cache_hit":False, "streaming":True,
-                       "source_scan_groups":proof["total_groups"],
+                       "source_scan_groups":proof.get("same_action_grouping", {}).get("source_step_count", proof["total_groups"]),
                        "materialized_groups":0}
         reference_values = stream_groups.reference
         reference_proof = None

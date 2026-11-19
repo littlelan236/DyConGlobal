@@ -62,6 +62,21 @@ def _available_devices():
     return physical, mig
 
 
+def cuda_visible_devices(devices):
+    """Bind physical NVML indices to UUIDs before entering the CUDA namespace."""
+    devices = tuple(str(device) for device in devices)
+    if all(device.startswith("MIG-") for device in devices):
+        return ",".join(devices)
+    identities = {}
+    for line in _nvidia_lines("--query-gpu=index,uuid", "--format=csv,noheader,nounits"):
+        index, uuid = [field.strip() for field in line.split(",", 1)]
+        identities[index] = uuid
+    missing = [device for device in devices if device not in identities]
+    if missing:
+        raise ValueError(f"Requested serving GPU does not exist: {missing}")
+    return ",".join(identities[device] for device in devices)
+
+
 def _probe_visible_devices(serving_python, devices):
     code = r'''
 import json
@@ -86,12 +101,13 @@ try:
             "free_memory_bytes": int(memory.free),
             "process_count": len(processes),
         })
+    torch.cuda.init()
     print(json.dumps({"visible_device_count": torch.cuda.device_count(), "device_memory": rows}))
 finally:
     pynvml.nvmlShutdown()
 '''
     env = dict(os.environ)
-    env["CUDA_VISIBLE_DEVICES"] = ",".join(devices)
+    env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices(devices)
     env["DYCON_SERVING_PROBE_DEVICES"] = ",".join(devices)
     output = subprocess.check_output(
         [str(serving_python), "-c", code], env=env, text=True, stderr=subprocess.STDOUT
