@@ -1,5 +1,13 @@
 # RL progress, TensorBoard and frozen advantages
 
+The opt-in [host budget and pressure policy](HOST_OFFLOAD_PRESSURE.md) records
+process pinned active/allocated bytes, pool idle/reserved bytes, cache reclaim
+costs, CPU RSS/HWM, GPU boundary choices and host/cgroup reserve samples in each
+rank's memory events. `lora-memory` preserves missing historical fields as null;
+TensorBoard exposes process metrics separately from host-global MemAvailable.
+Host-global available RAM must never be summed across ranks. PSS is sampled by
+the bounded acceptance fixture rather than scanning smaps in training hooks.
+
 Streaming recovery reports a verified checkpoint independently of a failed parent's top-level receipt or missing attempt contract. The checkpoint's own receipt, frozen metadata and committed cursor determine recoverability; inflight/prepared windows and later metrics do not change the resume point. Runner checks do not load Torch or prove actual anchor tensors/CUDA execution. See [streaming recovery](STREAMING_RESUME.md).
 
 Use the project CLI from `/home/wangtianyi/DyConGlobal`. Queries run in

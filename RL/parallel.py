@@ -18,6 +18,10 @@ def devices(config):
 
 def execution_contract(config):
     count = len(devices(config))
+    from RL.config import is_full
+    if is_full(config):
+        return {"version": "fsdp2_branch_rounds_v1", "world_size": count,
+                "gradient_reduction": "fsdp2_mean", "loss_scaling": "world_over_parents_over_branches"}
     from RL.grpo.execution import enabled, SCHEDULE, PARTITION, WEIGHT
     if enabled(config):
         return {"version": SCHEDULE, "world_size": count,
@@ -132,6 +136,8 @@ class GroupParallel:
                    "peak_reserved_bytes": getattr(self, "attempt_peak_reserved_bytes", 0) or
                         (torch.cuda.max_memory_reserved() if parameters[0].is_cuda else 0),
                    "phases": getattr(self, "local_phase_seconds", {}),
+                   "memory": getattr(self, "local_memory", None),
+                   "offload_metrics": getattr(self, "local_offload_metrics", None),
                    "finite": all(p.grad is None or bool(torch.isfinite(p.grad).all()) for p in parameters)}
         peers = self.gather(payload)
         indexes = [index for peer in peers for index in peer["groups"]]
@@ -167,6 +173,7 @@ class GroupParallel:
                             "branch_count": peer["branch_count"], "token_count": peer["token_count"],
                             "peak_allocated_bytes": peer["peak_allocated_bytes"],
                             "peak_reserved_bytes": peer["peak_reserved_bytes"], **peer["phases"],
+                            "memory": peer.get("memory"), "offload_metrics": peer.get("offload_metrics"),
                             **({"parent_group_count": len(peer["groups"]),
                                 "execution_chunk_count": len(peer["groups"])} if chunk_mode else {})}
                            for peer in peers]}
@@ -247,7 +254,9 @@ def _worker(rank, config, root, directory, base, parent, attempt, store, result_
         _context = GroupParallel(rank, len(selected), data_group=data)
         location = Path(directory) if rank == 0 else Path(directory) / "distributed" / f"rank-{rank}"
         location.mkdir(parents=True, exist_ok=True)
-        result = _train(config, Path(root), location, base, parent, dict(attempt))
+        from RL.config import is_full
+        result = _train(config, Path(root), Path(directory) if is_full(config) else location,
+                        base, parent, dict(attempt))
         # Keep all workers alive until rank zero has published the attempt receipt.
         dist.barrier()
         if rank == 0:
@@ -297,7 +306,7 @@ def follower(config, root, directory, parent, model, targets, *, optimizer_setti
         validate_anchor(model, shared["directory"], contract)
         if parent and config.run.start.mode == "resume":
             state = restore_training(parent["path"], optimizer, scheduler, contract,
-                                     expected_state=state, groups=groups)
+                                     expected_state=state, groups=groups, config=config)
         groups.validate_state(state)
         try:
             with attention_context(config.training.memory.attention_policy):
@@ -335,6 +344,8 @@ def follower(config, root, directory, parent, model, targets, *, optimizer_setti
         from core.io import read_json
         saved_contract = read_json(Path(parent["path"]) / "state.json")["contract"]
         restore_checkpoint(parent["path"], optimizer, scheduler, saved_contract, contract["adapter"], verify=True)
+        from RL.config_migration import apply_optimizer_config
+        apply_optimizer_config(config, optimizer, scheduler)
     telemetry = UpdateTelemetry(model, objective, mlps, offloader, directory,
                                 config.training.memory.profile_first_update,
                                 config.training.memory.attention_policy == "flash_only")

@@ -1,0 +1,84 @@
+algorithm:
+  dataset_id: swebench-consensus32-resolved169-four-runs-20261110-v1
+  dataset_root: /VM/wangtianyi/DyConGlobal
+  group_ids:
+  - g-80eae3da202857131e049cc0c0b00ee7002f6c2e
+  - g-9951d50d53c13ced552ffe7e7d09a8f094274c43
+  - g-5fb20d7967c0a8099bb86468a469c3e414693e31
+  name: offline_grpo_k3_v1
+  require_data_ready: true
+execution:
+  backend: fsdp2
+  sharding: full_shard
+  topology_policy: exact
+grpo:
+  advantage_policy: consensus_top_half_zero_sum_v1
+  boundary_tie_sigma: 0.0
+  clip_epsilon: 0.1
+  group_batch_size: 1
+  k3_cap: 1.0
+  kl_beta: 0.0
+  max_epochs: 1
+  prefix_reuse:
+    mode: disabled
+  probability_mode: raw_t1
+  reference: initial_policy
+  score_scale_floor: 0.1
+  shuffle_seed: 42
+  top_k: null
+  top_k_fraction: 0.5
+model:
+  attention_backend: sdpa
+  dtype: bfloat16
+  gdn_backend: fla_chunk
+  gradient_checkpointing: true
+  path: /VM/wangtianyi/DyConGlobal/models/Qwen3.5-9B
+optimizer:
+  master_weights_dtype: float32
+  name: adamw
+  states_dtype: float32
+preflight:
+  audit_native_tokens: false
+  check_resources: true
+  verify_identity: true
+prepared_data:
+  id: full-9b-fla-native-capacity-20261117-v2
+  manifest_sha256: 3fb6deadbb225ad5857659565428f2230e3438184b3972ba51aa2229a17e2fc7
+  receipt_sha256: 5d861eb2a86f20539c59e199eb3903dd3afbb63f9b3eac600d054a68bcd3cdbf
+  root: /home/wangtianyi/DyConGlobal
+run:
+  attempt_id: full-9b-fla-fsdp2-native-capacity-20261117-v1
+  mode: smoke
+  seed: 42
+  start:
+    checkpoint: null
+    mode: fresh
+runtime:
+  distributed_timeout_seconds: 1800
+  gpus:
+  - 5
+  - 6
+  output_root: /home/wangtianyi/DyConGlobal
+schema_version: 2
+training:
+  checkpoint_every_updates: 3
+  grad_clip: 1.0
+  gradient_accumulation_steps: 1
+  learning_rate: 1.0e-06
+  max_updates: 3
+  memory:
+    activation_offload: none
+    exact_length: true
+    loss_chunk_tokens: 16
+    oom_retry:
+      enabled: false
+  scheduler: constant
+  weight_decay: 0.0
+tuning:
+  freeze_vision: true
+  mode: full
+  scope: language_model
+validation:
+  fixture_id: causal-text-smoke-v1
+  max_sequence_length: 2048
+  stop_after_update: null

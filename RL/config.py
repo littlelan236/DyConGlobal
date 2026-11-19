@@ -18,10 +18,18 @@ class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+class ConfigMigration(Strict):
+    source_schedule_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    target_schedule_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    reason: Annotated[str, Field(min_length=1)]
+
+
 class Start(Strict):
     mode: Literal["fresh", "resume", "warm_start", "append_resume"]
     checkpoint: str | None
     extension_manifest: str | None = None
+    config_migration: ConfigMigration | None = None
+    optimizer_backend_migration: ConfigMigration | None = None
 
     @model_validator(mode="after")
     def check_start(self):
@@ -89,17 +97,81 @@ class CudaAllocator(Strict):
     backend: Literal["native", "cudaMallocAsync"] | None = None
 
 
+class HostOffload(Strict):
+    """Opt-in scoped reclamation; includes other process-wide pinned users."""
+    enabled: bool = False
+    reclaim_policy: Literal["after_use", "bounded_reuse"] = "after_use"
+    allocator_budget_gib: PositiveFloat = 2.0
+    cache_limit_gib: NonnegativeFloat = 0.25
+    reserve_gib: PositiveFloat = 8.0
+    reserve_fraction: Annotated[float, Field(gt=0, lt=1, allow_inf_nan=False)] = 0.1
+
+    @model_validator(mode="after")
+    def check_cache(self):
+        if self.cache_limit_gib >= self.allocator_budget_gib:
+            raise ValueError("host_offload.cache_limit_gib must be below allocator_budget_gib")
+        return self
+
+
+class MemoryPressure(Strict):
+    device_headroom_gib: PositiveFloat = 8.0
+    retry_headroom_increment_gib: PositiveFloat = 4.0
+    max_retries: Annotated[int, Field(ge=0, le=3)] = 2
+
+
+class AdamMomentOffload(Strict):
+    mode: Literal["disabled", "memory_pressure"] = "disabled"
+    backend: Literal["gpu_streamed_fp32_v1"] = "gpu_streamed_fp32_v1"
+    host_state_budget_gib: PositiveFloat = 16.0
+    node_state_budget_gib: PositiveFloat = 64.0
+    tile_pair_mib: Annotated[int, Field(ge=1, le=256)] = 64
+    gpu_scratch_budget_mib: PositiveInt = 256
+    pinned_staging_budget_mib: PositiveInt = 512
+    low_watermark_gib: PositiveFloat = 12.0
+    high_watermark_gib: PositiveFloat = 20.0
+    restore_stable_windows: PositiveInt = 3
+    min_residency_windows: PositiveInt = 3
+    max_restore_gib_per_window: PositiveFloat = 2.0
+
+    @model_validator(mode="after")
+    def check_budgets(self):
+        if self.high_watermark_gib <= self.low_watermark_gib:
+            raise ValueError("Adam high watermark must exceed low watermark")
+        if self.gpu_scratch_budget_mib < self.tile_pair_mib * 4:
+            raise ValueError("Adam scratch must cover input pair and functional temporaries (4 x tile pair)")
+        if self.pinned_staging_budget_mib < self.tile_pair_mib + 1:
+            raise ValueError("Adam staging must cover one charged tile pair including allocator rounding")
+        if self.node_state_budget_gib < self.host_state_budget_gib:
+            raise ValueError("Node Adam budget must cover rank budget")
+        return self
+
+
 class Memory(Strict):
     loss_chunk_tokens: NonnegativeInt = 0
     mlp_chunk_tokens: NonnegativeInt = 0
     exact_length: bool = False
     attention_policy: Literal["auto", "flash_only"] = "auto"
-    activation_offload: Literal["none", "checkpoint_boundary", "auto"] = "none"
+    activation_offload: Literal["none", "checkpoint_boundary", "auto", "memory_pressure"] = "none"
     host_budget_gib: PositiveFloat = 64.0
     profile_first_update: bool = False
     auto_offload: "AutoOffload" = Field(default_factory=lambda: AutoOffload())
     oom_retry: "OOMRetry" = Field(default_factory=lambda: OOMRetry())
     memory_telemetry: "MemoryTelemetry" = Field(default_factory=lambda: MemoryTelemetry())
+    host_offload: HostOffload = Field(default_factory=HostOffload)
+    memory_pressure: MemoryPressure = Field(default_factory=MemoryPressure)
+    adam_moment_offload: AdamMomentOffload = Field(default_factory=AdamMomentOffload)
+
+    @model_validator(mode="after")
+    def check_pressure(self):
+        adam = self.adam_moment_offload
+        if adam.mode != "disabled":
+            if not self.host_offload.enabled:
+                raise ValueError("Adam offload requires managed host_offload.enabled")
+            if adam.pinned_staging_budget_mib / 1024 >= self.host_offload.allocator_budget_gib:
+                raise ValueError("Adam pinned staging is a subset of the process allocator budget")
+        if self.activation_offload == "memory_pressure" and not self.host_offload.enabled:
+            raise ValueError("memory_pressure requires host_offload.enabled with an actual allocation budget")
+        return self
 
 
 class Supervision(Strict):
@@ -136,17 +208,26 @@ class Training(Strict):
     weight_decay: NonnegativeFloat
     grad_clip: PositiveFloat
     scheduler: Literal["constant", "linear"]
+    warmup_updates: NonnegativeInt = 0
     checkpoint_every_updates: PositiveInt
     memory: Memory = Field(default_factory=Memory)
     supervision: Supervision = Field(default_factory=Supervision)
     checkpoint_policy: Literal["layer", "selective_mlp", "layer_group"] = "layer"
     checkpoint_group_layers: PositiveInt = 4
 
+    @model_validator(mode="after")
+    def check_warmup(self):
+        if self.warmup_updates > self.max_updates:
+            raise ValueError("training.warmup_updates cannot exceed max_updates")
+        return self
+
 
 class Validation(Strict):
     fixture_id: Literal["causal-text-smoke-v1"]
     max_sequence_length: Annotated[int, Field(ge=8, le=262144)]
     stop_after_update: PositiveInt | None
+    skip_checkpoint_export: bool = False
+    capacity_microsteps: PositiveInt | None = None
 
 
 class Algorithm(Strict):
@@ -154,10 +235,15 @@ class Algorithm(Strict):
     dataset_root: str
     dataset_id: str
     require_data_ready: Literal[True] = True
+    group_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def check_binding(self):
         identifier(self.dataset_id)
+        if len(self.group_ids) != len(set(self.group_ids)):
+            raise ValueError("Duplicate selected full-policy parent ID")
+        for group_id in self.group_ids:
+            identifier(group_id)
         if not self.dataset_root.strip():
             raise ValueError("dataset_root must be nonempty")
         return self
@@ -277,10 +363,13 @@ class PreparedBinding(Strict):
 
 
 class Config(Strict):
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2]
     run: Run
     model: Model
-    lora: Lora
+    lora: Lora | None = None
+    tuning: "Tuning | None" = None
+    execution: "Execution | None" = None
+    optimizer: "Optimizer | None" = None
     runtime: Runtime
     training: Training
     validation: Validation
@@ -291,6 +380,61 @@ class Config(Strict):
 
     @model_validator(mode="after")
     def check_stop(self):
+        full = self.tuning is not None and self.tuning.mode == "full"
+        if self.run.start.optimizer_backend_migration is not None and (
+                not full or self.run.start.mode != "resume" or
+                self.training.memory.adam_moment_offload.mode != "memory_pressure"):
+            raise ValueError("Optimizer backend migration requires full/FSDP2 resume into streamed AdamW")
+        if self.training.memory.adam_moment_offload.mode != "disabled" and not full:
+            raise ValueError("Adam moment offload is currently integrated only with full/FSDP2")
+        if self.validation.skip_checkpoint_export and (not full or self.validation.stop_after_update is None):
+            raise ValueError("No-export validation requires full/FSDP2 and an explicit stop_after_update")
+        if self.validation.capacity_microsteps is not None and (
+                not full or not self.validation.skip_checkpoint_export
+                or self.training.memory.adam_moment_offload.mode == "disabled"):
+            raise ValueError("Capacity microsteps require full/FSDP2 streamed Adam and no-export validation")
+        if self.run.start.config_migration is not None and (
+                full or self.run.start.mode != "resume" or self.algorithm is None):
+            raise ValueError("Config migration requires complete-checkpoint LoRA GRPO resume")
+        if self.algorithm and self.algorithm.group_ids and not full:
+            raise ValueError("Explicit algorithm.group_ids currently requires full-policy prepared training")
+        if self.schema_version == 1:
+            if self.lora is None or any(v is not None for v in (self.tuning, self.execution, self.optimizer)):
+                raise ValueError("schema 1 requires LoRA and forbids schema 2 fields")
+        elif self.tuning is None:
+            raise ValueError("schema 2 requires an explicit tuning mode")
+        elif full:
+            if self.lora is not None or self.execution is None or self.optimizer is None:
+                raise ValueError("full requires execution/optimizer and forbids LoRA fields")
+            if self.algorithm is None or self.grpo is None:
+                raise ValueError("full requires offline GRPO")
+            if self.runtime.bf16_allow_reduced_precision_reduction or not self.runtime.bf16_allow_split_k:
+                raise ValueError("FSDP2 milestone fixes BF16 numerics: reduced_precision_reduction=false, split_k=true")
+            if (self.runtime.topology_policy != "exact" or self.runtime.data_preparation_async
+                    or self.run.start.mode == "append_resume"):
+                raise ValueError("FSDP2 requires exact topology, prepared data and no append_resume")
+            split = self.grpo.parallel_branch_chunk_size is not None
+            if not split and (self.grpo.prefix_reuse.mode != "disabled"
+                    or self.grpo.parallel_branch_schedule is not None):
+                raise ValueError("FSDP2 requires complete branches and disabled prefix reuse")
+            if split and (self.grpo.prefix_reuse.mode != "disabled"
+                    or len(self.runtime.gpus or []) not in {2, 4, 8}
+                    or self.grpo.group_batch_size != 8):
+                raise ValueError("Full FSDP2 8x16 requires 2/4/8 GPUs, 8 parents per update and disabled prefix reuse")
+            memory = self.training.memory
+            if (memory.oom_retry.enabled or memory.mlp_chunk_tokens
+                    or self.training.checkpoint_policy != "layer"):
+                raise ValueError("FSDP2 requires layer checkpointing, no retry/MLP chunking")
+            if memory.activation_offload != "none" and not memory.host_offload.enabled:
+                raise ValueError("Full activation offload requires managed host_offload.enabled")
+            if self.validation.max_sequence_length > 2048 and not memory.host_offload.enabled:
+                raise ValueError("Full length >2048 requires managed host offload; capacity remains unverified")
+            if self.grpo.token_diagnostics.compare_base or self.grpo.token_diagnostics.compare_full_branch:
+                raise ValueError("FSDP2 token diagnostics cannot run adapter/base comparison forwards")
+            if self.run.start.mode == "warm_start" and self.grpo.reference_cache.source != "model_forward":
+                raise ValueError("full warm_start builds a new model-forward anchor")
+        elif self.lora is None or self.execution is not None or self.optimizer is not None:
+            raise ValueError("schema 2 LoRA requires lora and uses the existing execution/optimizer")
         if self.runtime.gpus and len(self.runtime.gpus) > 1 and self.algorithm is None:
             raise ValueError("Multi-GPU training currently requires offline GRPO")
         if self.run.start.mode == "append_resume" and self.algorithm is None:
@@ -301,13 +445,13 @@ class Config(Strict):
         if stop is not None and stop >= self.training.max_updates:
             raise ValueError("stop_after_update must precede the complete schedule target")
         memory = self.training.memory
-        if (memory.activation_offload == "auto" or memory.oom_retry.enabled) and self.algorithm is None:
+        if (memory.activation_offload in {"auto", "memory_pressure"} or memory.oom_retry.enabled) and self.algorithm is None:
             raise ValueError("Adaptive offload and OOM retry currently require offline GRPO")
         if memory.oom_retry.enabled and self.training.checkpoint_policy not in {"layer", "layer_group"}:
             raise ValueError("OOM retry requires checkpoint boundary offload capability")
         if self.training.supervision.mode != "labels" and not memory.loss_chunk_tokens:
             raise ValueError("Sparse supervision requires loss_chunk_tokens > 0 before vocabulary projection")
-        if self.lora.dropout != 0:
+        if self.lora is not None and self.lora.dropout != 0:
             raise ValueError("Only dropout=0 is supported; chunk recomputation needs reproducible RNG")
         if self.training.checkpoint_policy == "selective_mlp" and not memory.mlp_chunk_tokens:
             raise ValueError("selective_mlp requires mlp_chunk_tokens > 0")
@@ -339,12 +483,14 @@ class Config(Strict):
             portable = self.runtime.topology_policy == "preserve_updates"
             if portable and (count not in {2, 4, 8} or self.run.start.mode not in {"fresh", "resume"}):
                 raise ValueError("preserve_updates requires 2/4/8 GPUs and fresh or resume")
-            if count == 8 and not split and not portable:
+            if count == 8 and not split and not portable and not full:
                 raise ValueError("8 GPUs require the explicit distinct-parent 8x16 execution protocol")
-            if split and ((count not in {2, 4, 8} if portable else count != 8) or self.runtime.gpus is None
+            required_prefix = "disabled" if full else "boundary_grad"
+            if split and ((count not in {2, 4, 8} if portable or full else count != 8) or self.runtime.gpus is None
                           or self.grpo.group_batch_size != 8
-                          or self.grpo.prefix_reuse.mode != "boundary_grad"):
-                raise ValueError("8x16 requires 8 distinct physical GPUs, group_batch_size=8 and boundary_grad")
+                          or self.grpo.prefix_reuse.mode != required_prefix):
+                expected = "disabled prefix reuse" if full else "boundary_grad"
+                raise ValueError(f"8x16 requires the supported topology, group_batch_size=8 and {expected}")
             if split and self.run.start.mode == "append_resume":
                 raise ValueError("8x16 supports exact resume; append_resume execution schedules are not supported")
         elif self.runtime.topology_policy != "exact":
@@ -353,6 +499,35 @@ class Config(Strict):
             if self.training.checkpoint_policy != "layer":
                 raise ValueError("boundary_grad requires layer checkpointing")
         return self
+
+
+class Tuning(Strict):
+    mode: Literal["lora", "full"]
+    scope: Literal["language_model"] = "language_model"
+    freeze_vision: Literal[True] = True
+
+
+class Execution(Strict):
+    backend: Literal["fsdp2"]
+    sharding: Literal["full_shard"]
+    topology_policy: Literal["exact"]
+    checkpoint_format: Literal["rl-full-checkpoint-v1"] = "rl-full-checkpoint-v1"
+    parameter_dtype: Literal["float32"] = "float32"
+    reduce_dtype: Literal["float32"] = "float32"
+
+
+class Optimizer(Strict):
+    name: Literal["adamw"]
+    master_weights_dtype: Literal["float32"]
+    states_dtype: Literal["float32"]
+    weight_decay_policy: Literal["exclude_norm_bias_embedding_v1"] = "exclude_norm_bias_embedding_v1"
+
+
+Config.model_rebuild()
+
+
+def is_full(config):
+    return config.tuning is not None and config.tuning.mode == "full"
 
 
 class UniqueLoader(yaml.SafeLoader):
@@ -416,10 +591,16 @@ def schedule_contract(config):
         "preflight": config.preflight.model_dump(),
         "seed": config.run.seed,
         "model": config.model.model_dump(exclude={"path"}),
-        "lora": config.lora.model_dump(),
+        **({"lora": config.lora.model_dump()} if config.lora is not None else {}),
         "training": {**config.training.model_dump(), "memory": memory_contract(config.training.memory)},
-        "validation": config.validation.model_dump(exclude={"stop_after_update"}),
+        "validation": config.validation.model_dump(exclude={"stop_after_update", "skip_checkpoint_export", "capacity_microsteps"}),
     }
+    if config.training.warmup_updates == 0:
+        contract["training"].pop("warmup_updates", None)
+    if config.schema_version == 2:
+        contract["tuning"] = config.tuning.model_dump()
+        if is_full(config):
+            contract.update(execution=config.execution.model_dump(), optimizer=config.optimizer.model_dump())
     if config.algorithm:
         contract.update(algorithm=config.algorithm.model_dump(), grpo=config.grpo.model_dump(exclude={"reference_cache", "token_diagnostics"}))
         if config.grpo.parallel_branch_chunk_size is None:
@@ -443,6 +624,8 @@ def schedule_contract(config):
     # execution identity is frozen separately; retain read-only artifact hashes.
     if config.model.gdn_backend == "reference_pytorch":
         contract["model"].pop("gdn_backend", None)
+    if config.algorithm is not None and not config.algorithm.group_ids:
+        contract["algorithm"].pop("group_ids", None)
     return contract
 
 
@@ -450,7 +633,12 @@ def memory_contract(memory):
     """Keep default operational fields compatible with pre-existing checkpoints."""
     result = memory.model_dump()
     defaults = Memory()
-    for name in ("auto_offload", "oom_retry", "memory_telemetry"):
+    for name in ("auto_offload", "oom_retry", "memory_telemetry", "host_offload", "memory_pressure", "adam_moment_offload"):
         if getattr(memory, name) == getattr(defaults, name):
             result.pop(name, None)
+    if memory.host_offload.enabled or memory.activation_offload == "memory_pressure":
+        from RL.allocator import HOST_POLICY_VERSION, HOST_NATIVE_CACHE_MB
+        result["offload_policy_version"] = HOST_POLICY_VERSION
+        result["host_allocator_backend"] = "torch_size_separated"
+        result["host_native_cache_max_block_bytes"] = HOST_NATIVE_CACHE_MB * 2**20
     return result

@@ -21,7 +21,11 @@ def test_public_service_publishes_reconstructible_grpo_receipt(tmp_path, monkeyp
     raw["run"]["attempt_id"] = "public-grpo-tiny"
     raw["run"]["mode"] = "smoke"
     raw["runtime"]["output_root"] = str(tmp_path / "artifacts")
-    raw["runtime"]["gpu"] = 1  # CPU-injected test must not contend with a live GPU-0 attempt lock.
+    raw["runtime"]["gpu"] = 1
+    # CPU-injected training must never acquire production device locks.
+    from core.locking import file_lock
+    monkeypatch.setattr("RL.service.file_lock", lambda path, **kwargs: file_lock(
+        tmp_path / "isolated-gpu-locks" / path.name if path.parent.name == "lora-gpu" else path, **kwargs))
     raw["lora"] = LORA.model_dump()
     file = tmp_path / "config.yaml"; file.write_text(yaml.safe_dump(raw))
     base = {"files": {"tiny_fixture": True}}

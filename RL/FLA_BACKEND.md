@@ -14,6 +14,13 @@ in the main project. BF16 Q/K/V are passed directly to FLA; the existing FP32
 recurrent state, gate values and boundary-gradient accumulation retain their
 original precision contracts.
 
+Full language-policy training uses `dycon rl-train` with schema 2 and the same
+explicit BF16 backend selection. It retains complete branches, fixed FSDP2 world
+size, layer checkpointing, FP32 masters/moments/reduction and the <=2048 input
+limit. Prefix reuse, CPU offload, OOM retry and context parallelism remain outside
+that path. Full checkpoints/probes preserve the actual GDN identity and sealed
+per-rank call evidence; see [full FSDP2](FULL_FSDP2.md).
+
 ## Environment
 
 The base `.venvs/rl` environment uses `locks/rl.in` / `locks/rl.txt`.
@@ -75,8 +82,22 @@ the actual task configuration are under
 
 ## Acceptance scope
 
-For the 2026-11-17 integration, the user explicitly selected runtime acceptance:
+For the earlier 2026-11-17 LoRA integration, the user explicitly selected runtime acceptance:
 the backend must execute training; cross-backend numerical agreement is not a
 merge requirement. Earlier isolated worktree audits did not pass the full-model
 numerical thresholds. This integration does not claim numerical equivalence,
 long-context throughput, or multi-GPU acceptance.
+
+The subsequent full-policy FSDP2 acceptance uses the same runtime criterion.
+Tiny real NCCL tests compare FLA worlds 1/2, unequal parent and branch counts,
+tail windows, full parameters and FP32 moments; they also verify exact
+pause/resume, rank-local failure, export, probe and independent HF reload.
+The real 9B short fixture completes pause/resume, deep artifact verification,
+BF16 HF export and a fixed three-branch probe. Independent Transformers reload
+on GPU7 matches all 12 target logprobs exactly. These full-policy checks do not
+establish cross-backend numerical equivalence or training quality.
+
+Test checkpoint payloads and the HF export are deliberately deleted after their
+consumers finish. The metadata archive and cleanup ledger are under
+`temp/full-fla-fsdp2-20261117/`; removed checkpoints cannot be resumed or deeply
+verified again. Keep fresh attempt IDs when reproducing the examples.

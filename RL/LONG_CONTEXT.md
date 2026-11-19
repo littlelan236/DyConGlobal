@@ -16,7 +16,7 @@ The additive `training.memory` settings default to the original dense path:
 | `exact_length` | `false` | Trim a single right-padded sample to its true length. Left padding, holes, supervised padding and multiple samples are rejected. |
 | `attention_policy` | `auto` | `flash_only` restricts full attention to Flash SDPA in both forward and backward. A dense four-dimensional mask or unavailable kernel fails. |
 | `activation_offload` | `none` | `checkpoint_boundary` moves only rank-three checkpoint input activations through pinned CPU memory. Weights stay on GPU. |
-| `host_budget_gib` | `64.0` | Hard per-rank pinned activation budget. Preflight checks available RAM and all local ranks, retaining a host reserve. |
+| `host_budget_gib` | `64.0` | Per-rank logical live activation bytes only; excludes native rounding, idle cache, RSS and other pinned users. Optional legacy preflight checks all local ranks. Actual pinned allocation admission requires opt-in `host_offload`. |
 | `profile_first_update` | `false` | Collect actual full-attention operators, CUDA kernel names, masks and observed transfer/compute overlap. The first update includes profiler overhead. |
 
 `training.checkpoint_policy` selects `layer` (production default), `selective_mlp`
@@ -139,6 +139,12 @@ is below 15 GiB. 64K/128K exploration is opt-in via `DYCON_LORA_EXTENDED_CAPACIT
 lengths, memory and throughput. Synthetic results do not measure business quality.
 
 ## Adaptive activation offload
+
+The opt-in `host_offload` pool and `memory_pressure` policy are documented in
+[`HOST_OFFLOAD_PRESSURE.md`](HOST_OFFLOAD_PRESSURE.md). They add actual process-wide
+pinned allocation admission, bounded idle-cache reuse, host/cgroup reserve checks,
+and per-tensor GPU pressure selection. Existing `none`, `checkpoint_boundary`, and
+length-based `auto` contracts retain their meanings.
 
 `training.memory.activation_offload: auto` enables boundary offload only when a
 window reaches the configured prompt or sequence threshold. `oom_retry` permits

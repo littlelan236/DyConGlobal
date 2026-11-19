@@ -20,6 +20,10 @@ from RL.supervision import describe_policy
 
 def _source(config):
     """Validate source receipts before loading model weights, with no Torch import."""
+    from RL.config import is_full
+    if is_full(config):
+        from RL.full_artifacts import source
+        return source(config)
     mode = config.run.start.mode
     if mode == "fresh":
         return None
@@ -56,11 +60,15 @@ def _source(config):
 
 
 def _preflight(config, root, parent):
+    from RL.config import is_full
+    if is_full(config):
+        from RL.full_artifacts import preflight
+        return preflight(config, root, parent)
     from RL.parallel import execution_contract
     if parent and config.run.start.mode in {"resume", "append_resume"}:
         from RL.topology import validate_resume as validate_topology
         validate_topology(config, read_json(Path(parent["path"]) / "state.json"))
-    if config.preflight.check_resources:
+    if config.preflight.check_resources or config.training.memory.host_offload.enabled:
         memory_plan(config)
     base = base_identity(config.model.path, root, config.preflight.verify_identity)
     prepared_input = None
@@ -173,7 +181,8 @@ def run(root_config, training_config):
     root = Path(root_config["project_root"]).resolve()
     config, source = load(training_config, root)
     from RL.allocator import configure_cuda_allocator
-    allocator = configure_cuda_allocator(config.runtime.cuda_allocator, apply=config.run.mode != "dry-run")
+    allocator = configure_cuda_allocator(config.runtime.cuda_allocator, apply=config.run.mode != "dry-run",
+                                         host_offload=config.training.memory.host_offload)
     directory = attempt_directory(config)
     lock = root / "state/artifact-locks/lora-attempt" / (config.run.attempt_id + ".lock")
     with file_lock(lock, nonblocking=True):
@@ -197,7 +206,9 @@ def run(root_config, training_config):
                     "streaming_resume": base.get("streaming_resume"),
                     "physical_execution": execution_record(config) if portable_enabled(config) else None,
                     "training_rng_validation": "pending_model_and_update" if portable_enabled(config) else None,
-                    "coverage": "text backbone all Linear; exact paths resolved only when loading the model"}
+                    "coverage": ("all language parameters including embedding/head; vision bound to immutable base"
+                        if config.tuning and config.tuning.mode == "full" else
+                        "text backbone all Linear; exact paths resolved only when loading the model")}
         directory.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(directory.parent / ("." + config.run.attempt_id + ".lock"), nonblocking=True):
             directory.mkdir(exist_ok=False)
@@ -250,7 +261,8 @@ def _select_gpu(config):
     # torch-free so it also applies in spawned data-parallel workers.
     from RL.allocator import configure_cuda_allocator
     from RL.config import CudaAllocator
-    allocator = configure_cuda_allocator(getattr(config.runtime, "cuda_allocator", CudaAllocator()))
+    allocator = configure_cuda_allocator(getattr(config.runtime, "cuda_allocator", CudaAllocator()),
+                                         host_offload=config.training.memory.host_offload)
     if gpu.startswith("MIG-"):
         from RL.devices import inspect_mig
         result = inspect_mig(gpu, check_idle=getattr(getattr(config, "preflight", None), "check_resources", True))
@@ -269,6 +281,10 @@ def _select_gpu(config):
 
 
 def _train(config, root, directory, base, parent, attempt):
+    from RL.config import is_full
+    if is_full(config):
+        from RL.full_training import execute
+        return execute(config, root, directory, base, parent, attempt)
     from RL.allocator import capture_allocator_warnings
     with capture_allocator_warnings() as allocator_warnings:
         return _train_impl(config, root, directory, base, parent, attempt,
@@ -408,6 +424,7 @@ def _train_impl(config, root, directory, base, parent, attempt, *, allocator_war
     memory_controller.logger.write(event="environment", phase="startup", global_step=None,
         global_step_semantics="not_restored_yet", inflight_step=None, step_attempt=None,
         committed=False, cuda_allocator=environment["cuda_allocator"],
+        **memory_controller.logger.memory(),
         determinism=environment["determinism"], physical_gpu=gpu.get("physical_gpu"),
         local_world_size=context.world_size if context else 1)
     torch.cuda.synchronize()
@@ -492,7 +509,11 @@ def _train_impl(config, root, directory, base, parent, attempt, *, allocator_war
             os.fsync(handle.fileno())
         if current["global_step"] % config.training.checkpoint_every_updates == 0 or current["global_step"] == stop:
             checkpoint = directory / "checkpoints" / f"step-{current['global_step']:06d}"
+            memory_controller.logger.write(event="checkpoint_before", phase="checkpoint",
+                global_step=current["global_step"], **memory_controller.logger.memory())
             save_checkpoint(model, optimizer, scheduler, current, checkpoint, contract, adapter_identity)
+            memory_controller.logger.write(event="checkpoint_after", phase="checkpoint",
+                global_step=current["global_step"], **memory_controller.logger.memory())
             # An eval probe does not consume training RNG, and is not part of the checkpoint payload.
         print(json.dumps({"attempt_id": config.run.attempt_id, **metrics}), flush=True)
     try:
@@ -510,6 +531,7 @@ def _train_impl(config, root, directory, base, parent, attempt, *, allocator_war
     finally:
         coverage.close()
         telemetry.close()
+        memory_controller.close()
     frozen_after = frozen_checksums(model) if config.preflight.verify_model_state else None
     if frozen_before != frozen_after:
         raise ValueError("Frozen base tensor checksums changed")
@@ -791,6 +813,8 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
         contract["parallel"] = execution_contract(config)
     from RL.topology import bind as bind_topology
     bind_topology(config, metadata, contract, directory)
+    from RL.config_migration import write_transition
+    write_transition(config, metadata, directory)
     optimizer, scheduler = optimizer_and_scheduler(model, optimizer_settings)
     if metadata is not None:
         if config.run.start.mode == "append_resume":
@@ -798,7 +822,8 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
             for key in set(metadata["contract"]) | set(contract):
                 if key not in allowed and metadata["contract"].get(key) != contract.get(key):
                     raise ValueError("Append checkpoint immutable training contract mismatch: " + key)
-        elif not resume_contract_matches(metadata["contract"], contract):
+        elif not __import__("RL.config_migration", fromlist=["contract_matches"]).contract_matches(
+                config, metadata["contract"], contract):
             write_json(directory / "grpo/resume-contract-diff.json", {
                 "differing_fields": [key for key in sorted(set(metadata["contract"]) | set(contract))
                                      if key != "source_fingerprint"
@@ -807,11 +832,13 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
                 "actual_contract_sha256": hash_json(contract)})
             raise ValueError("GRPO checkpoint contract differs; exact resume rejected")
         if streaming_mode:
-            state = restore_training(parent["path"], optimizer, scheduler, contract, groups=stream_groups)
+            state = restore_training(parent["path"], optimizer, scheduler, contract, groups=stream_groups, config=config)
         else:
             state = restore_checkpoint(parent["path"], optimizer, scheduler,
-                                       metadata["contract"] if config.run.start.mode == "append_resume" else contract,
+                                       metadata["contract"] if config.run.start.mode == "append_resume" or config.run.start.config_migration else contract,
                                        adapter_identity, verify=reader is not None or config.preflight.verify_checkpoint)
+        from RL.config_migration import apply_optimizer_config
+        apply_optimizer_config(config, optimizer, scheduler)
         if reader is not None:
             state.update(reader.cursor(state.get("consumed_execution_chunks", state["group_cursor"])))
     else:
@@ -843,6 +870,8 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
                    {p.relative_to(directory).as_posix(): p for p in (directory / "grpo").rglob("*") if p.is_file()})
     if config.runtime.topology_policy == "preserve_updates":
         extra_files["topology-transition.json"] = directory / "topology-transition.json"
+    if config.run.start.config_migration:
+        extra_files["config-transition.json"] = directory / "config-transition.json"
     # Metric prefix travels with a checkpoint so resumed reports are reconstructible
     # even if the source attempt is still incomplete after an interruption.
     if metadata:
@@ -876,10 +905,16 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
         if (current["global_step"] % config.training.checkpoint_every_updates == 0
                 or current["global_step"] == stop):
             live.emit("checkpoint")
+            if memory_controller:
+                memory_controller.logger.write(event="checkpoint_before", phase="checkpoint",
+                    global_step=current["global_step"], **memory_controller.logger.memory())
             save_checkpoint(model, optimizer, scheduler, current,
                             directory / "checkpoints" / f"step-{current['global_step']:06d}",
                             contract, adapter_identity, extra_files={**extra_files,
                             "grpo/metrics-prefix.jsonl": metrics_path})
+            if memory_controller:
+                memory_controller.logger.write(event="checkpoint_after", phase="checkpoint",
+                    global_step=current["global_step"], **memory_controller.logger.memory())
         print(json.dumps({"attempt_id": config.run.attempt_id, **metrics}, allow_nan=False), flush=True)
     try:
         with attention_context(config.training.memory.attention_policy):
@@ -898,6 +933,7 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
         coverage.close(); telemetry.close()
         if stream_groups is not None:
             stream_groups.close()
+        if memory_controller: memory_controller.close()
     frozen_after = frozen_checksums(model) if config.preflight.verify_model_state else None
     if frozen_before != frozen_after:
         raise ValueError("Frozen base changed during GRPO training")

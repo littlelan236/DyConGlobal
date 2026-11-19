@@ -2,6 +2,11 @@
 from RL.grpo.k3_diagnostics import K3_SCALARS
 
 SIGNAL_TAGS = {
+    "trainable_parameters": "full/trainable_parameters",
+    "global_grad_norm": "full/global_grad_norm",
+    "policy_changed": "full/policy_changed",
+    "microsteps": "full/microsteps",
+    "compute_seconds": "timing/compute_seconds",
     "loss": "loss/total", "policy_loss": "loss/policy",
     "positive_logprob_change": "learning/logprob/positive_advantage",
     "negative_logprob_change": "learning/logprob/negative_advantage",
@@ -58,6 +63,15 @@ for field in ("updates_per_second", "groups_per_second", "branches_per_second", 
 for field in ("queue_wait_seconds", "failed_attempt_seconds", "successful_attempt_seconds", "gradient_sync_seconds",
               "rank_critical_path_seconds", "checkpoint_seconds"):
     SIGNAL_TAGS[field] = "timing/" + field
+
+for field in ("cpu_rss_bytes", "cpu_hwm_bytes", "host_active_bytes", "host_allocated_bytes",
+              "host_active_peak_bytes", "host_allocated_peak_bytes", "host_native_cache_bytes",
+              "host_pool_reserved_bytes", "host_pool_idle_bytes", "host_pool_leased_bytes",
+              "host_pool_pending_bytes", "host_actual_budget_bytes",
+              "offload_selected_boundaries", "offload_retained_boundaries"):
+    SIGNAL_TAGS[field] = "memory/process/" + field
+# A host-global sample belongs to the recording rank; never sum across ranks.
+SIGNAL_TAGS["host_global_mem_available_bytes"] = "memory/host_global/mem_available_bytes"
 
 SIGNAL_SCALARS = tuple(SIGNAL_TAGS) + ("group_count", "branch_count", "token_count", "ratio_guard_enabled",
     "ratio_guard_threshold", "positive_branches", "negative_branches")

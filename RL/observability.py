@@ -210,7 +210,7 @@ def training_process(directory, attempt, live):
         if not item:
             continue
         cmd = item['command']
-        if 'lora-train' not in cmd or '--training-config' not in cmd:
+        if not {'lora-train', 'rl-train'}.intersection(cmd) or '--training-config' not in cmd:
             continue
         try:
             path = Path(cmd[cmd.index('--training-config') + 1])
@@ -354,7 +354,7 @@ def active(cfg, storage_root=None, recent=0):
                 continue
             item = process(entry.name)
             command = item['command'] if item else []
-            if 'lora-train' not in command or '--training-config' not in command:
+            if not {'lora-train', 'rl-train'}.intersection(command) or '--training-config' not in command:
                 continue
             try:
                 config_path = Path(command[command.index('--training-config')+1])

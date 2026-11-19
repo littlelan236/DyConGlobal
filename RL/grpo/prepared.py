@@ -403,6 +403,14 @@ def validate_config(reader, config, *, exact=True):
             value["algorithm"].pop("dataset_id")
             value["grpo"].pop("reference_cache", None)
     if actual != expected:
+        # A prior explicit revision may differ from immutable preparation settings.
+        # Bind the same prepared artifact to the verified source checkpoint rather
+        # than editing its manifest or accepting another selection.
+        if exact and config.run.start.mode == "resume":
+            from RL.config_migration import schedule_matches
+            source = read_json(Path(config.run.start.checkpoint) / "state.json")["contract"]
+            if source.get("prepared") == binding(reader.path) and schedule_matches(config, source["schedule"]):
+                return
         raise ValueError("Prepared schedule/dataset/advantage/model identity mismatch")
 
 

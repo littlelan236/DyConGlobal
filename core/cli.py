@@ -396,13 +396,13 @@ def main(argv=None):
     artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
     q = artifact_sub.add_parser("show")
     q.add_argument("run_id", nargs="?")
-    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-dataset", "rl-cache", "rl-replay", "rl-probability", "rl-probability-plan", "rl-prepared", "rl-reference", "rl-extension"], default="run")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-full-attempt", "rl-dataset", "rl-cache", "rl-replay", "rl-probability", "rl-probability-plan", "rl-prepared", "rl-reference", "rl-extension"], default="run")
     q.add_argument("--storage-root", type=Path)
     q.add_argument("--with-tensors", action="store_true")
     q.add_argument("--dataset-id")
     q = artifact_sub.add_parser("verify")
     q.add_argument("run_id", nargs="?")
-    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-dataset", "rl-cache", "rl-replay", "rl-probability", "rl-probability-plan", "rl-prepared", "rl-reference", "rl-extension"], default="run")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-full-attempt", "rl-dataset", "rl-cache", "rl-replay", "rl-probability", "rl-probability-plan", "rl-prepared", "rl-reference", "rl-extension"], default="run")
     q.add_argument("--storage-root", type=Path)
     q.add_argument("--with-tensors", action="store_true")
     q.add_argument("--dataset-id")
@@ -671,7 +671,7 @@ def main(argv=None):
     p.add_argument("--dataset-id", required=True)
     p.add_argument("--task-partitions", required=True, type=Path)
     a = parser.parse_args(argv)
-    if a.command in {"lora-export", "lora-train", "lora-prepare", "lora-status", "lora-tensorboard", "lora-advantages", "lora-memory", "lora-probe", "lora-probe-plot"} or (a.command == "artifact" and a.scope == "lora-attempt"):
+    if a.command in {"rl-gradient-compare", "rl-status", "rl-tensorboard", "rl-advantages", "rl-train", "rl-export", "rl-probe", "lora-export", "lora-train", "lora-prepare", "lora-status", "lora-tensorboard", "lora-advantages", "lora-memory", "lora-probe", "lora-probe-plot"} or (a.command == "artifact" and a.scope in {"lora-attempt", "rl-full-attempt"}):
         if a.set or a.analysis_run_id:
             parser.error("LoRA uses an independent training YAML; do not pass --set or --run-id")
         from RL.cli import execute as execute_lora

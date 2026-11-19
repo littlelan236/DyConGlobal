@@ -765,4 +765,4 @@ harbor:
   terminal_policy: terminalbench-live-v1
   task_python_index: https://mirrors.aliyun.com/pypi/simple/
   task_apt_mirror: https://mirrors.aliyun.com/ubuntu/
-  task_resource_cache: /data3/wangtianyi/terminalbench-resource-cache-v1/record.json
+  task_resource_cache: null

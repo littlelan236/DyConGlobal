@@ -35,6 +35,18 @@ def summarize_files(paths, *, rank=None, phase=None, limit=100):
         item['seconds_sum'] += row.get('seconds', 0.)
         for name in ('allocated', 'reserved'):
             item[f'peak_{name}_bytes_max'] = max(item[f'peak_{name}_bytes_max'], row.get(f'peak_{name}_bytes', 0))
+        for name in ('cpu_rss_bytes', 'cpu_hwm_bytes', 'host_active_bytes', 'host_allocated_bytes',
+                     'host_native_cache_bytes', 'host_pool_reserved_bytes', 'host_pool_idle_bytes',
+                     'host_pool_leased_bytes', 'host_pool_pending_bytes'):
+            value = row.get(name, row.get('offload_metrics', {}).get(name))
+            key_name = name + '_max'
+            previous = item.get(key_name)
+            item[key_name] = max(previous, value) if previous is not None and value is not None else (
+                value if previous is None else previous)
+        value = row.get('host_global_mem_available_bytes')
+        previous = item.get('host_global_mem_available_bytes_min')
+        item['host_global_mem_available_bytes_min'] = min(previous, value) if previous is not None and value is not None else (
+            value if previous is None else previous)
     for path in paths:
         if not path.is_file(): continue
         file_count += 1

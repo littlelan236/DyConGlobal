@@ -43,7 +43,7 @@ def source_world_size(metadata):
     record = metadata.get("physical_execution")
     if record is not None:
         return validate_record(record)["world_size"]
-    return metadata["contract"].get("parallel", {}).get("world_size", 1)
+    return (metadata["contract"].get("parallel") or {}).get("world_size", 1)
 
 
 def validate_resume(config, metadata):
@@ -61,10 +61,16 @@ def validate_resume(config, metadata):
     if config.run.start.mode != "resume":
         raise ValueError("Portable checkpoint migration supports resume only")
     previous = source_world_size(metadata)
-    if previous not in {2, 4, 8} or len(devices(config)) not in {2, 4, 8}:
-        raise ValueError("Portable resume supports 2/4/8 physical workers")
+    if previous not in {1, 2, 4, 8} or len(devices(config)) not in {2, 4, 8}:
+        raise ValueError("Portable resume supports 1/2/4/8 source and 2/4/8 target workers")
     if "streaming" not in contract and "prepared" not in contract:
         raise ValueError("Portable resume requires streaming or indexed prepared input")
+    if saved is None:
+        if previous != 1 and metadata.get("physical_execution") is None:
+            raise ValueError("Missing original single-worker logical contract")
+        if target.get("version") != "whole_group_sum_v1" or contract["input"].get("execution_plan"):
+            raise ValueError("Single-worker migration requires a whole-parent logical plan")
+        return
     if not isinstance(saved, dict) or not isinstance(target, dict):
         raise ValueError("Portable resume requires a distributed GRPO contract")
     # Keep the historical logical protocol, including two-pass vs whole-parent.
@@ -81,7 +87,10 @@ def bind(config, metadata, contract, directory):
     from core.io import hash_json, sha256, write_json
     if metadata is not None:
         validate_resume(config, metadata)
-        contract["parallel"] = copy.deepcopy(metadata["contract"]["parallel"])
+        if "parallel" in metadata["contract"]:
+            contract["parallel"] = copy.deepcopy(metadata["contract"]["parallel"])
+        else:
+            contract.pop("parallel", None)
     record = execution_record(config)
     validate_record(record)
     write_json(Path(directory) / "topology-transition.json", {
@@ -185,6 +194,8 @@ def restore_rank_rng(payload, metadata, parallel):
     """Only RNG-free forward/backward is admissible for cross-topology recovery."""
     from RL.training import restore_rng
     states = payload.get("rank_rng")
+    if source_world_size(metadata) == 1 and states is None:
+        states = [payload["rng"]]
     if not states or len(states) != source_world_size(metadata):
         raise ValueError("Checkpoint rank RNG topology mismatch")
     record = validate_record(parallel.physical_execution)

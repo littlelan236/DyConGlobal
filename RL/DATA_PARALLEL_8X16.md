@@ -1,5 +1,13 @@
 # Experimental GRPO 8-GPU distinct-parent 8x16
 
+Full-policy FSDP2 now consumes the same frozen two-pass plan through
+`dycon rl-train` on 2/4/8 ranks. It uses disabled prefix reuse, exact physical
+topology, branch-round collectives and the FSDP mean-reduction compensation;
+the LoRA-specific execution details below retain their original meaning.
+See [full-policy configuration](FULL_FSDP2.md#two-pass-8x16-execution).
+The shared `training.warmup_updates` option is independent of execution and
+parameter tuning mode.
+
 Physical-topology exception: `runtime.topology_policy: preserve_updates` can execute this same frozen two-pass plan on 2/4/8 GPUs, or split a whole-parent plan across eight GPUs without adopting two-pass semantics. Default exact mode retains the original restrictions below. See [topology switching](TOPOLOGY_SWITCH.md) for configuration, RNG restrictions and validation boundaries.
 
 The default `exact` implementation of this explicit opt-in mode uses the existing `dycon lora-train --training-config

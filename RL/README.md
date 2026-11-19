@@ -1,5 +1,8 @@
 # Qwen3.5-9B LoRA foundation
 
+Full language-policy FSDP2 RL is available through the common `dycon rl-train`
+service with schema 2. See [configuration, persistence and acceptance boundaries](FULL_FSDP2.md).
+
 GRPO checkpoint resume can explicitly opt into `runtime.topology_policy:
 preserve_updates` for bidirectional 2/4/8-GPU execution. It retains the source
 logical windows, weights, frozen advantages, anchor, optimizer/scheduler and
