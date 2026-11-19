@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from core.io import owned_path, read_json, sha256
+from hidden.layer_contract import public_arrays
 
 
 def artifact_bytes(root, row):
@@ -32,7 +33,7 @@ def artifact_bytes(root, row):
 
 def read_arrays(root, row):
     with np.load(io.BytesIO(artifact_bytes(root, row)), allow_pickle=False) as archive:
-        return {k: archive[k] for k in archive.files}
+        return public_arrays({k: archive[k] for k in archive.files}, row)
 
 
 def read_repaired_session(root, repair_id, session_id, *, verify_dependencies=True):
@@ -240,9 +241,10 @@ def iter_arrays_grouped(samples):
             digests = {row.get("sha256") for _, row in rows}
             if None in digests or len(digests) != 1:
                 raise ValueError("Loose hidden file has missing/conflicting SHA")
-            arrays = read_arrays(root, rows[0][1])
+            with np.load(io.BytesIO(artifact_bytes(root, rows[0][1])), allow_pickle=False) as archive:
+                arrays = {name: archive[name] for name in archive.files}
             for key, _row in rows:
-                yield key, arrays
+                yield key, public_arrays(arrays, _row)
             continue
         digests = {row["tensor_locator"].get("shard_sha256") for _, row in rows}
         path = owned_path(root, relative)
@@ -266,4 +268,4 @@ def iter_arrays_grouped(samples):
                         hashlib.sha256(data).hexdigest() != locator["member_sha256"]):
                     raise ValueError("Hidden tensor member checksum mismatch")
                 with np.load(io.BytesIO(data), allow_pickle=False) as arrays:
-                    yield key, {name: arrays[name] for name in arrays.files}
+                    yield key, public_arrays({name: arrays[name] for name in arrays.files}, row)

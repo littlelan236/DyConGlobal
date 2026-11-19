@@ -65,6 +65,30 @@ agent 终点 remainder，缺失处保持 null，不能解释为成功标签。�
 
 ## 检查和恢复
 
+### 公开层号、原生层号与 receipt 路径合同
+
+公开最后一层 `N-1` 表示 final norm；vLLM `tact_states` 对应的原生 site
+为 `N`。历史在线 NPZ 保留原生键（例如 `layer_32`），pointwise 审计通过
+模型 `config.json` 的 decoder 层数及既有 `native_layers` 映射验证完整集合，
+不接受缺层、额外层或凭猜测改名。派生 point row 的 `layer_binding` 记录公开键到
+存储键的映射、模型指纹和 model config 哈希；模型配置加入 source proofs。
+`hidden.artifacts.read_arrays` 和 grouped reader 按此绑定向消费者提供公开键，
+原始 NPZ、checksum、storage_shapes 和 storage_dtypes 保持不变。
+
+正式自动发布的 selection 绑定 `repair_contract` 版本；修正审计规则后生成新的
+repair/publication/index ID，不复用历史失败审计。旧 receipt 和数据仍保留，
+同版本同 selection 重试保持幂等。历史 publication 不因代码更新自动改变资格。
+
+repair receipt 的 `files`、`session_receipts` 以 capture run 根为基准；本地
+staging 副本对应 `hidden/capture-repairs/ID/payload/`，`dependencies` 对应冻结
+NAS capture run 根。正式 artifact verifier 按 staging 命名空间和 run/repair
+身份选定这些根，不按 receipt 所在目录重复拼接，不以文件是否存在猜测根。
+普通 receipt 仍按其原有相对目录合同校验。完整性失败不会被跳过。
+
+升级后先对已停止 run 执行 `dycon capture finalize RUN_ID`，核对其 summary、
+publication receipt 和 `dycon artifact verify RUN_ID`。活动 run 须等待生产者
+及清理流程退出；无需为修复发布合同重跑模型。
+
 ```bash
 .venvs/runner/bin/dycon capture status RUN_ID
 .venvs/runner/bin/dycon capture recover RUN_ID

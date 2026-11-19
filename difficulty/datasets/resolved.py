@@ -48,7 +48,7 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
     dataset_cfg = {'project_root': str(root)}
     if storage_root is not None:
         dataset_cfg['paths'] = {'artifact_roots': {'difficulty_dataset': str(storage_root)}}
-    if eligibility == 'accepted_terminal' and not (rollout_ids or rollout_list):
+    if eligibility in {'accepted_terminal', 'submitted'} and not (rollout_ids or rollout_list):
         raise ValueError('Accepted terminal datasets require an explicit accepted rollout selection')
     index_path = dataset_directory(dataset_cfg, index_id) / 'index.json'
     index = read_json(index_path)
@@ -113,15 +113,20 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
                 raise ValueError('Resolved source does not have its benchmark terminal state')
             steps = [i for i, message in enumerate(trajectory['messages']) if message.get('role') == 'assistant']
             steps_by_id[rid] = steps
-            evaluation = catalog['evaluations'][row['selected_evaluation_id']]
-            outcome = evaluation['outcomes'][rid]
-            report = owned_path(root, evaluation['report_path'])
-            digest_key, _ = subject_digest(row)
-            if (not eligible_evaluation(row, catalog, rid, eligibility)
-                    or outcome.get(digest_key) != row.get(digest_key)
-                    or sha256(report) != evaluation['report_sha256']):
-                raise ValueError('Resolved evaluation must bind the exact subject and report')
-            source_files[str(report)] = evaluation['report_sha256']
+            row_sources = {}
+            if eligibility != 'submitted':
+                evaluation = catalog['evaluations'][row['selected_evaluation_id']]
+                outcome = evaluation['outcomes'][rid]
+                report = owned_path(root, evaluation['report_path'])
+                digest_key, _ = subject_digest(row)
+                if (not eligible_evaluation(row, catalog, rid, eligibility)
+                        or outcome.get(digest_key) != row.get(digest_key)
+                        or sha256(report) != evaluation['report_sha256']):
+                    raise ValueError('Resolved evaluation must bind the exact subject and report')
+                source_files[str(report)] = evaluation['report_sha256']
+                row_sources[str(report)] = evaluation['report_sha256']
+            else:
+                row_sources[str(path)] = row['trajectory_sha256']
             if eligibility == 'positive_reward':
                 from difficulty.datasets.eligibility import verify_positive_report
                 verify_positive_report(row, read_json(report))
@@ -135,7 +140,7 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
                 'benchmark': row_benchmark(task), 'agent': row.get('agent', 'unknown'),
                 'canonical_exit_status': expected_terminal, 'canonical_valid_assistant_steps': len(steps),
                 'source_kind': 'online_close', 'hidden_root': index['hidden_root'],
-                'source_files': {str(report): evaluation['report_sha256']},
+                'source_files': row_sources,
                 'training_eligibility': eligibility,
                 'submission_status': 'submitted'}
             if workspace_subject:
@@ -156,7 +161,7 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
                 raise ValueError('Online index evaluation is stale; rebuild under a new index ID')
             if event['trajectory_sha256'] != row['trajectory_sha256']:
                 raise ValueError('Online event/canonical identity mismatch')
-            if eligibility in {'positive_reward', 'accepted_terminal'}:
+            if eligibility in {'positive_reward', 'accepted_terminal', 'submitted'}:
                 # Raw finalized suffix labels describe this actual endpoint;
                 # success-only online labels intentionally remain null.
                 event = {**event, 'labels': {
@@ -213,6 +218,9 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
                     total_steps=len(steps), step=step,
                     remaining_reasoning_tokens=event['labels']['remaining_reasoning_tokens'],
                     total_reasoning_tokens=total))
+            if eligibility == 'submitted':
+                sample['remaining_steps_to_success'] = None
+                sample['remaining_reasoning_tokens_to_success'] = None
             samples.append(sample)
         used = {s['rollout_id'] for s in samples}
         omitted = sorted(set(chosen) - used)
@@ -234,7 +242,9 @@ def build_resolved_selection(root, source_run, index_id, dataset_id, rollout_ids
             'endpoint': ('successful final submission of a harness-resolved canonical trajectory'
                          if eligibility == 'resolved_only' else ('actual terminal endpoint of an officially evaluated positive-reward canonical trajectory'
                          if eligibility == 'positive_reward' else
-                         'actual terminal endpoint of an officially evaluated accepted canonical trajectory'))})
+                         ('actual submission endpoint; benchmark success is not required'
+                          if eligibility == 'submitted' else
+                          'actual terminal endpoint of an officially evaluated accepted canonical trajectory')))})
         summary = {'dataset_id': dataset_id, 'resolved_rollouts': sum(row['resolved'] is True for row in chosen.values()),
             'eligible_rollouts': len(chosen), 'eligibility': eligibility,
             'rollouts': len(selected), 'tasks': len({r['task_key'] for r in selected}),

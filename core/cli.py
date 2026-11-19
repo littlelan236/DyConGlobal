@@ -291,6 +291,8 @@ def main(argv=None):
     q.add_argument("--format", choices=["json", "markdown"], default="markdown")
     q.add_argument("--output", type=Path, help="Optional new report file; refuses overwrite")
     q = run_sub.add_parser("compare", help="Compare physical exits and common final submitted task/repetition pairs")
+    q.add_argument("--resolved-source", choices=["settled", "solution"], default="settled",
+                   help="Resolved numerator: settled labels (default), or original solution results regardless of audit status; denominator is unchanged")
     q.add_argument("run_ids", nargs="+", metavar="RUN_ID")
     q.add_argument("--baseline", help="Reference run, which must occur in RUN_IDs")
     q.add_argument("--repetition", action="append", default=[], metavar="RUN_ID=REPETITION",
@@ -310,7 +312,7 @@ def main(argv=None):
                    help="Append actually executed repetitions, including failures, into remaining task slots, capped by destination repeat_count")
     q.add_argument("--dry-run", action="store_true", help="Preview mapping without changing run artifacts")
     run_sub.add_parser("list")
-    run_sub.add_parser("active-status", help="Query all live runs and their progress")
+    run_sub.add_parser("active-status", help="Query live rollout and RL progress")
     harness = sub.add_parser("harness", help="Prepare, run and inspect run-local harness results")
     harness_sub = harness.add_subparsers(dest="harness_command", required=True)
     q = harness_sub.add_parser("prepare")
@@ -434,7 +436,7 @@ def main(argv=None):
     q.add_argument("--rollout-id", action="append", default=[])
     q.add_argument("--rollout-list", type=Path)
     q.add_argument("--label-normalization", choices=["raw", "trajectory_fraction"], default="raw")
-    q.add_argument("--eligibility", choices=["resolved_only", "positive_reward", "accepted_terminal"], default="resolved_only")
+    q.add_argument("--eligibility", choices=["resolved_only", "positive_reward", "accepted_terminal", "submitted"], default="resolved_only")
     p = sub.add_parser("difficulty-split", help="Freeze a reusable dataset split")
     p.add_argument("dataset_id")
     p.add_argument("split_id")
@@ -565,6 +567,9 @@ def main(argv=None):
     p.add_argument("index_id")
     p.add_argument("predictor")
     p.add_argument("prediction_id")
+    p = sub.add_parser("difficulty-evaluate-drift", help="Evaluate one frozen predictor on composed published submission datasets")
+    p.add_argument("evaluation_id")
+    p.add_argument("--workflow-config", required=True, type=Path)
     p = sub.add_parser("difficulty-evaluate")
     p.add_argument("index_id")
     p.add_argument("predictions")
@@ -728,7 +733,7 @@ def main(argv=None):
                     raise ValueError(f"Duplicate repetition selector for run: {run_id}")
                 repetitions[run_id] = repetition
             result = compare_runs(Path(a.config).resolve().parent, a.run_ids, baseline=a.baseline,
-                                  repetitions=repetitions)
+                                  repetitions=repetitions, resolved_source=a.resolved_source)
             rendered = (format_markdown(result) if a.format == "markdown"
                         else json.dumps(result, ensure_ascii=False, indent=2))
             if a.output:
@@ -1378,7 +1383,7 @@ def main(argv=None):
         elif a.run_command == "list":
             result = list_runs(cfg["project_root"])
         elif a.run_command == "active-status":
-            result = active_run_statuses(cfg["project_root"])
+            result = active_run_statuses(cfg["project_root"], rl_config=cfg)
         elif a.run_command == "cancel":
             result = cancel_run(cfg["project_root"], a.run_id, a.reason)
         elif a.run_command == "wait":
@@ -1635,6 +1640,9 @@ def main(argv=None):
         from action.datasets.index import create_action_index
 
         result = str(create_action_index(cfg, a.shared_index_id, a.index_id))
+    elif a.command == "difficulty-evaluate-drift":
+        from difficulty.evaluation.drift import run
+        result = run(cfg, a.evaluation_id, workflow_config=a.workflow_config)
     elif a.command == "difficulty-predict":
         from difficulty.evaluation.predict import predict_hidden
         result = predict_hidden(cfg, a.index_id, a.predictor, a.prediction_id)

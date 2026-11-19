@@ -442,7 +442,41 @@ def update_run_status(run, stage, **values):
     return read_json(run / "status.json")
 
 
-def active_run_statuses(root):
+def _active_rl_progress(cfg):
+    from RL.observability import active
+
+    result = active(cfg, progress_only=True)
+    running, stale = [], []
+    for attempt in result["attempts"]:
+        liveness = attempt["observed_liveness"]
+        if liveness not in {"running", "not_running_with_stale_state"}:
+            continue
+        live = attempt.get("live") or {}
+        latest = attempt.get("latest_metric") or {}
+        row = {key: attempt.get(key) for key in (
+            "attempt_id", "status", "observed_liveness", "stage",
+            "last_completed_update", "max_updates", "execution_stop_target",
+            "inflight_update", "committed_consumed_groups", "planned_groups",
+            "source_freshness", "eta", "warnings",
+        )}
+        row.update(
+            storage_root=attempt["source"]["storage_root"],
+            pid=(attempt.get("process") or {}).get("pid"),
+            updated_at=live.get("process_alive_at") or latest.get("observed_at") or attempt.get("created_at"),
+            last_metric_at=latest.get("observed_at"),
+            stage_changed_at=live.get("last_stage_changed_at"),
+            completed_groups_in_update=live.get("completed_groups_in_update"),
+            latest_metric={key: latest[key] for key in (
+                "loss", "policy_loss", "k3_penalty_mean", "clip_fraction",
+                "preference_gap", "reward", "reward_mean", "mean_reward",
+            ) if latest.get(key) is not None},
+        )
+        (running if liveness == "running" else stale).append(row)
+    return {"rl_count": len(running), "rl_runs": running,
+            "rl_stale_runs": stale, "rl_errors": result["errors"]}
+
+
+def active_run_statuses(root, *, rl_config=None):
     """Return compact summaries for live and queued runs."""
     import subprocess
     root = Path(root).resolve()
@@ -474,4 +508,12 @@ def active_run_statuses(root):
                                "queued_at": qs.get("queued_at") or req.get("queued_at"), "updated_at": qs.get("at")})
             except (OSError, ValueError, TypeError):
                 continue
-    return {"schema_version": 2, "count": len(active), "runs": active, "queued_count": len(queued), "queued_runs": queued}
+    result = {"schema_version": 2, "count": len(active), "runs": active,
+              "queued_count": len(queued), "queued_runs": queued}
+    if rl_config is not None:
+        try:
+            result.update(_active_rl_progress(rl_config))
+        except (OSError, ValueError) as exc:
+            result.update(rl_count=None, rl_runs=[], rl_stale_runs=[],
+                          rl_errors=[{"error": str(exc)[:400]}])
+    return result

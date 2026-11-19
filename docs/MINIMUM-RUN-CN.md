@@ -110,7 +110,11 @@ Action 与 difficulty 产物位于项目级目录，使用显式来源 run 和�
 
 ```bash
 .venvs/runner/bin/dycon run compare RUN_A RUN_B --baseline RUN_A --format markdown
+# 按原始解题结果统计分子，保持共同已提交 task/repetition 分母
+.venvs/runner/bin/dycon run compare RUN_A RUN_B --resolved-source solution --format markdown
 ```
+
+`--resolved-source settled` 是默认口径，读取结算后的 `resolved`。`--resolved-source solution` 忽略 Review/VerifierError 等评测状态，按当前 `selected_evaluation_id` 绑定结果依次读取 `official_result.resolved`、`raw_outcome.resolved`、evaluation 的 `resolved`，最后兼容已有的行级布尔结果；只接受严格的 True/False，缺失结果仍为未知。两种口径都不排除 Review，不改变共同已提交轨迹的选择和分母。例如 100 条共同提交中，40 条有效通过、10 条 Review 的原始结果为 True，新口径通过率为 50/100，不是 40/90。JSON 的 `resolved_source` 和逐样本 `resolved_value_source` 标记所用口径，`settled_resolved` 保留原标签；Markdown 也显示口径。该选项只改变只读比较，不改写评测状态、证据或训练资格。
 
 比较只读被冻结的 run 计划、最终选择及评测证据，不启动模型或 harness。同样的 repetition 数默认按 task×repetition 配对；数量不同需显式指定每个 run 的 repetition。指标解释见[trajectory comparison](TRAJECTORY-COMPARISON-CN.md)。
 

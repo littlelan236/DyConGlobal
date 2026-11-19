@@ -59,6 +59,12 @@ def show(root,run_id):
 
 def verify(root,run_id):
     loaded=load_plan(root,run_id);run=loaded['run'];checked=0;receipts=0;external=0
+    digests = {}
+    def cached_digest(path):
+        key = str(Path(path).resolve())
+        if key not in digests:
+            digests[key] = sha256(path)
+        return digests[key]
     RunEvidence(root,run_id).verify()
     from rollout.consensus import consensus_options, validate_consensus_evidence
 
@@ -85,10 +91,20 @@ def verify(root,run_id):
     for path in sorted(run.rglob('*receipt.json')):
         value=read_json(path)
         if not isinstance(value,dict):raise ValueError('Invalid receipt '+str(path))
+        files_root, dependencies_root = receipt_roots(run, path, value, loaded['config'])
         for relative,digest in value.get('files',{}).items():
-            if sha256(owned_path(path.parent,relative))!=digest:
+            if sha256(owned_path(files_root,relative))!=digest:
                 raise ValueError('Receipt checksum mismatch: '+str(path)+' '+relative)
             checked+=1
+        if dependencies_root is not None:
+            for relative, expected in value.get('session_receipts', {}).items():
+                if sha256(owned_path(files_root, relative)) != expected:
+                    raise ValueError('Repair session receipt checksum mismatch: ' + relative)
+                checked += 1
+            for relative, expected in value.get('dependencies', {}).items():
+                if cached_digest(owned_path(dependencies_root, relative)) != expected:
+                    raise ValueError('Repair dependency checksum mismatch: ' + relative)
+                external += 1
         if value.get('source_root') and value.get('source_files'):
             for relative,digest in value['source_files'].items():
                 if sha256(owned_path(value['source_root'],relative))!=digest:
@@ -118,3 +134,23 @@ def verify(root,run_id):
                 checked+=1
     return {'run_id':run_id,'verified':True,'artifacts_checked':checked,'receipts_checked':receipts,
             'external_metadata_checked':external}
+
+
+def receipt_roots(run, path, value, cfg):
+    """Repair payload receipts use capture-run-relative paths, not receipt.parent.
+
+    Infer legacy scope only from its exact owned staging namespace and identity;
+    never select a root by trying whichever path happens to exist.
+    """
+    relative = path.relative_to(run)
+    parts = relative.parts
+    if (len(parts) >= 7 and parts[:2] == ('hidden', 'capture-repairs')
+            and parts[3:5] == ('payload', 'capture-repairs')):
+        repair_id = parts[2]
+        if (parts[5] != repair_id or value.get('repair_id') != repair_id
+                or value.get('run_id') != run.name):
+            raise ValueError('Repair receipt namespace identity mismatch')
+        payload = run.joinpath(*parts[:4])
+        nas = Path(cfg['paths']['nas_root']) / cfg['capture']['export']['root'] / run.name
+        return payload, nas
+    return path.parent, None
