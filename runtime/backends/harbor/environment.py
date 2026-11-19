@@ -49,6 +49,8 @@ class DyConDockerEnvironment(DockerEnvironment):
                   "dycon.sample": dycon["sample_key"], "dycon.attempt": dycon["attempt_id"],
                   "dycon.backend": "harbor"}
         labels["dycon.owner"] = dycon["owner_id"]
+        labels["dycon.trial"] = dycon["trial_name"]
+        self.ownership_labels = labels
         mounts = [{"type": "bind", "source": dycon["dependency_snapshot"],
                    "target": "/opt/dycon-wheels", "read_only": True}]
         task_mounts, task_environment = task_dependency_overlay(dycon, task_env_config.network_mode)
@@ -109,7 +111,7 @@ class DyConDockerEnvironment(DockerEnvironment):
         verifier = re.fullmatch(
             r"\(/tests/test\.sh\)\s*>\s*/logs/verifier/test-stdout\.txt\s+2>&1", command.strip())
         if self._affinity_cpus:
-            command = "exec /usr/bin/taskset -c " + self._affinity_cpus + " /bin/sh -c " + shlex.quote(command)
+            command = "exec /usr/bin/taskset -c " + self._affinity_cpus + " " + shlex.join(self._platform.exec_shell_args(command))
         if not verifier or self.dycon.get("benchmark") != "terminalbench_2_1":
             return await super().exec(command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user)
         receipt = {"schema_version": 1, "attempt_id": self.dycon["attempt_id"],
@@ -120,6 +122,13 @@ class DyConDockerEnvironment(DockerEnvironment):
             return result
         except BaseException as exc:
             receipt["exception_type"] = type(exc).__name__
+            # Harbor normally downloads logs only after exec returns. Recover
+            # partial output before its timeout/cancellation tears down the box.
+            try:
+                receipt["interrupted_logs"] = await asyncio.wait_for(
+                    self._recover_interrupted_verifier(), timeout=15)
+            except BaseException as recovery_error:
+                receipt["interrupted_logs"] = {"error": type(recovery_error).__name__}
             raise
         finally:
             write_json(Path(self.dycon["output"]) / "verifier-execution.json", receipt)
@@ -137,6 +146,28 @@ class DyConDockerEnvironment(DockerEnvironment):
             except Exception as exc:
                 write_json(Path(self.dycon["output"]) / "resource-final.json", {"error": type(exc).__name__})
 
+    async def _recover_interrupted_verifier(self):
+        """Bounded, non-scoring diagnostics; never read or synthesize rewards."""
+        output = Path(self.dycon["output"])
+        result = await super().exec(
+            "if [ -f /logs/verifier/test-stdout.txt ]; then "
+            "tail -c 262144 /logs/verifier/test-stdout.txt; fi",
+            user="root", timeout_sec=8)
+        log = output / "verifier-interrupted-stdout.txt"
+        log.write_text((result.stdout or "")[-262144:])
+        diagnostic = await super().exec(
+            "printf 'loadavg\\n'; cat /proc/loadavg; "
+            "printf 'processes (bounded, no arguments)\\n'; "
+            "ps -eo pid,ppid,stat,etimes,pcpu,comm,wchan:32 | head -80",
+            user="root", timeout_sec=5)
+        write_json(output / "verifier-interrupted-processes.json", {
+            "scope": "interrupted verifier diagnostic; not scoring evidence",
+            "return_code": diagnostic.return_code,
+            "stdout": (diagnostic.stdout or "")[-32768:],
+            "stderr": (diagnostic.stderr or "")[-2000:]})
+        return {"stdout_path": str(log), "maximum_bytes": 262144,
+                "partial": True, "return_code": result.return_code}
+
     async def start(self, force_build=False):
         if force_build:
             raise ValueError("Harbor force_build is disabled for admitted NAS images")
@@ -145,7 +176,10 @@ class DyConDockerEnvironment(DockerEnvironment):
         cid = await self.container_id()
         inspected = json.loads(await self._docker("inspect", cid))[0]
         config_digest = self.image["docker_id"]
-        if inspected["Image"] != config_digest or inspected["Config"]["Labels"].get("dycon.attempt") != self.dycon["attempt_id"]:
+        labels = inspected["Config"]["Labels"]
+        if (inspected["Image"] != config_digest
+                or any(labels.get(key) != value for key, value in self.ownership_labels.items())
+                or labels.get("com.docker.compose.project") != self.session_id):
             raise ValueError("Harbor container image/ownership identity changed")
         self._saved_networks = dict(inspected["NetworkSettings"]["Networks"])
         constraints = (self.dycon.get("task_preparation") or {}).get("python_constraints", [])
@@ -196,7 +230,7 @@ class DyConDockerEnvironment(DockerEnvironment):
             if result.return_code:
                 raise RuntimeError("Task system dependency preparation failed: " + (result.stderr or result.stdout)[-2000:])
             preparation_receipt["system_packages"] = result.stdout[-1500:]
-        write_json(self.environment_receipt, {"preparation": preparation_receipt, "container_id": cid, "ownership": self.dycon["ownership"],
+        write_json(self.environment_receipt, {"preparation": preparation_receipt, "container_id": cid, "compose_project": self.session_id, "ownership": self.dycon["ownership"],
                    "image": self.image, "network_phase": "setup", "implicit_pull": False,
                    "implicit_build": False, "resources": self.dycon["resources"],
                    "terminal_policy": self.dycon.get("terminal_policy"),

@@ -218,7 +218,8 @@ for line in sys.stdin:
     assert time.monotonic() - start < 4
 
 
-def test_new_context_freezes_terminal_policy_and_shared_condenser(cfg, tmp_path, monkeypatch):
+@pytest.mark.parametrize('long_checks', [True, False])
+def test_new_context_freezes_terminal_policy_and_shared_condenser(cfg, tmp_path, monkeypatch, long_checks):
     from catalog.harbor import REVISIONS, execution_context
     from core.io import sha256, write_json
     from runtime.agents.condenser import POLICY
@@ -226,6 +227,7 @@ def test_new_context_freezes_terminal_policy_and_shared_condenser(cfg, tmp_path,
     from runtime.backends.harbor import dependencies as worker_dependencies
     from runtime.images import harbor as images
     current = terminal_cfg(cfg)
+    current['execution']['preflight'] = {'long_checks': long_checks}
     current['project_root'] = str(tmp_path)
     current['benchmark']['snapshot_ref'] = 'snapshot.json'
     current['agent'].update(profile_ref='profile.json', condenser_max_size=12, condenser_keep_first=1)
@@ -238,11 +240,13 @@ def test_new_context_freezes_terminal_policy_and_shared_condenser(cfg, tmp_path,
     write_json(tmp_path / 'runtime.json', {})
     write_json(tmp_path / 'snapshot.json', {'benchmark': 'terminalbench_2_1',
         'revision': REVISIONS['terminalbench_2_1'], 'tasks': {}})
-    monkeypatch.setattr(dependencies, 'verify_snapshot', lambda path: {})
-    monkeypatch.setattr(worker_dependencies, 'verify_runtime', lambda path: {'worker_python': '/isolated/python',
+    depths = []
+    monkeypatch.setattr(dependencies, 'verify_snapshot', lambda path, **kwargs: depths.append(kwargs['deep']) or {})
+    monkeypatch.setattr(worker_dependencies, 'verify_runtime', lambda path, **kwargs: {'worker_python': '/isolated/python',
                                                                          'worker_protocol': 1})
     monkeypatch.setattr(images, 'references', lambda *args: {})
     frozen = execution_context(current, {})
+    assert depths == [long_checks]
     assert frozen['terminal_policy'] == TERMINAL_POLICY
     assert frozen['profile']['sandbox_user'] == 'agent'
     assert frozen['condenser'] == {'max_size': 12, 'keep_first': 1, 'runtime_configurable': True}

@@ -148,6 +148,10 @@ attempt，不能重放已执行工具动作。
 Terminal subject 是原容器状态上的 live_state proof，容器销毁后不能仅从日志还原
 进程/文件系统。禁止用 patch harness 事后 replay。正常零分保持 resolved=false；
 无合法评分/基础设施故障保持 null；保留 Harbor reward_valid 允许的超时后有效奖励。
+官方评分有效的 agent 超时以 `AgentTimeout` 结算；评分无效或待复核时仍按评测状态处理。
+推理循环在 canonical 轨迹中记为 `reasoning_loop`，其他生成限制记为 `LimitsExceeded`。
+启用 `execution.limits_retry` 时，两种退出均按新种子重试；原 attempt 的评测与
+capture 结果继续单独保存。严格 capture 仍约束最终接收的 attempt。
 
 无需任务镜像的代码回归：
 
@@ -175,7 +179,7 @@ canonical 消息。按工具调用 ID 去重，未选分支及 condenser 请求�
 
 ## Verifier 健康判定与历史控制组复核
 
-rollout 与 oracle/nop 共用 `harbor-verifier-health-v2` 判定。有限的 sub-one reward
+rollout 与 oracle/nop 共用 `harbor-verifier-health-v3` 判定。有限的 sub-one reward
 只有在绑定 trial 的日志证明测试正常完成时，才认定为有效负例。verifier 工具缺失、
 最终依赖下载失败、测试收集/fixture 失败或脚本异常归为 `VerifierError`：评测
 `status=infra_error`、`resolved=null`，attempt 的既有状态名为 `VerifierError`。
@@ -211,6 +215,12 @@ oracle 官方参考脚本非零退出也使该控制组结果不可用，原因�
 Terminal-Bench 的 verifier 会直接执行官方的 `curl`、`uvx`、Git 和 APT 命令，不能通过修改 verifier 来适配下载。`harbor resource-cache` 管理宿主机上的内容寻址 HTTP 缓存；公开网络任务容器通过只读 CA bundle 和代理环境变量接入，缓存私钥不会挂载进容器。缓存服务只缓存 GET/HEAD 和受限的 Git 下载请求，响应完整性由 SHA-256、大小和不可变索引校验。
 
 典型流程是 `runtime-prepare`、`scan`、`prepare`、`start`、`prefetch`、`seal`、`publish`，然后以 `--mode replay` 启动封存副本。回放模式对未命中请求直接返回错误并记录 `denied`，不会偷偷连接上游。每个 run 的配置记录缓存 descriptor、CA 哈希和封存哈希；任务容器中的原始 verifier 命令保持不变。
+
+现有封存目录可以直接用于 `resource-cache start --directory CACHE --mode record`。
+首次启动验证封存内容，将已有响应引入 `CACHE/record-store`。在线下载、APT 索引刷新和请求日志都写入这个可写目录。
+后续 record 启动会继续使用已有的录制结果。record 和 replay 共用目录指定的代理端口，切换时先停止旧服务。
+record run 的 `harbor.task_resource_cache` 必须指向 `CACHE/record.json`，replay 则使用 `CACHE/replay.json`。
+如需发布在线补录结果，可将 `CACHE/record-store` 传给 `publish --directory`，并按需通过 `--base-directory CACHE` 保留原有封存响应。
 
 下载补录使用 `resource-cache warm`，它从私有请求日志读取未完成请求，并保留原始
 User-Agent、Range、认证变体及 Git 下载 POST 内容。单纯用宿主机 curl 下载同一个
@@ -367,3 +377,106 @@ protein 修订 publication：`catalog/reference-solutions/protein-parent-compone
 普通模型 rollout 使用原始说明、输入和 verifier；`--reference-ref` 仅在显式检查修订 oracle 时使用。最终 task_preparation 包含全任务 CPU affinity、git 的 sshd 运行目录、MCMC 的 cmake、Cython 的 `planarity==0.6`。rootless CPU CFS quota 仍为 `unenforced_with_receipt`；CPU affinity 生效，内存限制未放宽。
 
 最终 9 个 control（含 SAM 重复）均清理完毕、无残留。回归测试 72 passed。来源回执及逐项结果存于 `temp/remaining8-delivery-20261117/`，其中 `RESULTS.md`、`results.json`、`final-run-patch.yaml` 可供复用与审计。代理仍有非阻塞的额外索引/地址探测 denied/error，全部最终任务在禁止回源模式下完成；不宣称任意未来版本请求均已缓存。
+
+
+## 全量 Oracle 回归修复（2026-11-17）
+
+CPU affinity 的统一 exec 包装保持锁定 Harbor 的 `self._platform.exec_shell_args`
+语义；Linux 主容器继续使用 Bash。无首行 shebang 的官方脚本依然按 Bash 回退解释，
+显式 `#!/bin/sh` 则继续由其声明的解释器执行；不修改官方任务脚本。
+
+官方 verifier 命令被异常或取消打断时，适配层在清理前最多用 15 秒回收 256 KiB
+stdout 尾部和有界进程诊断，保存 `verifier-interrupted-stdout.txt`、
+`verifier-interrupted-processes.json` 及 `verifier-execution.json`。
+这是部分诊断材料，不是奖励文件，不合成 reward，也不延长官方 verifier 的测试预算。
+原异常仍向上传播。
+
+`torch-tensor-parallelism` 在硬单 CPU affinity 下可复现 Gloo
+`destroy_process_group()` 挂起。经用户授权，对这个任务显式配置：
+
+```yaml
+harbor:
+  cpu_quota: unenforced_with_receipt
+  task_preparation:
+    '*': {cpu_affinity: true}
+    torch-tensor-parallelism: {cpu_affinity: false}
+```
+
+关闭 affinity 不等于实施官方 1 CPU 配额。当前 rootless Docker 未委派 CPU controller，
+该任务可以在宿主允许 CPU 集合上调度；偏离在资源收据中保留。其余内存、测试内容和
+900 秒 verifier 超时保持原任务值。此例外适用于相同配置下的 rollout/oracle/verifier。
+
+公开 PyTorch wheel/PEP 658 metadata 的 Cloudflare 响应可能带附带会话 Cookie。
+缓存仅在明确的 `download.pytorch.org` / `download-r2.pytorch.org` HTTPS wheel/metadata
+路径、GET/HEAD 200、无 query/请求认证/Cookie 时去除响应 Cookie，并写审计收据。
+不扩展到目录索引、403、其它域名或私有请求。资源正文、User-Agent、编码和请求体隔离保留。
+
+`tune-mjcf` 的原始 PGS 参考解存在速度阈值波动；原始记录不覆盖。可选独立参考解
+`catalog/reference-solutions/mjcf-implicitfast-20261117-v2/manifest.json`
+只修改 `solution/solve.sh` 生成的模型，加入 `integrator="implicitfast"`；
+原始物理属性、参考模型、task 配置和 verifier 均不修改。
+必须通过 `harbor controls --reference-ref ... --task-id tune-mjcf` 显式启用，
+默认 rollout 评分和默认官方 oracle 不替换为该参考解。
+
+
+Oracle 健康策略 v3 也检查 reward=1 的参考脚本退出回执。明确非零退出使控制组归为
+`oracle_reference_failed`，保留原始满分 reward；不可读退出回执归为 Review。
+普通 rollout/nop 的上游成功语义不变。v1 MuJoCo 修订发布曾因 BOM/CRLF 导致脚本失败，
+即使模型通过原始 verifier 也不应计为有效正控制；使用无 BOM/LF 的 v2 发布。
+历史 summary 不覆盖，可通过 `harbor controls-audit` 生成新策略复核回执。
+
+当前默认配置使用封存缓存
+`/data3/wangtianyi/terminalbench-full89-cache-sealed-20261117-v6/replay.json`。
+它完整保留 v4 的全部响应和元数据，追加 tmux 准备所需资源。旧 frozen run 不自动读取新的默认配置，
+需克隆并通过 `run revise-config --patch temp/full-oracle-repair-20261117/final-run-patch-v6.yaml`
+显式冻结后再创建新 control ID。
+
+
+`git-multibranch` 的官方镜像未安装参考脚本末尾使用的 tmux。v3 退出码审计发现其
+历史 raw_reward=1 但 reference exit=127；统一 `task_preparation.git-multibranch`
+在既有 sshd 目录准备之外增加 `system_packages: [tmux]`，不改官方参考脚本。
+
+增量补录可能刷新 APT 可变索引。对已经验证的缓存，应通过显式基线保留已有响应：
+
+```bash
+.venvs/runner/bin/dycon harbor resource-cache publish --directory WORKING_CACHE \
+  --base-directory SEALED_BASELINE --destination NEW_SEALED_CACHE \
+  --endpoint http://HOST:PORT
+```
+
+基线必须封存并通过完整性校验；其全部请求键/响应元数据优先保留，只从补录源添加
+新请求键。冲突不会覆盖原已签名索引，真实字节和签名均保持原样；发布溯源写入
+`publication.json` 并纳入 seal 验证。默认不传基线时保留原发布行为。
+
+
+### TerminalBench capture 请求角色资格核验（2026-11-18）
+
+`dycon harbor qualify RUN_ID --profile-id PROFILE_ID` 从冻结 TerminalBench/OpenHands run 的真实请求、ACP 事件和工具调用/返回证据发布不可变的 driver profile；`--profile-ref` 可指定兼容目标。该接口复用现有资格核验，保留 SkillsBench 的历史 profile 契约。Harbor 请求必须带有 `backend_family: harbor`，凭据绑定冻结 worker protocol/runtime；禁止直接继承 SkillsBench 凭据。
+
+本次 `tb21-openhands-request-roles-20261118-v3` 来源于 `tb21-gpu-smoke-20261115-v2` 的30次请求、26对实际工具调用/返回。capture run 应通过 `run revise-config --replan` 冻结新 profile，而不是修改已发布 profile 或 run 证据。`images.load_workers` 现在允许1至12，使用已有 NAS 镜像加载槽位机制。
+
+
+## 长耗时检查开关
+
+Harbor/OpenHands 的 Terminal-Bench 2.1 和 SWE-bench Pro V2 均读取冻结的
+`execution.preflight.long_checks`；缺省为 `true`。创建/克隆 run 的 context 校验、
+`run start/resume` 及独立 `dycon harbor preflight RUN_ID` 使用相同策略。
+
+| 检查 | false 时的行为 | 保留的校验 |
+| --- | --- | --- |
+| 模型内容 SHA | 跳过已登记模型的逐文件内容哈希 | 登记身份、清单、路径、存在性、大小；model.verify_identity 独立控制 |
+| 任务包内容 SHA | 跳过逐文件内容哈希 | 冻结 manifest 哈希、文件集合、路径、存在性、模式；旧任务清单未声明文件大小 |
+| OCI 深度 SHA | 镜像准入和导入均传递 deep=false | NAS manifest 哈希、冻结镜像身份、完整 descriptor 图、路径、存在性、大小及 Docker identity |
+| OpenHands 依赖快照 SHA | 跳过逐文件内容哈希 | receipt、profile 绑定 manifest SHA、路径、存在性、大小、文件清单和运行契约 |
+| Harbor worker 发布物 SHA | 跳过依赖文件及解释器内容哈希 | 发布版本/revision、receipt、路径、存在性、大小和可执行解释器 |
+| 全量容器环境审计 | 不创建逐任务审计容器，不运行依赖安装、ACP、model-channel 或 network 探针 | 启动的 profile/context/CPU quota 契约；正式 attempt 仍执行实际环境安装与探针 |
+
+`validation/harbor-preflight.json` 的 `checks` 逐项记录状态、耗时和跳过原因
+`execution.preflight.long_checks=false`。模型启动回执同时来自
+`validation/startup-model-identity.json`。跳过的检查不记为 verified，空的
+`tasks` 审计列表不代表 89 项环境均已通过审计。
+
+开关只降低启动前审计深度。正式 worker 的任务包完整校验、依赖安装验证、
+Compose 镜像身份、环境探针、官方 verifier、capture、清理与取消保持执行；
+oracle/nop 等显式控制组也不跳过实际执行。GPU/端口资源准入仍在 serving 启动路径执行。
+运行中的 Python 进程不会热加载修改；当前 run 已执行的预检证据不改写。

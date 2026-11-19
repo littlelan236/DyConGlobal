@@ -100,7 +100,7 @@ class NativeSWEOpenHandsAdapter(BackendAdapter):
             raw = output / "openhands/canonical.traj.json"
             write_json(raw, canonical)
             if capture_client and capture:
-                from runtime.agents.skillsbench import drain_capture
+                from runtime.serving.capture_lifecycle import drain_capture
                 drain_capture(cfg, output, capture_client, capture["session_id"])
                 capture_client.prepare(capture["session_id"], raw)
             from rollout.artifacts import import_rollout

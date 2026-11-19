@@ -107,8 +107,8 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
         if tasks_file or partition is not None:
             raise ValueError('A frozen clone accepts only an optional --task-id subset')
         source = load_plan(root, identifier(from_run))
-        if operation != 'rollout' or source['plan']['operation'] != operation:
-            raise ValueError('Frozen cloning requires a rollout source and destination')
+        if operation not in {'rollout', 'harness'} or source['plan']['operation'] != operation:
+            raise ValueError('Frozen cloning requires matching rollout or harness operations')
         if repeat_count != source['plan']['repeat_count']:
             raise ValueError('Frozen cloning retains source repeat_count')
         allowed = {'serving.gpus', 'serving.tensor_parallel_size', 'serving.base_url',
@@ -121,6 +121,10 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
                    'webarena.environment_pool_ref', 'webarena.browser_image_ref',
                    'parallel.estimator_ref',
                    'paths.artifact_roots', 'model.verify_identity'}
+        if operation == 'harness':
+            allowed = {'environment.wheelhouse', 'environment.variables',
+                       'execution.harness_workers', 'execution.infrastructure_retry_limit',
+                       'timeouts.evaluation_seconds'}
         cfg = copy.deepcopy(source['config'])
         frozen_selection = copy.deepcopy(cfg.pop('selection'))
         cfg.pop('selection_sha256', None)

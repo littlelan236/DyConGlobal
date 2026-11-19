@@ -64,7 +64,7 @@ export-queue drain 两段 `capture.finalize_seconds`，另加 30 秒响应余量
 
 ## 长耗时检查开关
 
-`execution.preflight.long_checks: false` 只控制 SkillsBench/OpenHands 的共享启动预检，其他 backend 保持原有行为。关闭后跳过：
+`execution.preflight.long_checks: false` 控制 SkillsBench/OpenHands 与 Harbor/OpenHands（Terminal-Bench 2.1、SWE-bench Pro V2）的启动预检，其他 backend 保持原有行为。Harbor 的对应层级与回执见 [Terminal-Bench 文档](TERMINALBENCH-CN.md#长耗时检查开关)。关闭后跳过：
 
 - 已登记模型文件的内容 SHA；仍核验登记身份、清单结构、文件路径、存在性和大小。`model.verify_identity` 继续保持独立含义。
 - 任务包所有文件的内容 SHA；仍核验冻结清单身份、声明路径及存在性、文件模式、任务能力和输出声明。

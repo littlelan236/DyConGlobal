@@ -111,8 +111,22 @@ def install_harness_adapter(cfg: dict, factory: ContainerFactory, rows: list[dic
     }
     original_script = TestSpec.eval_script
     script_details = {}
+    wrapped_scripts = {}
     original_get = sb_python.requests.get
     original_requirements = sb_python.get_requirements_by_commit
+    from swebench.harness import grading
+    from benchmark_evaluation.swebench_test_identity import parser_for, contract
+    saved_parsers = {}
+    for repo in {row['repo'] for row in rows if contract(row)}:
+        relevant = {row['instance_id']: row for row in rows if row['repo'] == repo}
+        original_parser = grading.MAP_REPO_TO_PARSER[repo]
+        bound = {iid: parser_for(row, original_parser) for iid, row in relevant.items()}
+        if any(parser is not original_parser for parser in bound.values()):
+            saved_parsers[repo] = original_parser
+            def dispatch(log, spec, parsers=bound, fallback=original_parser):
+                return parsers.get(spec.instance_id, fallback)(log, spec)
+            dispatch._dycon_identity_base = original_parser
+            grading.MAP_REPO_TO_PARSER[repo] = dispatch
 
     # Requirements metadata is advisory for the project's locked prebuilt SWE
     # images. If all remote candidates fail, use the image environment and keep
@@ -156,11 +170,18 @@ def install_harness_adapter(cfg: dict, factory: ContainerFactory, rows: list[dic
     sb_python.requests.get = cached_get
     sb_python.get_requirements_by_commit = cached_requirements
     def wrapped_script(spec):
-        from benchmark_evaluation.swebench_receipts import get_test_command
+        from benchmark_evaluation.swebench_receipts import get_test_command, get_pytest_binding
 
         raw = original_script.fget(spec)
+        cached = wrapped_scripts.get(spec.instance_id)
+        if cached and cached[0] == raw:
+            return cached[1]
         script_details[spec.instance_id] = get_test_command(raw)
-        return factory.policy_for(instances[spec.instance_id]).wrap_eval(raw)
+        wrapped = factory.policy_for(instances[spec.instance_id]).wrap_eval(raw)
+        if script_details[spec.instance_id] is not None:
+            script_details[spec.instance_id]["pytest_binding"] = get_pytest_binding(wrapped)
+        wrapped_scripts[spec.instance_id] = (raw, wrapped)
+        return wrapped
 
     TestSpec.eval_script = property(wrapped_script)
 
@@ -168,20 +189,37 @@ def install_harness_adapter(cfg: dict, factory: ContainerFactory, rows: list[dic
         import hashlib
 
         started = time.monotonic()
-        out = factory.execute(container, "source /opt/miniconda3/bin/activate && " + cmd, timeout)
+        out, execution_error = None, None
+        try:
+            out = factory.execute(container, "source /opt/miniconda3/bin/activate && " + cmd, timeout)
+        except BaseException as exc:
+            execution_error = exc
         # 137 proves SIGKILL, not whether timeout/OOM/cancellation caused it.
-        timed_out = out["returncode"] == 124
+        timed_out = out is not None and out["returncode"] == 124
         iid = container.instance["instance_id"]
         command_info = script_details.get(iid)
+        binding = command_info.get("pytest_binding") if command_info else None
+        receipt_files, receipt_error = [], None
+        if binding:
+            try:
+                receipt_files = factory.collect_eval_receipts(container, binding)
+            except Exception as exc:
+                receipt_error = type(exc).__name__ + ": " + str(exc)
         write_json(container.context.output_dir / "eval-execution.json", {
-            "schema_version": 1, "instance_id": iid,
+            "schema_version": 2, "instance_id": iid,
+            "receipt_protocol": 2 if binding else None,
+            "receipt_files": receipt_files, "receipt_error": receipt_error,
+            "container_id": container.id, "run_id": container.context.run_id,
             "evaluation_task_id": container.context.attempt_id,
-            "command": cmd, "returncode": out["returncode"], "timed_out": timed_out,
+            "command": cmd, "returncode": out["returncode"] if out else None, "timed_out": timed_out,
+            "execution_error": str(execution_error) if execution_error else None,
             "elapsed_seconds": time.monotonic() - started,
-            "output_sha256": hashlib.sha256(out["output"].encode()).hexdigest(),
+            "output_sha256": hashlib.sha256(out["output"].encode()).hexdigest() if out else None,
             "test_command_sha256": command_info["command_sha256"] if command_info else None,
-            "test_command": command_info, "at": now(),
+            "test_command": command_info, "pytest_binding": command_info.get("pytest_binding") if command_info else None, "at": now(),
         })
+        if execution_error is not None:
+            raise execution_error
         if not timed_out:
             try:
                 factory.probe(container, "environment-after-eval.json")
@@ -197,6 +235,7 @@ def install_harness_adapter(cfg: dict, factory: ContainerFactory, rows: list[dic
             setattr(official, key, value)
         sb_python.requests.get = original_get
         sb_python.get_requirements_by_commit = original_requirements
+        grading.MAP_REPO_TO_PARSER.update(saved_parsers)
         TestSpec.eval_script = original_script
 
     official.dycon_restore = restore

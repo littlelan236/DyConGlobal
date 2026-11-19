@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import shlex
+import sys
 from pathlib import Path
 
 from harbor.agents.base import BaseAgent
@@ -113,25 +114,35 @@ class DyConOpenHandsACP(BaseAgent):
                 session_cwd=self.cwd if self.policy else None)
         finally:
             write_json(Path(self.dycon["output"]) / "openhands/acp-events.json", result)
-            # Terminal services are part of live scoring; only stop owned ACP/relay.
-            # Legacy sandboxes retain their user-scoped cleanup before Pro capture.
-            if self.policy:
-                stopped = await environment.exec(
-                    "/opt/dycon-openhands/bin/python /opt/dycon-model-socket.py --stop /tmp/dycon-acp-processes.json",
-                    user="root", timeout_sec=30)
-                write_json(Path(self.dycon["output"]) / "acp-cleanup.json",
-                           {"return_code": stopped.return_code, "stdout": stopped.stdout})
-                if stopped.return_code:
-                    raise ValueError("Terminal ACP/relay cleanup was not confirmed")
-                if self.dycon.get("probe"):
-                    await environment.download_file("/root/dycon-model-channel-probe.json",
-                        Path(self.dycon["output"]) / "model-channel-probe.json")
-            else:
-                await environment.exec("pkill -TERM -u agent 2>/dev/null || true", user="root", timeout_sec=10)
-            if cfg["benchmark"]["backend"] == "swebench_pro_v2" and not self.dycon.get("probe"):
-                capture = await environment.exec("cd " + shlex.quote(self.cwd) +
-                    " && git add -A && git diff --cached --binary > /tmp/dycon-model.patch && git reset -q",
-                    user="root", timeout_sec=60)
-                if capture.return_code:
-                    raise ValueError("Pro model.patch capture failed")
-                await environment.download_file("/tmp/dycon-model.patch", Path(self.dycon["output"]) / "model.patch")
+            primary = sys.exception()
+            try:
+                await self._finish_agent(environment, cfg)
+            except Exception as cleanup_exc:
+                write_json(Path(self.dycon["output"]) / "acp-cleanup-error.json",
+                           {"error_type": type(cleanup_exc).__name__, "error": str(cleanup_exc)[-1000:]})
+                if primary is None:
+                    raise
+
+    async def _finish_agent(self, environment, cfg):
+        # Terminal services are part of live scoring; only stop owned ACP/relay.
+        # Legacy sandboxes retain their user-scoped cleanup before Pro capture.
+        if self.policy:
+            stopped = await environment.exec(
+                "/opt/dycon-openhands/bin/python /opt/dycon-model-socket.py --stop /tmp/dycon-acp-processes.json",
+                user="root", timeout_sec=30)
+            write_json(Path(self.dycon["output"]) / "acp-cleanup.json",
+                       {"return_code": stopped.return_code, "stdout": stopped.stdout})
+            if stopped.return_code:
+                raise ValueError("Terminal ACP/relay cleanup was not confirmed")
+            if self.dycon.get("probe"):
+                await environment.download_file("/root/dycon-model-channel-probe.json",
+                    Path(self.dycon["output"]) / "model-channel-probe.json")
+        else:
+            await environment.exec("pkill -TERM -u agent 2>/dev/null || true", user="root", timeout_sec=10)
+        if cfg["benchmark"]["backend"] == "swebench_pro_v2" and not self.dycon.get("probe"):
+            capture = await environment.exec("cd " + shlex.quote(self.cwd) +
+                " && git add -A && git diff --cached --binary > /tmp/dycon-model.patch && git reset -q",
+                user="root", timeout_sec=60)
+            if capture.return_code:
+                raise ValueError("Pro model.patch capture failed")
+            await environment.download_file("/tmp/dycon-model.patch", Path(self.dycon["output"]) / "model.patch")

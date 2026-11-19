@@ -129,7 +129,6 @@ def test_real_http_record_and_strict_replay_without_upstream(tmp_path):
         assert warmed['completed'] == 2 and warmed['uncovered'] == 0
         assert fetch('optional').returncode == 22
         resource_cache.stop(directory)
-        upstream.shutdown(); upstream.server_close()
         # HTTPS cache hits must work before DNS or an upstream TLS connection exists.
         import hashlib
         tls_body = b'HTTPS replay without upstream'
@@ -140,7 +139,33 @@ def test_real_http_record_and_strict_replay_without_upstream(tmp_path):
         store.publish(request_key('GET', tls_url, tls_headers), file,
                       hashlib.sha256(tls_body).hexdigest(), len(tls_body), 200,
                       [('content-length', str(len(tls_body)))])
-        resource_cache.seal(directory)
+        baseline = resource_cache.seal(directory)
+        seal_digest = sha256(directory / 'seal.json')
+        record_descriptor = directory / 'record.json'
+        record = resource_cache.start(root, directory, 'record')
+        assert record['store_directory'] == str(directory / 'record-store')
+        assert resource_cache.validate_descriptor(record_descriptor)['mode'] == 'record'
+        assert resource_cache.status(directory)['entries'] == baseline['entries']
+        requests_before = Upstream.requests
+        assert fetch('resource').stdout == first.stdout
+        assert Upstream.requests == requests_before
+        added = fetch('added-after-seal')
+        assert added.returncode == 0
+        assert Upstream.requests == requests_before + 1
+        assert fetch('added-after-seal').stdout == added.stdout
+        assert Upstream.requests == requests_before + 1
+        assert fetch('dists/stable/InRelease').stdout != new_index.stdout
+        assert resource_cache.status(directory)['entries'] == baseline['entries'] + 1
+        assert sha256(directory / 'seal.json') == seal_digest
+        assert resource_cache.verify(directory)['entries'] == baseline['entries']
+        resource_cache.stop(directory)
+        resource_cache.start(root, directory, 'record')
+        requests_before = Upstream.requests
+        assert fetch('added-after-seal').stdout == added.stdout
+        assert Upstream.requests == requests_before
+        resource_cache.stop(directory)
+        upstream.shutdown()
+        upstream.server_close()
         resource_cache.start(root, directory, 'replay')
         replay = fetch('resource'); assert replay.returncode == 0, replay.stderr
         assert replay.stdout == first.stdout
@@ -180,6 +205,7 @@ def test_real_http_record_and_strict_replay_without_upstream(tmp_path):
             '--cacert', item['ca_bundle'], tls_url], capture_output=True, timeout=15)
         assert tls.returncode == 0, tls.stderr
         assert tls.stdout == tls_body
+        assert fetch('added-after-seal').returncode == 22
     finally:
         resource_cache.stop(directory)
         upstream.server_close()
@@ -313,3 +339,59 @@ def test_head_and_if_range_preserve_representation_and_validators(tmp_path):
     assert store.replay_entry('GET', url, {'range': 'bytes=1-3', 'if-range': '"v2"'})[2] is None
     assert store.replay_entry('GET', url, {'range': 'bytes=1-3', 'if-range': 'W/"v1"'})[2] is None
     assert store.replay_entry('GET', url, {'range': 'bytes=1-3,6-8'})[1] is None
+
+
+@pytest.mark.parametrize("url,headers,status,expected", [
+    ("https://download-r2.pytorch.org/whl/cpu/torch-2.7.0%2Bcpu-cp313.whl.metadata", {}, 200, True),
+    ("https://download.pytorch.org/whl/cpu/torch.whl", {}, 200, True),
+    ("https://download-r2.pytorch.org/whl/cpu/torch.whl.metadata", {"cookie": "session"}, 200, False),
+    ("https://download-r2.pytorch.org/whl/cpu/torch.whl", {"authorization": "secret"}, 200, False),
+    ("https://download-r2.pytorch.org/whl/cpu/torch.whl?token=x", {}, 200, False),
+    ("https://download-r2.pytorch.org/whl/cpu/pytest-json-ctrf/", {}, 200, False),
+    ("https://download-r2.pytorch.org/whl/cpu/torch.whl", {}, 403, False),
+    ("https://other.invalid/whl/cpu/torch.whl", {}, 200, False),
+])
+def test_public_pytorch_artifact_cookie_exception_is_narrow(url, headers, status, expected):
+    from runtime.backends.harbor.resource_store import public_stateless_response
+    assert public_stateless_response("GET", url, headers, status) is expected
+
+
+
+def test_publish_preserves_sealed_baseline_when_record_indexes_refresh(tmp_path, monkeypatch):
+    import hashlib
+    from core.io import write_json
+    def seed(path, responses):
+        store = Store(path)
+        write_json(path / 'record.json', {'mode': 'record'})
+        for key, payload in responses.items():
+            f = store.writer(); f.write(payload)
+            store.publish(key, f, hashlib.sha256(payload).hexdigest(), len(payload), 200, [])
+        return store
+    base = tmp_path / 'base'; source = tmp_path / 'source'; dest = tmp_path / 'published'
+    seed(base, {'release': b'original signed release', 'old-package': b'old package'})
+    resource_cache.seal(base)
+    seed(source, {'release': b'new upstream signed release', 'tmux': b'newly captured package'})
+    def prepare(root, directory, endpoint):
+        directory.mkdir()
+        write_json(directory / 'record.json', {'mode': 'record'})
+    monkeypatch.setattr(resource_cache, 'prepare', prepare)
+    result = resource_cache.publish(tmp_path, source, dest, 'http://cache.invalid:1234', base_directory=base)
+    assert result['entries'] == 3
+    assert resource_cache.verify(dest)['verified']
+    store = Store(dest)
+    entry = store.get('release')
+    assert (dest / 'blobs' / entry['sha256']).read_bytes() == b'original signed release'
+    assert store.get('tmux') is not None
+    assert store.get('old-package') is not None
+    provenance = json.loads((dest / 'publication.json').read_text())
+    assert provenance['retained_conflict_keys'] == ['release']
+    (dest / 'publication.json').write_text('{}')
+    with pytest.raises(ValueError, match='provenance receipt changed'):
+        resource_cache.verify(dest)
+
+
+def test_publish_baseline_must_be_sealed(tmp_path):
+    source = tmp_path / 'source'; source.mkdir()
+    with pytest.raises(ValueError, match='sealed cache'):
+        resource_cache.publish(tmp_path, source, tmp_path / 'output', None, base_directory=source)
+    assert not (tmp_path / 'output').exists()

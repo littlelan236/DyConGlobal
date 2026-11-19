@@ -116,7 +116,7 @@ def _legacy_environment_overrides(cfg: dict, instance: dict) -> dict:
     return overrides
 
 
-def environment_overrides(cfg: dict, instance: dict) -> dict:
+def _profile_environment_overrides(cfg: dict, instance: dict) -> dict:
     """Apply an explicitly frozen, content-bound environment control profile.
 
     Legacy runs have no profile variables and retain their existing policy.
@@ -154,7 +154,32 @@ def environment_overrides(cfg: dict, instance: dict) -> dict:
     # silently replacing a separately declared user pin.
     pins[repo] = retained + requirements
     overrides['repo_pins'] = pins
-    if row.get('variables'):
+    if row.get('variables') or row.get('resources'):
         overrides['variables'] = {
-            **variables, **overrides.get('variables', {}), **row['variables']}
+            **variables, **overrides.get('variables', {}), **row.get('variables', {})}
+        if row.get('resources'):
+            import json
+            overrides['variables']['DYCON_SWEBENCH_RESOURCES'] = json.dumps(row['resources'], sort_keys=True)
+    return overrides
+
+
+def environment_overrides(cfg: dict, instance: dict) -> dict:
+    """Frozen task configuration takes precedence over compatibility defaults."""
+    overrides = _profile_environment_overrides(cfg, instance)
+    explicit = instance.get("environment_overrides") or {}
+    for key, value in explicit.items():
+        if key == "variables":
+            overrides[key] = {**cfg["environment"].get(key, {}),
+                              **overrides.get(key, {}), **value}
+        elif key == "repo_pins":
+            from packaging.requirements import Requirement
+            from packaging.utils import canonicalize_name
+            pins = {**cfg["environment"].get(key, {}), **overrides.get(key, {})}
+            for repo, specs in value.items():
+                names = {canonicalize_name(Requirement(spec).name) for spec in specs}
+                pins[repo] = [spec for spec in pins.get(repo, [])
+                              if canonicalize_name(Requirement(spec).name) not in names] + specs
+            overrides[key] = pins
+        else:
+            overrides[key] = value
     return overrides

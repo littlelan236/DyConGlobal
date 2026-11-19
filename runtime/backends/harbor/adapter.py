@@ -14,6 +14,42 @@ from core.io import hash_json, now, read_json, sha256, write_json
 from runtime.backends.base import BackendAdapter
 from runtime.backends.contracts import PreflightFacts
 from runtime.backends.harbor.task_dependencies import apt_mirror_warmup_required
+from runtime.serving.capture_lifecycle import drain_capture
+from runtime.serving.diagnostics import sanitize_error_text
+
+
+def _agent_exit_status(limit_reason, result, *, terminalbench):
+    if limit_reason in {"reasoning_loop", "native_reasoning_loop",
+                        "repeated_reasoning_action_loop", "all_parallel_branches_reasoning_loop"}:
+        return "reasoning_loop"
+    if limit_reason:
+        return "LimitsExceeded"
+    exception = result.get("exception_info")
+    if terminalbench and (exception or {}).get("exception_type") == "AgentTimeoutError":
+        return "AgentTimeout"
+    return "OpenHandsError" if exception else "AgentCompleted"
+
+
+def _attempt_status(cfg, terminal, *, evaluation_status=None, capture_incomplete=False):
+    from rollout.retry import disposition
+
+    # A rejected generation belongs to this attempt. Its score and capture are
+    # still recorded, but the scheduler must be able to select a fresh seed.
+    if disposition(cfg, terminal) == "retry_pending":
+        return terminal
+    if capture_incomplete:
+        return "CaptureError"
+    if evaluation_status in {"unknown", "Review"}:
+        return "Review"
+    if evaluation_status == "infra_error":
+        return "VerifierError"
+    return terminal
+
+
+def _capture_error(stage, exc):
+    diagnostic = getattr(exc, "capture_diagnostic", None)
+    return {"stage": stage, "error_type": type(exc).__name__,
+            "summary": sanitize_error_text(exc), "request": diagnostic}
 
 
 def worker_request(cfg, run_id, factory, task, binding, output, operation="execute", channel_dir=None):
@@ -26,6 +62,9 @@ def worker_request(cfg, run_id, factory, task, binding, output, operation="execu
     cpu_mode = "limit" if factory.cpu_supported else "ignore"
     owner = {"run": run_id, "task": task["instance_id"], "sample": binding["sample_key"],
              "attempt": binding["attempt_id"]}
+    trial_name = "dycon-hb-" + hash_json({
+        "ownership": owner, "operation": operation, "factory_owner": factory.owner_id,
+    })[:32]
     task_python_index = cfg.get("harbor", {}).get("task_python_index")
     task_apt_mirror = cfg.get("harbor", {}).get("task_apt_mirror")
     apt_warmup = apt_mirror_warmup_required(task) if task_apt_mirror else False
@@ -57,7 +96,7 @@ def worker_request(cfg, run_id, factory, task, binding, output, operation="execu
     preparation = cfg.get("harbor", {}).get("task_preparation") or {}
     task_preparation = {**preparation.get("*", {}), **preparation.get(task["instance_id"], {})}
     env = {"task_preparation": task_preparation, "task_resource_cache": resource_cache, "images": factory.images, "owner_id": factory.owner_id, "benchmark": cfg["benchmark"]["backend"],
-           "ownership": owner, "run_id": run_id, "terminal_policy": policy,
+           "ownership": owner, "run_id": run_id, "trial_name": trial_name, "terminal_policy": policy,
            "sample_key": binding["sample_key"], "attempt_id": binding["attempt_id"],
            "output": str(output), "dependency_snapshot": profile["dependency_snapshot"],
            "task_python_index": task_python_index, "task_wheelhouse": task_wheelhouse,
@@ -68,7 +107,7 @@ def worker_request(cfg, run_id, factory, task, binding, output, operation="execu
                          "memory_enforcement": "limit", "cpu_deviation": cpu_mode == "ignore"}}
     agent_seconds = task["instance"]["metadata"].get("agent", {}).get("timeout_sec", 600)
     return {"operation": operation, "task": task, "binding": binding, "attempt_id": binding["attempt_id"],
-            "output": str(output), "environment": env,
+            "output": str(output), "environment": env, "trial_name": trial_name,
             "disable_verifier": operation == "probe" or (operation == "execute" and task["benchmark"] == "swebench_pro_v2"),
             "driver": {"cfg": cfg, "ownership": owner, "output": str(output), "agent_environment": {},
                        "agent_seconds": agent_seconds if policy else max(1, agent_seconds - 60),
@@ -119,35 +158,91 @@ class HarborAdapter(BackendAdapter):
         pass
 
     def preflight(self, context, tasks):
-        super().preflight(context, tasks)
-        from catalog.harbor import verify_package
+        from catalog.harbor import verify_package, execution_context
+        from core.preflight import long_checks_enabled, timed_check
+        from runtime.agents.dependencies import verify_snapshot
+        from runtime.backends.harbor.dependencies import verify_runtime
+
+        cfg = context.cfg
+        deep = long_checks_enabled(cfg)
+        checks = {}
         blockers, receipts = [], []
-        for key, task in tasks.items():
-            verify_package(task)
-            output = self.run_path(context) / "validation/harbor" / key / uuid.uuid4().hex[:12]
-            output.mkdir(parents=True, exist_ok=True)
-            binding = {"run_id": context.run_id, "task_key": key, "sample_key": "preflight-" + key[:16],
-                       "attempt_id": "preflight", "profile_sha256": context.cfg["execution_context"]["profile_sha256"]}
-            try:
-                response, bridge = run_worker_bridge(context, task, binding, output, {}, "probe")
-                if response["result"].get("exception_info") or bridge.records:
-                    raise ValueError("Harbor environment probe failed: " +
-                                     str(response["result"].get("exception_info", {}).get("exception_message")) +
-                                     "; see " + str(output / "worker-response.json"))
-                network = output / "network-probe.json"
-                if task["benchmark"] == "swebench_pro_v2":
-                    if not network.is_file() or not read_json(network).get("verified"):
-                        raise ValueError("Harbor offline network policy probe failed; see " + str(network))
-                from runtime.backends.harbor.policy import execution_policy
-                if execution_policy(context.cfg):
-                    channel = output / "model-channel-probe.json"
-                    if not channel.is_file() or not read_json(channel).get("verified"):
-                        raise ValueError("Terminal model-channel probe failed; see " + str(channel))
-                receipts.append({"task_key": key, "path": str(output / "worker-response.json"),
-                                 "sha256": sha256(output / "worker-response.json"), "model_requests": 0})
-            except Exception as exc:
-                blockers.append(task["instance_id"] + ": " + str(exc))
-        record = {"passed": not blockers, "blockers": blockers, "tasks": receipts}
+        run = self.run_path(context)
+        record = {"passed": False, "blockers": blockers, "tasks": receipts,
+                  "long_checks": deep, "checks": checks}
+        try:
+            # Reconstruct the frozen context with shallow checks first. This
+            # retains profile/runtime/manifest identity and capability validation.
+            with timed_check(checks, "execution_context"):
+                actual = execution_context({**cfg, "execution": {
+                    **cfg.get("execution", {}), "preflight": {"long_checks": False}}}, tasks)
+                if actual != cfg["execution_context"]:
+                    raise ValueError("Harbor execution context differs from frozen identity")
+            model_receipt = run / "validation/startup-model-identity.json"
+            if model_receipt.exists():
+                record["runner_model_identity"] = read_json(model_receipt)
+                if "model_sha" in record["runner_model_identity"]:
+                    checks["model_sha"] = record["runner_model_identity"]["model_sha"]
+            if "model_sha" not in checks:
+                from core.model_identity import model_identity_verification_enabled, verify_model
+                if model_identity_verification_enabled(cfg):
+                    with timed_check(checks, "model_sha", enabled=deep):
+                        verify_model(cfg, deep=deep)
+                else:
+                    checks["model_sha"] = {"status": "skipped", "reason": "model.verify_identity=false",
+                                           "seconds": 0.0, "calls": 0}
+            with timed_check(checks, "cpu_quota"):
+                if (not context.factory.cpu_supported and cfg["harbor"]["cpu_quota"] == "strict"
+                        and any(t["instance"]["metadata"]["environment"].get("cpus", 1) > 0
+                                for t in tasks.values())):
+                    raise ValueError("Rootless Docker cannot enforce Harbor task CPU quota")
+            with timed_check(checks, "task_package_sha", enabled=deep):
+                for task in tasks.values():
+                    verify_package(task, deep=deep)
+            with timed_check(checks, "dependency_snapshot_sha", enabled=deep):
+                verify_snapshot(cfg["execution_context"]["profile"]["dependency_snapshot"], deep=deep)
+            with timed_check(checks, "worker_runtime_sha", enabled=deep):
+                verify_runtime((Path(cfg["project_root"]) / cfg["harbor"]["runtime_ref"]).parent, deep=deep)
+            with timed_check(checks, "oci_deep_verify", enabled=deep):
+                context.factory.lock_images([t["instance"] for t in tasks.values()], deep=deep)
+        except Exception as exc:
+            blockers.append("Harbor startup validation failed: " + str(exc))
+            write_json(run / "validation/harbor-preflight.json", record)
+            return PreflightFacts(False, tuple(blockers), record)
+        if not deep:
+            with timed_check(checks, "environment_audit", enabled=False):
+                pass
+            record["passed"] = True
+            write_json(run / "validation/harbor-preflight.json", record)
+            return PreflightFacts(True, (), record)
+        with timed_check(checks, "environment_audit"):
+            for key, task in tasks.items():
+                output = self.run_path(context) / "validation/harbor" / key / uuid.uuid4().hex[:12]
+                output.mkdir(parents=True, exist_ok=True)
+                binding = {"run_id": context.run_id, "task_key": key, "sample_key": "preflight-" + key[:16],
+                           "attempt_id": "preflight", "profile_sha256": context.cfg["execution_context"]["profile_sha256"]}
+                try:
+                    response, bridge = run_worker_bridge(context, task, binding, output, {}, "probe")
+                    if response["result"].get("exception_info") or bridge.records:
+                        raise ValueError("Harbor environment probe failed: " +
+                                         str(response["result"].get("exception_info", {}).get("exception_message")) +
+                                         "; see " + str(output / "worker-response.json"))
+                    network = output / "network-probe.json"
+                    if task["benchmark"] == "swebench_pro_v2":
+                        if not network.is_file() or not read_json(network).get("verified"):
+                            raise ValueError("Harbor offline network policy probe failed; see " + str(network))
+                    from runtime.backends.harbor.policy import execution_policy
+                    if execution_policy(context.cfg):
+                        channel = output / "model-channel-probe.json"
+                        if not channel.is_file() or not read_json(channel).get("verified"):
+                            raise ValueError("Terminal model-channel probe failed; see " + str(channel))
+                    receipts.append({"task_key": key, "path": str(output / "worker-response.json"),
+                                     "sha256": sha256(output / "worker-response.json"), "model_requests": 0})
+                except Exception as exc:
+                    blockers.append(task["instance_id"] + ": " + str(exc))
+        # Keep a failed audit distinct from a verified or intentionally skipped audit.
+        checks["environment_audit"]["status"] = "failed" if blockers else "verified"
+        record["passed"] = not blockers
         write_json(self.run_path(context) / "validation/harbor-preflight.json", record)
         return PreflightFacts(not blockers, tuple(blockers), record)
 
@@ -181,9 +276,8 @@ class HarborAdapter(BackendAdapter):
                 write_json(output / "capture-session.json", {"session_id": capture["session_id"], "metadata": capture})
             response, bridge = run_worker_bridge(context, task, binding, output, attempt.runtime, capture=capture)
             result = response["result"]
-            terminal = "AgentCompleted" if not result.get("exception_info") else "OpenHandsError"
-            if bridge.limit_reason:
-                terminal = "reasoning_loop" if bridge.limit_reason == "reasoning_loop" else "LimitsExceeded"
+            terminalbench = task["benchmark"] == "terminalbench_2_1"
+            terminal = _agent_exit_status(bridge.limit_reason, result, terminalbench=terminalbench)
             if counts_recorded(self.run_path(context)):
                 record_agent_outcome(self.run_path(context), output, attempt.context, terminal)
             events_path = output / "openhands/acp-events.json"
@@ -203,14 +297,18 @@ class HarborAdapter(BackendAdapter):
             raw = output / "openhands/canonical.traj.json"
             write_json(raw, canonical)
             capture_errors = []
+            capture_diagnostics = []
             if capture_client:
+                capture_stage = "drain"
                 try:
-                    # Reuse the existing shared native drain; it owns no agent loop.
-                    from runtime.agents.skillsbench import drain_capture
-                    drain_capture(cfg, output, capture_client, capture["session_id"])
-                    capture_client.prepare(capture["session_id"], raw)
+                    drain_capture(cfg, output, capture_client, capture["session_id"], capture_diagnostics,
+                                  serving_endpoint=attempt.runtime.get("serving_worker_endpoint"))
+                    capture_stage = "prepare"
+                    prepared = capture_client.prepare(capture["session_id"], raw)
+                    write_json(output / "capture-prepare.json", prepared)
                 except Exception as exc:
-                    capture_errors.append(str(exc))
+                    capture_errors.append(capture_stage + ": " + type(exc).__name__)
+                    capture_diagnostics.append(_capture_error(capture_stage, exc))
                     capture_status = "partial"
             rid = import_rollout(cfg["project_root"], {"source": str(raw), "task": task, "run_id": context.run_id,
                 "attempt_id": binding["attempt_id"], "purposes": ["baseline"], "agent": "openhands",
@@ -222,24 +320,31 @@ class HarborAdapter(BackendAdapter):
                     subject=spec["subject_sha256"], evidence_dir=output, operation="execute")
                 report = output / "evaluation-report.json"
                 write_json(report, outcome)
+            if capture_client and not capture_errors:
+                try:
+                    finalized = capture_client.finalize(capture["session_id"], rollout_id=rid,
+                        trajectory_path=str(raw), trajectory_sha256=sha256(raw),
+                        model_fingerprint=cfg["model"]["fingerprint"])
+                    capture_status = finalized["capture_status"]
+                    write_json(output / "capture-finalization.json", finalized)
+                    if capture_status not in {"complete", "not_exported"}:
+                        capture_errors.append("finalize returned " + capture_status)
+                except Exception as exc:
+                    capture_errors.append("finalize: " + type(exc).__name__)
+                    capture_diagnostics.append(_capture_error("finalize", exc))
+                    capture_status = "partial"
+            if capture_diagnostics:
+                write_json(output / "capture-errors.json", capture_diagnostics)
+            if outcome is not None:
                 from application.execution.evidence import RunEvidence
                 evaluation_id = "hb-" + hash_json({"binding": binding, "report": sha256(report)})[:24]
                 RunEvidence(cfg["project_root"], context.run_id).record_evaluation(evaluation_id, report,
-                    {rid: {**outcome, "subject_sha256": spec["subject_sha256"]}},
+                    {rid: {**outcome, "subject_sha256": spec["subject_sha256"],
+                           "status": "Review" if outcome["status"] == "unknown" else outcome["status"]}},
                     {"benchmark": task["benchmark"], "live_verifier": True, "trial_id": response["trial_id"]})
-            if capture_client:
-                try:
-                    capture_status = capture_client.finalize(capture["session_id"], rollout_id=rid,
-                        trajectory_path=str(raw), trajectory_sha256=sha256(raw),
-                        model_fingerprint=cfg["model"]["fingerprint"])["capture_status"]
-                except Exception as exc:
-                    capture_errors.append(str(exc))
-                    capture_status = "partial"
-            status = terminal
-            if outcome and outcome["resolved"] is None:
-                status = "VerifierError"
-            if capture_errors and cfg["capture"]["failure_policy"] == "block_rollout":
-                status = "CaptureError"
+            status = _attempt_status(cfg, terminal,
+                evaluation_status=outcome["status"] if outcome else None,
+                capture_incomplete=bool(capture_errors) and cfg["capture"]["failure_policy"] == "block_rollout")
             calls = [c for r in bridge.records for c in r.get("model_calls", [])]
             known = [c.get("usage") or {} for c in calls if c.get("usage_known")]
             final = {**attempt.sample.as_dict(), **attempt.context, "rollout_id": rid, "exit_status": status,
@@ -253,11 +358,11 @@ class HarborAdapter(BackendAdapter):
             write_json(output / "attempt.json", final)
             return final
         except Exception as exc:
-            if capture_client:
+            if capture_client and not (output / "capture-drain.json").exists():
                 try:
                     capture_client.stop(capture["session_id"])
-                except Exception:
-                    pass
+                except Exception as capture_exc:
+                    write_json(output / "capture-error-stop.json", _capture_error("failed_attempt_stop", capture_exc))
             status = "Cancelled" if isinstance(exc, Cancelled) else "EnvironmentSetupFailed"
             final = {**attempt.sample.as_dict(), **attempt.context, "exit_status": status,
                      "disposition": disposition(cfg, status), "error": str(exc), "resolved": None,
@@ -284,6 +389,13 @@ class HarborAdapter(BackendAdapter):
             raise ValueError("Recovered Harbor trajectory binds another physical attempt")
         if not (output / "cleanup.json").is_file() or not read_json(output / "cleanup.json")["complete"]:
             raise ValueError("Harbor cleanup was not confirmed; reconcile owned resources first")
+        terminal = canonical["info"]["exit_status"]
+        evaluation = evidence["evaluations"].get(row.get("selected_evaluation_id"), {}).get("outcomes", {}).get(rid)
+        evaluation_status = None
+        if task["benchmark"] == "terminalbench_2_1" and row["resolved"] is None:
+            evaluation_status = row.get("evaluation_status")
+            if evaluation_status not in {"Review", "unknown", "infra_error"}:
+                evaluation_status = "infra_error"
         capture_path = output / "capture-session.json"
         capture_status = "disabled"
         if capture_path.exists():
@@ -292,15 +404,14 @@ class HarborAdapter(BackendAdapter):
             capture_status = _recover_capture_status(cfg, Path(cfg["project_root"]) / "runs" / run_id,
                                                       session, rid, row["trajectory_sha256"])
             if capture_status != "complete":
-                return {**sample.as_dict(), **context, "rollout_id": rid, "exit_status": "CaptureError",
-                        "disposition": "blocked", "capture_status": "pending_recovery", "resolved": row["resolved"]}
-        terminal = canonical["info"]["exit_status"]
-        status = terminal
-        if task["benchmark"] == "terminalbench_2_1" and row["resolved"] is None:
-            status = "VerifierError"
+                capture_status = "pending_recovery"
+        status = _attempt_status(cfg, terminal, evaluation_status=evaluation_status,
+                                 capture_incomplete=capture_status == "pending_recovery")
         result = {**sample.as_dict(), **context, "rollout_id": rid, "exit_status": status,
-                  "agent_exit_status": terminal, "disposition": disposition(cfg, status),
-                  "capture_status": capture_status, "resolved": row["resolved"], "recovered_without_generation": True,
+                  "agent_exit_status": terminal,
+                  "disposition": "blocked" if status == "CaptureError" else disposition(cfg, status),
+                  "capture_status": capture_status, "resolved": row["resolved"], "evaluation_outcome": evaluation,
+                  "recovered_without_generation": True,
                   "started_at": read_json(output / "attempt-started.json")["started_at"], "finished_at": now()}
         write_json(output / "attempt.json", result)
         return result

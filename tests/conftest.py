@@ -30,6 +30,7 @@ def cfg(tmp_path):
         raw["harbor"].pop("task_apt_mirror", None)
         raw["harbor"].pop("task_resource_cache", None)
         raw["harbor"].pop("task_resource_cache_sha256", None)
+        raw["harbor"].pop("task_preparation", None)  # Host Terminal-Bench policy is not a generic SWE fixture.
     raw["hidden"]["adapter"] = "vllm_eager"
     raw["hidden"]["vllm"] = {"gpus": [0], "tensor_parallel_size": 1}
     raw["steering"].update(enabled=False, payload=None)

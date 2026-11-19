@@ -203,7 +203,7 @@ class Agent(Strict):
 
 
 class Images(Strict):
-    load_workers: int = Field(gt=0, le=8)
+    load_workers: int = Field(gt=0, le=12)
     reserve_bytes: int = Field(ge=0)
     expansion_factor: float = Field(ge=1)
     minimum_load_bytes: int = Field(ge=0)

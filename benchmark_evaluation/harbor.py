@@ -39,9 +39,20 @@ def trial_outcome(result, *, task, attempt_id, subject=None, evidence_dir=None, 
             from benchmark_evaluation.harbor_verifier import POLICY
             audit = {"schema_version": 1, "policy": POLICY, "classification": "VerifierError",
                      "reason_code": "upstream_verifier_error", "sources": []}
+        elif valid_reward and resolved and operation == "oracle" and evidence_dir is not None:
+            from benchmark_evaluation.harbor_verifier import audit_verifier
+            reference_audit = audit_verifier(evidence_dir, attempt_id, operation=operation, reference_only=True,
+                                             trial_name=result.get("trial_name"))
+            if reference_audit["classification"] == "VerifierError":
+                audit = reference_audit
+                status, resolved = "infra_error", None
+            elif reference_audit["classification"] == "Review":
+                audit = reference_audit
+                status, resolved = "unknown", None
         elif valid_reward and not resolved and evidence_dir is not None:
             from benchmark_evaluation.harbor_verifier import audit_verifier
-            audit = audit_verifier(evidence_dir, attempt_id, operation=operation)
+            audit = audit_verifier(evidence_dir, attempt_id, operation=operation,
+                                   trial_name=result.get("trial_name"))
             if audit["classification"] == "VerifierError":
                 status, resolved = "infra_error", None
             elif audit["classification"] == "Review":

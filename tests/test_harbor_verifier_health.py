@@ -47,6 +47,24 @@ def test_assertion_failures_are_valid_zero(tmp_path):
     assert row["resolved"] is False
 
 
+def test_verifier_reads_bound_trial_name_instead_of_attempt_directory(tmp_path):
+    attempt_id = "rep-000-attempt-000"
+    trial_name = "dycon-hb-unique"
+    for name, log in ((trial_name, "================ 1 failed in 0.10s ================\n"),
+                      (attempt_id, "error: Failed to download python: operation timed out\n")):
+        logs = tmp_path / "trials" / name / "verifier"
+        logs.mkdir(parents=True)
+        (logs / "test-stdout.txt").write_text(log)
+    (tmp_path / "verifier-execution.json").write_text(json.dumps(
+        {"schema_version": 1, "attempt_id": attempt_id, "return_code": 1}))
+    row = trial_outcome({"trial_name": trial_name, "verifier_result": {"rewards": {"reward": 0}},
+                         "reward_valid": True},
+                        task={"benchmark": "terminalbench_2_1", "instance_id": "test"},
+                        attempt_id=attempt_id, evidence_dir=tmp_path, operation="execute")
+    assert row["status"] == "completed" and row["resolved"] is False
+    assert row["verifier_audit"]["sources"][0]["path"] == f"trials/{trial_name}/verifier/test-stdout.txt"
+
+
 def test_recovered_download_warning_does_not_invalidate_tests(tmp_path):
     row = outcome(tmp_path, 'curl: (60) SSL certificate problem\nretry succeeded\n'
                   '=================== 1 failed in 0.10s ===================\n')
@@ -73,7 +91,7 @@ def test_oracle_rejected_despite_completed_assertions(tmp_path, reference_exit, 
     assert row["resolved"] is None
     assert row["exit_status"] == "VerifierError"
     audit = row["verifier_audit"]
-    assert audit["policy"] == "harbor-verifier-health-v2"
+    assert audit["policy"] == "harbor-verifier-health-v3"
     assert audit["reason_code"] == "oracle_reference_rejected"
     assert audit["evidence"]["verifier_health"]["reason_code"] == "tests_completed"
     assert audit["sources"]
@@ -228,6 +246,7 @@ from runtime.backends.harbor.environment import DyConDockerEnvironment
 async def main():
     root = Path(sys.argv[1])
     env = DyConDockerEnvironment.__new__(DyConDockerEnvironment)
+    env._affinity_cpus = None
     env.dycon = {'benchmark': 'terminalbench_2_1', 'attempt_id': 'a', 'output': str(root)}
     official = build_execution_command('/tests/test.sh',
         stdout_path='/logs/verifier/test-stdout.txt', task_os=TaskOS.LINUX)
@@ -236,7 +255,7 @@ async def main():
         parent.return_value = SimpleNamespace(return_code=2)
         await env.exec(official)
         assert json.loads(receipt.read_text())['return_code'] == 2
-        parent.assert_awaited_once()
+        assert sum(call.args == (official,) for call in parent.await_args_list) == 1
         receipt.unlink()
         await env.exec('echo model command')
         assert not receipt.exists()
@@ -261,3 +280,32 @@ asyncio.run(main())
                             text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'verifier_execution_receipt_verified' in result.stdout
+
+
+@pytest.mark.parametrize("reference_exit", [1, 2, 134])
+def test_full_reward_does_not_hide_failed_oracle_reference(tmp_path, reference_exit):
+    row = outcome(tmp_path, '=================== 4 passed in 0.10s ===================\n',
+                  operation="oracle", exit_code=reference_exit, reward=1)
+    assert row["status"] == "infra_error"
+    assert row["resolved"] is None
+    assert row["raw_reward"] == {"reward": 1}
+    assert row["verifier_audit"]["reason_code"] == "oracle_reference_failed"
+    assert row["verifier_audit"]["evidence"]["return_code"] == reference_exit
+
+
+def test_full_reward_oracle_unreadable_exit_is_review(tmp_path):
+    row = outcome(tmp_path, None, operation="oracle", exit_code="invalid", reward=1)
+    assert row["status"] == "unknown"
+    assert row["resolved"] is None
+    assert row["verifier_audit"]["reason_code"] == "invalid_oracle_exit_receipt"
+
+
+@pytest.mark.parametrize("operation", ["execute", "nop"])
+def test_full_reward_model_or_nop_does_not_use_oracle_exit(tmp_path, operation):
+    row = outcome(tmp_path, None, operation=operation, exit_code=1, reward=1)
+    assert row["resolved"] is True
+
+
+def test_explicit_zero_reference_exit_keeps_full_reward(tmp_path):
+    row = outcome(tmp_path, None, operation="oracle", exit_code=0, reward=1)
+    assert row["resolved"] is True

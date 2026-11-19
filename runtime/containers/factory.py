@@ -14,12 +14,7 @@ import requests
 from core.io import hash_json, now, sha256, write_json
 from runtime.containers.policy import EnvironmentPolicy, parse_probe, probe_command
 from runtime.containers.dependencies import setup_error
-
-
-class EnvironmentSetupFailed(RuntimeError):
-    def __init__(self, message, *, dependency_failure=None):
-        super().__init__(message)
-        self.dependency_failure = dependency_failure
+from runtime.containers.errors import EnvironmentSetupFailed
 
 
 class ContainerCorrupted(RuntimeError):
@@ -221,6 +216,8 @@ class ContainerFactory:
         self.lock_images([instance])
         volumes = ({e["wheelhouse"]: {"bind": "/opt/dycon-wheels", "mode": "ro"}}
                    if e["wheelhouse"] else {})
+        from runtime.containers.resources import mounts
+        volumes.update(mounts(policy.cfg))
         profile = self.cfg.get("execution_context", {}).get("profile", {})
         dependency_snapshot = profile.get("dependency_snapshot")
         if dependency_snapshot:
@@ -350,6 +347,41 @@ class ContainerFactory:
             "returncode": code,
             "exception_info": "CommandTimeout" if code == 124 else "CommandKilled" if code == 137 else "",
         }
+
+    def collect_eval_receipts(self, container, binding):
+        """Copy bounded regular JSON evidence before removing the task container."""
+        import hashlib
+        import io
+        import re
+        import tarfile
+        token = binding.get("token", "")
+        if not re.fullmatch(r"[0-9a-f]{32}", token):
+            raise ValueError("Invalid eval receipt token")
+        stream, _ = container.raw.get_archive("/tmp/dycon-pytest-" + token)
+        archive = bytearray()
+        for chunk in stream:
+            archive.extend(chunk)
+            if len(archive) > 64 * 1024 * 1024:
+                raise ValueError("Eval receipt archive exceeds limit")
+        destination = container.context.output_dir / "pytest-receipts"
+        destination.mkdir(parents=True, exist_ok=True)
+        files = []
+        names = set()
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+            for member in tar:
+                name = Path(member.name).name
+                if not name.endswith((".json", ".txt")):
+                    continue
+                if (not member.isfile() or member.size > 32 * 1024 * 1024
+                        or name in names or len(files) >= 512
+                        or len(Path(member.name).parts) != 2):
+                    raise ValueError("Invalid or oversized eval receipt member")
+                names.add(name)
+                raw = tar.extractfile(member).read()
+                (destination / name).write_bytes(raw)
+                files.append({"name": name, "sha256": hashlib.sha256(raw).hexdigest(),
+                              "size": len(raw)})
+        return files
 
     def probe(self, container: ManagedContainer, filename: str) -> dict:
         out = self.execute(container, probe_command(), self.cfg["timeouts"]["bootstrap_seconds"])

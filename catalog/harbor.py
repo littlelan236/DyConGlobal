@@ -34,11 +34,30 @@ def validate_payload(payload, instance_id, revision, benchmark):
         raise ValueError("Pro V2 requires the locked offline agent phase")
 
 
-def verify_package(task):
+def verify_package(task, *, deep=True):
     payload = task["instance"]
     validate_payload(payload, task["instance_id"], task["revision"], task["benchmark"])
-    if package_manifest(payload["task_path"]) != payload["files"]:
-        raise ValueError("Pinned Harbor task package changed")
+    path = Path(payload["task_path"])
+    if not path.is_absolute() or path.is_symlink() or not path.is_dir():
+        raise ValueError("Invalid Harbor task package path")
+    if deep:
+        if package_manifest(path) != payload["files"]:
+            raise ValueError("Pinned Harbor task package changed")
+    else:
+        # Old frozen packages declare modes and digests, but not file sizes.
+        actual = set()
+        for member in path.rglob("*"):
+            if member.is_symlink():
+                raise ValueError("Harbor task package symlinks are not supported")
+            if member.is_file():
+                actual.add(member.relative_to(path).as_posix())
+        if actual != {row["path"] for row in payload["files"]}:
+            raise ValueError("Pinned Harbor task file list changed")
+        for row in payload["files"]:
+            member = path / row["path"]
+            if (not member.resolve().is_relative_to(path.resolve()) or not member.is_file()
+                    or member.stat().st_mode & 0o777 != row["mode"]):
+                raise ValueError("Pinned Harbor task package path changed: " + row["path"])
 
 
 def import_tasks(cfg, snapshot_id, source, benchmark, task_ids, runtime, partition="train"):
@@ -142,6 +161,8 @@ def execution_context(cfg, tasks):
             raise ValueError("Harbor references must name existing project files")
         return path
 
+    from core.preflight import long_checks_enabled
+    deep = long_checks_enabled(cfg)
     benchmark = cfg["benchmark"]["backend"]
     snapshot_path = project_file(cfg["benchmark"].get("snapshot_ref") or "")
     snapshot = read_json(snapshot_path)
@@ -150,13 +171,13 @@ def execution_context(cfg, tasks):
     for key, task in tasks.items():
         if snapshot["tasks"].get(key) != task:
             raise ValueError("Harbor task does not belong to frozen snapshot")
-        verify_package(task)
+        verify_package(task, deep=deep)
     profile_path = project_file(cfg["agent"].get("profile_ref") or "")
     profile = OpenHandsDriverProfile.model_validate(read_json(profile_path)).model_dump()
     from runtime.agents.dependencies import verify_snapshot
     if not profile["dependency_snapshot"]:
         raise ValueError("Harbor ACP requires the existing offline OpenHands publication")
-    verify_snapshot(profile["dependency_snapshot"])
+    verify_snapshot(profile["dependency_snapshot"], deep=deep)
     dependency_path = Path(profile["dependency_snapshot"]) / "manifest.json"
     if profile["dependency_snapshot_sha256"] != sha256(dependency_path):
         raise ValueError("OpenHands dependency publication differs from the Harbor profile")
@@ -164,7 +185,7 @@ def execution_context(cfg, tasks):
     if profile["qualification"] and profile["qualification"].get("backend_family") != "harbor":
         raise ValueError("Harbor request-role qualification cannot inherit SkillsBench receipts")
     runtime_path = project_file(cfg["harbor"]["runtime_ref"])
-    runtime = verify_runtime(runtime_path.parent)
+    runtime = verify_runtime(runtime_path.parent, deep=deep)
     from runtime.images.harbor import references
     image_references = references(cfg, sha256(snapshot_path))
     evaluator = snapshot.get("evaluator")

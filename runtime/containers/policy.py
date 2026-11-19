@@ -64,6 +64,7 @@ class EnvironmentPolicy:
 
     def bootstrap(self, repo: str) -> str:
         specs = self.specs(repo)
+        from runtime.containers.resources import preparation
         text = shlex.quote("\n".join(specs) + "\n")
         install = "python -m pip install --no-input --no-index --find-links " + WHEELS_PATH
         install += " " + " ".join(map(shlex.quote, specs))
@@ -80,6 +81,7 @@ class EnvironmentPolicy:
                     *(f"export {k}={shlex.quote(v)}" for k, v in self.variables().items()),
                     "echo DYCON_BOOTSTRAP_BEGIN",
                     install if specs else "true",
+                    preparation(self.cfg) or "true",
                     "echo DYCON_BOOTSTRAP_OK",
                 ]
             )
@@ -109,7 +111,7 @@ class EnvironmentPolicy:
         wrapped = head + separator + prefix + rest if head.startswith("#!") else prefix + script
         from benchmark_evaluation.swebench_receipts import instrument
 
-        return instrument(wrapped)[0]
+        return instrument(wrapped, stack_seconds=max(1, self.cfg["timeouts"]["evaluation_seconds"] - 20))[0]
 
 
 PROBE_CODE = """import json,sys,subprocess,importlib,os,re

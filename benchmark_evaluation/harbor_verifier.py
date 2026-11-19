@@ -6,11 +6,11 @@ import json
 import re
 from pathlib import Path
 
-POLICY = "harbor-verifier-health-v2"
+POLICY = "harbor-verifier-health-v3"
 MAX_BYTES = 8 * 1024 * 1024
 
 
-def audit_verifier(directory, attempt_id, *, operation=None):
+def audit_verifier(directory, attempt_id, *, operation=None, reference_only=False, trial_name=None):
     """Inspect exactly one trial, without importing Harbor or executing its files.
 
     Oracle failures invalidate a reference control, not ordinary model submissions.
@@ -21,7 +21,7 @@ def audit_verifier(directory, attempt_id, *, operation=None):
     from core.io import identifier
 
     root = Path(directory).resolve()
-    trial = root / "trials" / identifier(attempt_id)
+    trial = root / "trials" / identifier(attempt_id if trial_name is None else trial_name)
     sources = []
     incomplete = []
 
@@ -45,9 +45,9 @@ def audit_verifier(directory, attempt_id, *, operation=None):
         return data.decode("utf-8", "replace")
 
     prefix = trial.relative_to(root)
-    log = read(prefix / "verifier/test-stdout.txt")
+    log = read(prefix / "verifier/test-stdout.txt") if not reference_only else None
     exit_text = read(prefix / "agent/exit-code.txt") if operation == "oracle" else None
-    exec_text = read(Path("verifier-execution.json"))
+    exec_text = read(Path("verifier-execution.json")) if not reference_only else None
 
     def decision(classification, reason, evidence=None):
         return {"schema_version": 1, "policy": POLICY, "classification": classification,
@@ -63,6 +63,12 @@ def audit_verifier(directory, attempt_id, *, operation=None):
             return decision("Review", "invalid_oracle_exit_receipt")
         if code:
             return decision("VerifierError", "oracle_reference_failed", {"return_code": code})
+
+    if reference_only:
+        # A successful model submission keeps upstream reward semantics. Only
+        # an explicitly failed/unreadable oracle reference invalidates a full
+        # positive control, independently of its verifier reward.
+        return decision("ValidOutcome", "oracle_reference_exit_not_failed")
 
     execution = None
     if exec_text is not None:

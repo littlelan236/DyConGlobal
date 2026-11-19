@@ -1,12 +1,15 @@
 """Managed shared download cache for public-network Harbor task containers."""
 from __future__ import annotations
+import fcntl
 import hashlib
 import json
 import os
 import secrets
+import shutil
 import signal
 import ssl
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -19,6 +22,7 @@ def register(sub):
     parser.add_argument('operation', choices=['prepare', 'start', 'status', 'stop', 'seal', 'verify', 'prefetch', 'scan', 'publish', 'runtime-prepare', 'configure-upstreams', 'warm', 'admit'])
     parser.add_argument('--directory', type=Path, required=True)
     parser.add_argument('--destination', type=Path, help='Publish a sealed copy with independent service identity')
+    parser.add_argument('--base-directory', type=Path, help='Preserve every response in a sealed baseline; add only new request keys (publish only)')
     parser.add_argument('--endpoint', help='Advertised HTTP proxy URL (prepare only)')
     parser.add_argument('--mode', choices=['record', 'replay'], default='record')
     parser.add_argument('--url', action='append', default=[])
@@ -95,18 +99,60 @@ def prepare(root, directory, endpoint):
     return dict(prepared=True, descriptor=str(directory / 'record.json'), endpoint=endpoint)
 
 
+def _link_cached_blob(source, target):
+    if not target.exists():
+        try:
+            os.link(source, target)
+        except OSError:
+            shutil.copyfile(source, target)
+
+
+def _record_store(directory):
+    seal_path = directory / 'seal.json'
+    if not seal_path.is_file():
+        return directory
+    target = directory / 'record-store'
+    marker = 'base-seal-sha256'
+    identity = sha256(seal_path)
+    if target.exists():
+        if (target / marker).read_text().strip() != identity:
+            raise ValueError('Record store belongs to another sealed cache')
+        return target
+
+    verify(directory)
+    entries = read_json(seal_path)['entries']
+    with tempfile.TemporaryDirectory(prefix='.record-store-', dir=directory) as staging:
+        store = Store(Path(staging) / 'store')
+        with store.connect() as db:
+            for key, entry in entries.items():
+                blob = Path('blobs') / entry['sha256']
+                _link_cached_blob(directory / blob, store.root / blob)
+                db.execute('INSERT INTO entries VALUES(?,?)', (key, json.dumps(entry)))
+        (store.root / marker).write_text(identity + '\n')
+        # A failed seed can be retried without exposing a partially copied index.
+        store.root.rename(target)
+    return target
+
+
 def start(root, directory, mode):
+    directory = directory.resolve()
     path, item = descriptor(directory, mode)
+    with (directory / '.start.lock').open('a') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return _start(root, directory, mode, path, item)
+
+
+def _start(root, directory, mode, path, item):
     state_path = directory / 'service.json'
     if state_path.exists() and _alive(read_json(state_path)):
         raise ValueError('Cache service already running; stop before switching mode')
-    if mode == 'record' and (directory / 'seal.json').exists():
-        raise ValueError('Sealed caches cannot be recorded into; prepare a new directory')
-    if mode == 'replay':
+    store_directory = directory
+    if mode == 'record':
+        store_directory = _record_store(directory)
+    else:
         verify(directory)
     # mitmproxy watches scripts for changes. Execute an immutable copy so that
     # editing project code cannot unload a live cache or interrupt a transfer.
-    import shutil
     code_files = ['resource_proxy.py', 'resource_store.py']
     from core.io import hash_json
     code_identity = {name: sha256(Path(root) / 'runtime/backends/harbor' / name) for name in code_files}
@@ -125,7 +171,8 @@ def start(root, directory, mode):
             '--set', 'confdir=' + str(directory / 'private-ca'),
             '--proxyauth', endpoint.username + ':' + endpoint.password,
             '-s', str(code_directory / 'resource_proxy.py')]
-    env = dict(os.environ, DYCON_RESOURCE_CACHE=str(directory), DYCON_RESOURCE_CACHE_MODE=mode,
+    env = dict(os.environ, DYCON_RESOURCE_CACHE=str(directory),
+               DYCON_RESOURCE_CACHE_STORE=str(store_directory), DYCON_RESOURCE_CACHE_MODE=mode,
                PYTHONPATH=str(root))
     (directory / 'addon-ready.json').unlink(missing_ok=True)
     with (directory / 'service.log').open('ab') as log:
@@ -141,7 +188,7 @@ def start(root, directory, mode):
             or marker.get('script_sha256') != code_identity['resource_proxy.py']):
         stop(directory)
         raise RuntimeError('Cache addon failed readiness validation; service stopped')
-    return dict(started=True, pid=process.pid, mode=mode)
+    return dict(started=True, pid=process.pid, mode=mode, store_directory=str(store_directory))
 
 
 def stop(directory):
@@ -158,13 +205,18 @@ def stop(directory):
 
 
 def status(directory):
-    store = Store(directory)
-    state = read_json(directory / 'service.json') if (directory / 'service.json').exists() else {}
+    state_path = directory / 'service.json'
+    state = read_json(state_path) if state_path.exists() else {}
+    store_directory = directory / 'record-store'
+    if state.get('mode') != 'record' or not store_directory.is_dir():
+        store_directory = directory
+    store = Store(store_directory)
     with store.connect() as db:
         counts = dict(db.execute('SELECT kind, count(*) FROM events GROUP BY kind'))
         entries = db.execute('SELECT count(*) FROM entries').fetchone()[0]
         blobs = db.execute('SELECT metadata FROM entries').fetchall()
     return dict(running=_alive(state), mode=state.get('mode'), entries=entries,
+                store_directory=str(store_directory),
                 bytes=sum(json.loads(v[0])['size'] for v in blobs), events=counts,
                 sealed=(directory / 'seal.json').is_file())
 
@@ -179,7 +231,7 @@ def seal(directory):
         rows = db.execute('SELECT key, metadata FROM entries ORDER BY key').fetchall()
     entries = {k: json.loads(v) for k, v in rows}
     receipts = {name: sha256(directory / name) for name in
-                ('admissions.jsonl', 'response-sanitization.jsonl') if (directory / name).is_file()}
+                ('admissions.jsonl', 'response-sanitization.jsonl', 'publication.json') if (directory / name).is_file()}
     value = dict(schema_version=1, entries=entries)
     if receipts:
         value['receipts'] = receipts
@@ -198,7 +250,7 @@ def verify(directory):
     sealed = read_json(directory / 'seal.json')
     entries = sealed['entries']
     for name, expected in sealed.get('receipts', {}).items():
-        if name not in ('admissions.jsonl', 'response-sanitization.jsonl') or sha256(directory / name) != expected:
+        if name not in ('admissions.jsonl', 'response-sanitization.jsonl', 'publication.json') or sha256(directory / name) != expected:
             raise ValueError('Cache provenance receipt changed')
     store = Store(directory)
     with store.connect() as db:
@@ -417,33 +469,60 @@ def scan(directory, snapshot):
                 inventory=str(directory / 'inventory.json'), urls_file=str(directory / 'prefetch-urls.txt'))
 
 
-def publish(root, directory, destination, endpoint):
-    """Publish complete entries only; hard-linked content blobs stay immutable."""
+def publish(root, directory, destination, endpoint, *, base_directory=None):
+    """Publish complete resources, optionally retaining a validated frozen baseline."""
+    from core.io import hash_json
+    base = Path(base_directory).resolve() if base_directory else None
+    if base is not None:
+        if not (base / 'seal.json').is_file():
+            raise ValueError('Publication baseline must be a sealed cache')
+        verify(base)
     destination = Path(destination).resolve()
     prepare(root, destination, endpoint)
     source = Store(directory)
     source.normalize_requests()
-    target = Store(destination)
-    with source.connect() as db:
-        rows = db.execute('SELECT key, metadata FROM entries ORDER BY key').fetchall()
-    with target.connect() as db:
+    sources = [Store(base), source] if base is not None else [source]
+    selected = {}
+    retained_conflicts = []
+    source_indices = []
+    for store in sources:
+        with store.connect() as db:
+            rows = db.execute('SELECT key, metadata FROM entries ORDER BY key').fetchall()
+        source_indices.append({'directory': str(store.root),
+                               'entries_sha256': hash_json({k: json.loads(v) for k, v in rows})})
         for key, raw in rows:
             item = json.loads(raw)
-            blob = source.root / 'blobs' / item['sha256']
+            if key in selected:
+                previous = json.loads(selected[key][1])
+                if previous != item:
+                    retained_conflicts.append(key)
+                continue
+            selected[key] = (store, raw)
+    target = Store(destination)
+    with target.connect() as db:
+        for key, (store, raw) in sorted(selected.items()):
+            item = json.loads(raw)
+            blob = store.root / 'blobs' / item['sha256']
             if sha256(blob) != item['sha256'] or blob.stat().st_size != item['size']:
                 raise ValueError('Source cached resource failed integrity check')
             dest = target.root / 'blobs' / item['sha256']
-            if not dest.exists():
-                try:
-                    os.link(blob, dest)
-                except OSError:
-                    import shutil
-                    shutil.copyfile(blob, dest)
+            _link_cached_blob(blob, dest)
             db.execute('INSERT INTO entries VALUES(?,?)', (key, raw))
-    import shutil
     for name in ('admissions.jsonl', 'response-sanitization.jsonl'):
-        if (directory / name).is_file():
-            shutil.copyfile(directory / name, destination / name)
+        receipts = [store.root / name for store in sources if (store.root / name).is_file()]
+        if receipts:
+            with (destination / name).open('wb') as stream:
+                for receipt in receipts:
+                    data = receipt.read_bytes()
+                    stream.write(data)
+                    if data and not data.endswith(b'\n'):
+                        stream.write(b'\n')
+    if base is not None:
+        write_json(destination / 'publication.json', {
+            'schema_version': 1, 'policy': 'sealed_baseline_then_new_request_keys',
+            'base_directory': str(base), 'base_seal_sha256': sha256(base / 'seal.json'),
+            'source_indices': source_indices, 'retained_conflict_keys': retained_conflicts,
+            'entries': len(selected)})
     result = seal(destination)
     return dict(**result, descriptor=str(destination / 'replay.json'))
 
@@ -453,7 +532,7 @@ def dispatch(root, args, cfg=None):
     if args.operation == 'publish':
         if args.destination is None:
             raise ValueError('publish requires --destination and --endpoint')
-        return publish(root, directory, args.destination, args.endpoint)
+        return publish(root, directory, args.destination, args.endpoint, base_directory=args.base_directory)
     if args.operation == 'configure-upstreams':
         return configure_upstreams(directory, args.upstream_map)
     if args.operation == 'warm':

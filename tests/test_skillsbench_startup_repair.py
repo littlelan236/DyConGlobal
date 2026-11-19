@@ -263,16 +263,19 @@ def test_container_snapshot_captures_memory_cgroup_and_unknown_oom(tmp_path, mon
 def test_capture_drain_records_native_flush_and_stop_phase_times(tmp_path, monkeypatch):
     import requests
 
-    from runtime.agents.skillsbench import drain_capture
+    from runtime.serving.capture_lifecycle import drain_capture
 
     class Response:
         def raise_for_status(self): pass
         def json(self): return {'failures': []}
-    monkeypatch.setattr(requests, 'post', lambda *args, **kwargs: Response())
-    stopped = SimpleNamespace(stop=lambda session: {'status': 'stopped'})
+    calls = []
+    monkeypatch.setattr(requests, 'post', lambda url, **kw: calls.append((url, kw['json'])) or Response())
+    stopped = SimpleNamespace(stop=lambda session: calls.append(('stop', session)) or {'status': 'stopped'})
     cfg = {'serving': {'base_url': 'http://capture.local/v1'},
            'capture': {'flush_timeout_seconds': 5, 'finalize_seconds': 5}}
-    drain_capture(cfg, tmp_path, stopped, 'session-a')
+    drain_capture(cfg, tmp_path, stopped, 'session-a', serving_endpoint='http://gpu7.local/v1')
+    assert calls == [('http://gpu7.local/dycon/capture/engine/flush', {'session_id': 'session-a'}),
+                     ('stop', 'session-a')]
     receipt = read_json(tmp_path / 'capture-drain.json')
     assert receipt['phase'] == 'complete'
     assert receipt['native_flush_seconds'] >= 0
@@ -283,7 +286,7 @@ def test_capture_stop_can_report_a_drain_failure_after_normal_control_timeout(tm
     import requests
 
     from hidden.backends.vllm.online import CaptureClient
-    from runtime.agents.skillsbench import drain_capture
+    from runtime.serving.capture_lifecycle import drain_capture
 
     class Response:
         def raise_for_status(self): pass

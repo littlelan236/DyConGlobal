@@ -38,7 +38,7 @@ async def execute(request):
                  "skip_model_parsing": True, "kwargs": {"evaluator": request["evaluator"],
                                                           "exact_subject": request["exact_subject"]}}
     config = TrialConfig.model_validate({"task": {"path": request["task"]["instance"]["task_path"]},
-        "trial_name": request["attempt_id"], "trials_dir": str(output / "trials"), "agent": agent,
+        "trial_name": request["trial_name"], "trials_dir": str(output / "trials"), "agent": agent,
         "environment": {"import_path": "runtime.backends.harbor.environment:DyConDockerEnvironment",
             "force_build": False, "delete": True,
             "cpu_enforcement_policy": request["environment"]["cpu_enforcement_policy"],
@@ -55,7 +55,8 @@ async def execute(request):
     finally:
         # Trial is responsible for its verifier ordering and teardown. The
         # parent's label cleanup verifies/crash-recovers any residual resources.
-        write_json(output / "trial-identity.json", {"trial_id": str(trial.id), "binding": request["binding"]})
+        write_json(output / "trial-identity.json", {"trial_id": str(trial.id),
+                   "trial_name": request["trial_name"], "binding": request["binding"]})
 
 
 def schema_probe(paths):

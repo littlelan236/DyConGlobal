@@ -72,12 +72,19 @@ def readonly_api_post(method, url, headers, body):
 
 
 def public_stateless_response(method, url, headers, status):
-    """Public PubChem text lookups may set an incidental CDN session cookie."""
+    """Explicit public lookup/artifact endpoints may set incidental CDN cookies."""
     parsed = urlsplit(url)
-    return (method == 'GET' and status == 200 and parsed.scheme == 'https'
-            and parsed.hostname == 'pubchem.ncbi.nlm.nih.gov' and parsed.port in (None, 443)
-            and not parsed.query and not headers.get('authorization') and not headers.get('cookie')
-            and re.fullmatch(r'/rest/pug/compound/(?:smiles/[^/]+/cids|cid/[0-9]+/synonyms)/TXT', parsed.path) is not None)
+    if (method not in ('GET', 'HEAD') or status != 200 or parsed.scheme != 'https'
+            or parsed.port not in (None, 443) or parsed.query
+            or headers.get('authorization') or headers.get('cookie')):
+        return False
+    if parsed.hostname == 'pubchem.ncbi.nlm.nih.gov':
+        return method == 'GET' and re.fullmatch(
+            r'/rest/pug/compound/(?:smiles/[^/]+/cids|cid/[0-9]+/synonyms)/TXT', parsed.path) is not None
+    # Public immutable wheel artifacts/PEP 658 metadata only. Never package
+    # indexes, arbitrary Cloudflare sites, or authenticated request variants.
+    return (parsed.hostname in ('download.pytorch.org', 'download-r2.pytorch.org')
+            and re.fullmatch(r'/whl/(?:[A-Za-z0-9_.+-]+/)*[^/]+\.whl(?:\.metadata)?', parsed.path) is not None)
 
 
 class Store:

@@ -5,6 +5,7 @@ import contextlib
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -47,7 +48,7 @@ class HarborFactory:
         self.cpu_supported = cpu_quota_supported(info, cfg["environment"]["docker_host"])
         self.started = False
 
-    def lock_images(self, tasks):
+    def lock_images(self, tasks, *, deep=True):
         if self.started:
             return
         from runtime.images.nas import NasImageStore
@@ -55,7 +56,9 @@ class HarborFactory:
         try:
             for image in sorted({v for t in tasks for v in t["images"].values()}):
                 store = NasImageStore(self.cfg, refs[image])
-                self.stack.enter_context(self.leases.lease(store))
+                # Verify the descriptor graph even when Docker already has the image.
+                store.verify(deep=deep)
+                self.stack.enter_context(self.leases.lease(store, deep=deep))
                 tag = "dycon-harbor:" + hash_json(image)[:32]
                 self.client.api.tag(store.image_id, tag)
                 inspected = self.client.images.get(tag)
@@ -66,23 +69,45 @@ class HarborFactory:
             raise
         self.started = True
 
-    def cleanup_attempt(self, attempt_id, sample_key, output=None):
+    def cleanup_attempt(self, attempt_id, sample_key, output=None, *, trial_name=None):
         labels = ["dycon.run=" + self.run_id, "dycon.sample=" + sample_key,
                   "dycon.attempt=" + attempt_id, "dycon.backend=harbor"]
-        removed = []
-        for container in self.client.containers.list(all=True, filters={"label": labels}):
-            removed.append(container.id)
-            container.remove(force=True, v=True)
-        for network in self.client.networks.list(filters={"label": labels}):
-            network.remove()
-        residual = [c.id for c in self.client.containers.list(all=True, filters={"label": labels})]
-        receipt = {"run_id": self.run_id, "attempt_id": attempt_id, "removed": removed,
-                   "residual": residual, "complete": not residual}
+        labels.append("dycon.owner=" + self.owner_id)
+        if trial_name is not None:
+            labels.append("dycon.trial=" + trial_name)
+        receipt = self._cleanup_resources(labels)
+        receipt.update(run_id=self.run_id, attempt_id=attempt_id, sample_key=sample_key, trial_name=trial_name)
         if output is not None:
             write_json(Path(output) / "cleanup.json", receipt)
-        if residual:
-            raise RuntimeError("Harbor owned containers remain after cleanup")
+        if not receipt["complete"]:
+            raise RuntimeError("Harbor owned resource cleanup failed")
         return receipt
+
+    def _cleanup_resources(self, labels):
+        from docker.errors import APIError
+
+        filters = {"label": labels}
+        removed = {"container": [], "network": []}
+        residual = {"container": [], "network": []}
+        errors = []
+        for kind, list_resources, options in (
+            ("container", lambda: self.client.containers.list(all=True, filters=filters), {"force": True, "v": True}),
+            ("network", lambda: self.client.networks.list(filters=filters), {}),
+        ):
+            try:
+                for resource in list_resources():
+                    try:
+                        resource.remove(**options)
+                        removed[kind].append(resource.id)
+                    except APIError as exc:
+                        if exc.status_code != 404:
+                            errors.append({"kind": kind, "id": resource.id, "status_code": exc.status_code})
+                residual[kind] = [resource.id for resource in list_resources()]
+            except APIError as exc:
+                errors.append({"kind": kind, "operation": "list", "status_code": exc.status_code})
+        return {"removed": removed["container"], "residual": residual["container"],
+                "networks_removed": removed["network"], "networks_residual": residual["network"],
+                "errors": errors, "complete": not (errors or any(residual.values()))}
 
     def execute_worker(self, request, *, secret=None, cancellation=None, seconds=3600):
         output = Path(request["output"])
@@ -130,6 +155,7 @@ class HarborFactory:
                 raise RuntimeError("Harbor worker failed; see worker.log")
             return read_json(output / "worker-response.json")
         finally:
+            primary = sys.exception()
             remove()
             if process.poll() is None:
                 stop()
@@ -143,7 +169,13 @@ class HarborFactory:
             (output / "worker.log").write_text(text.replace(secret, "<redacted>") if secret else text)
             with self.lock:
                 self.processes.pop((request["binding"]["sample_key"], request["attempt_id"]), None)
-            self.cleanup_attempt(request["attempt_id"], request["binding"]["sample_key"], output)
+            try:
+                self.cleanup_attempt(request["attempt_id"], request["binding"]["sample_key"], output,
+                                     trial_name=request["trial_name"])
+            except Exception as cleanup_exc:
+                if primary is None:
+                    raise
+                write_json(output / "cleanup-error.json", {"error_type": type(cleanup_exc).__name__})
 
     def cleanup_owned(self, run_id):
         if run_id != self.run_id:
@@ -155,10 +187,8 @@ class HarborFactory:
                 os.killpg(process.pid, signal.SIGTERM)
         try:
             labels = ["dycon.run=" + run_id, "dycon.backend=harbor", "dycon.owner=" + self.owner_id]
-            for container in self.client.containers.list(all=True, filters={"label": labels}):
-                container.remove(force=True, v=True)
-            for network in self.client.networks.list(filters={"label": labels}):
-                network.remove()
+            if not self._cleanup_resources(labels)["complete"]:
+                raise RuntimeError("Harbor run-owned resource cleanup failed")
         finally:
             self.stack.close()
             self.client.close()

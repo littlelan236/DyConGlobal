@@ -11,9 +11,17 @@ def qualify_profile(root, run_id, profile_id, profile_ref=None):
     from rollout.adapters.openhands import parse_response
     loaded = load_plan(root, run_id)
     cfg, run = loaded['config'], loaded['run']
-    if (cfg.get('execution_context', {}).get('benchmark') != 'skillsbench'
+    if (cfg.get('execution_context', {}).get('benchmark') not in {'skillsbench', 'terminalbench_2_1'}
             or cfg['execution_context']['agent'] != 'openhands'):
-        raise ValueError('Qualification requires a frozen SkillsBench/OpenHands run')
+        raise ValueError('Qualification requires a frozen SkillsBench or Terminal-Bench OpenHands run')
+    # Harbor owns only the ACP driver contract; SkillsBench retains its
+    # historical BenchFlow profile serialization and identity.
+    if cfg['execution_context']['benchmark'] == 'terminalbench_2_1':
+        from runtime.agents.openhands import OpenHandsDriverProfile
+        def normalize_profile(raw):
+            return OpenHandsDriverProfile.model_validate(raw).model_dump()
+    else:
+        normalize_profile = validate_profile
     RunEvidence(root, run_id).verify()
     files = sorted((run / 'rollout/tasks').rglob('requests/req-*.json'))
     if not files:
@@ -25,6 +33,9 @@ def qualify_profile(root, run_id, profile_id, profile_ref=None):
             raise ValueError('Unqualified model request in probe: ' + file.name)
         if row['binding'].get('profile_sha256') != cfg['execution_context']['profile_sha256']:
             raise ValueError('Request belongs to another agent profile')
+        if (cfg['execution_context']['benchmark'] == 'terminalbench_2_1'
+                and row['binding'].get('backend_family') != 'harbor'):
+            raise ValueError('Harbor qualification requires actual Harbor request bindings')
         request = row['request']
         requests.append({'path': file.relative_to(run).as_posix(), 'sha256': sha256(file),
                          'request_id': row['request_id'], 'step_id': row['step_id'],
@@ -47,16 +58,22 @@ def qualify_profile(root, run_id, profile_id, profile_ref=None):
         'tool_names': sorted(tools), 'executed_tool_call_ids': sorted(pairs),
         'acp_events': [{'path': f.relative_to(run).as_posix(), 'sha256': sha256(f)} for f in events],
         'supported_roles': sorted({r['role'] for r in requests}), 'unknown_roles': 'reject_before_capture_or_parallel'}
+    if cfg['execution_context']['benchmark'] == 'terminalbench_2_1':
+        context = cfg['execution_context']
+        if context.get('worker_protocol') != 1 or not context.get('runtime_sha256'):
+            raise ValueError('Harbor qualification requires frozen worker transport provenance')
+        proof.update(backend_family='harbor', worker_protocol=context['worker_protocol'],
+                     runtime_sha256=context['runtime_sha256'])
     proof['receipt_sha256'] = hash_json(proof)
     template = cfg['execution_context']['profile']
     if profile_ref is not None:
         template_path = (Path(root) / profile_ref).resolve()
         if not template_path.is_relative_to(Path(root).resolve()):
             raise ValueError('Runtime profile must be project-owned')
-        template = validate_profile(read_json(template_path))
+        template = normalize_profile(read_json(template_path))
         template['dependency_snapshot_sha256'] = sha256(Path(template['dependency_snapshot']) / 'manifest.json')
         excluded = {'request_roles', 'qualification', 'use_host_proxy', 'condenser_max_tokens'}
-        source = validate_profile(cfg['execution_context']['profile'])
+        source = normalize_profile(cfg['execution_context']['profile'])
         if (template.get('dependency_snapshot_sha256') == source.get('dependency_snapshot_sha256')
                 and template.get('dependency_snapshot') != source.get('dependency_snapshot')):
             from runtime.agents.dependencies import verify_snapshot
@@ -112,7 +129,7 @@ def qualify_profile(root, run_id, profile_id, profile_ref=None):
                'qualification': proof}
     if profile.get('dependency_snapshot'):
         profile['dependency_snapshot_sha256'] = sha256(Path(profile['dependency_snapshot']) / 'manifest.json')
-    profile = validate_profile(profile)
+    profile = normalize_profile(profile)
     target = Path(root) / 'runtime/agent-profiles' / identifier(profile_id) / 'manifest.json'
     if target.exists() and read_json(target) != profile:
         raise FileExistsError('Qualification profile is immutable')

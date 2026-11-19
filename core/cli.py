@@ -46,6 +46,10 @@ def main(argv=None):
     hb.add_argument("profile_id")
     hb.add_argument("--dependency-snapshot", type=Path, required=True)
     hb.add_argument("--bridge-address", default="127.0.0.1")
+    hb = hb_sub.add_parser("qualify", help="Qualify OpenHands request roles from actual frozen Terminal-Bench tool/result evidence")
+    hb.add_argument("run_id")
+    hb.add_argument("--profile-id", required=True)
+    hb.add_argument("--profile-ref", type=Path)
     hb = hb_sub.add_parser("preflight", help="Run real ACP/tool/network/cleanup checks without a model request")
     hb.add_argument("run_id")
     hb = hb_sub.add_parser("controls", help="Run immutable official oracle/nop or exact fresh-replay controls")
@@ -193,6 +197,12 @@ def main(argv=None):
     sw.add_argument("--group", choices=["verified", "dev", "nonverified"])
     sw.add_argument("--output", type=Path)
 
+    sw = sw_sub.add_parser("images-repair", help="Publish frozen SWE task ownership or system-package image repairs")
+    sw.add_argument("run_id")
+    sw.add_argument("publication_id")
+    sw.add_argument("--task-id", action="append", required=True)
+    sw.add_argument("--kind", choices=["ownership", "graphics", "gettext"], required=True)
+
     sw = sw_sub.add_parser("images-pull", help="Resume pinned official Verified/dev missing images to NAS")
     sw.add_argument("store_id")
     sw.add_argument("--plan", type=Path, required=True)
@@ -244,7 +254,7 @@ def main(argv=None):
     q.add_argument("--task-id", action="append", default=[])
     q.add_argument("--partition")
     q.add_argument("--repeat-count", type=int, default=1)
-    q.add_argument("--from-run", help="Clone frozen rollout configuration and full task selection")
+    q.add_argument("--from-run", help="Clone frozen rollout or harness configuration and task selection")
     q.add_argument("--reverse-task-order", action="store_true",
                    help="Reverse the source task order in a frozen run clone")
     q.add_argument("--parallel-config", type=Path,
@@ -342,6 +352,12 @@ def main(argv=None):
     q.add_argument("--incremental", action="store_true", help="Evaluate newly submitted trajectories and retain prior evaluations")
     q = harness_sub.add_parser("status")
     q.add_argument("run_id")
+    q = harness_sub.add_parser("acceptance", help="Write complete task and cleanup ledger independently of audit completeness")
+    q.add_argument("run_id")
+    q.add_argument("--output", type=Path, required=True)
+    q.add_argument("--audit-dir", type=Path)
+    q = harness_sub.add_parser("repair-suite", help="Execute a frozen SWE repair validation plan without status polling")
+    q.add_argument("--plan", type=Path, required=True)
     q = harness_sub.add_parser("audit", help="Write an immutable SWE-bench validity sidecar without rerunning tests")
     q.add_argument("run_id")
     q.add_argument("--output", type=Path, required=True)
@@ -411,6 +427,7 @@ def main(argv=None):
     p.add_argument("publication_id")
     p.add_argument("--source", action="append", default=[], type=Path)
     p.add_argument("--download-build-tools", action="store_true")
+    p.add_argument("--download-plan", type=Path, help="Exact PyPI release JSON plan; verifies published wheel digests")
     p = wheelhouse_sub.add_parser("verify")
     p.add_argument("path", type=Path)
     sub.add_parser("capture-recover").add_argument("run_id")
@@ -888,6 +905,18 @@ def main(argv=None):
         if not result["complete"]:
             raise SystemExit(3)
         return
+    if a.command == "harness" and a.harness_command == "acceptance":
+        from benchmark_evaluation.swebench_acceptance import collect
+        result = collect(Path(a.config).resolve().parent, a.run_id, a.output, audit_dir=a.audit_dir)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if a.command == "harness" and a.harness_command == "repair-suite":
+        if a.set or a.analysis_run_id:
+            parser.error("repair-suite reads the explicit plan and source frozen run")
+        from benchmark_evaluation.swebench_repair_suite import run
+        result = run(Path(a.config).resolve().parent, a.plan)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     if a.command == "harness" and a.harness_command == "metadata-prefetch":
         if a.analysis_run_id or a.set:
             parser.error("metadata-prefetch reads root config.yaml without run overrides")
@@ -949,7 +978,7 @@ def main(argv=None):
                     or (a.command in run_commands and not (
                         a.command == "artifact" and getattr(a, "scope", "run") != "run"))
                     or (a.command == "webarena" and a.webarena_command == "preflight")
-                    or (a.command == "harbor" and a.harbor_command in {"preflight", "controls", "controls-audit"})
+                    or (a.command == "harbor" and a.harbor_command in {"preflight", "controls", "controls-audit", "qualify"})
                     or a.analysis_run_id is not None
                     or (a.command in {"enrich", "token-trace", "trajectory-token-audit", "hidden", "dataset-index", "token-join"} and explicit_run is not None))
     if use_snapshot:
@@ -987,6 +1016,11 @@ def main(argv=None):
         elif a.harbor_command == "profile":
             from runtime.backends.harbor.operations import create_profile
             result = create_profile(cfg, a.profile_id, a.dependency_snapshot, a.bridge_address)
+        elif a.harbor_command == "qualify":
+            from runtime.agents.qualification import qualify_profile
+            if cfg["execution_context"]["benchmark"] != "terminalbench_2_1":
+                raise ValueError("harbor qualify requires a frozen Terminal-Bench run")
+            result = qualify_profile(cfg["project_root"], a.run_id, a.profile_id, a.profile_ref)
         elif a.harbor_command == "preflight":
             from runtime.backends.harbor.operations import preflight
             result = preflight(cfg["project_root"], a.run_id)
@@ -1236,7 +1270,7 @@ def main(argv=None):
         if a.analysis_run_id or a.set:
             parser.error("wheelhouse reads root config.yaml; use explicit sources, not run overrides")
         from runtime.wheelhouse import build, verify
-        result = (build(cfg, a.publication_id, a.source, a.download_build_tools)
+        result = (build(cfg, a.publication_id, a.source, a.download_build_tools, a.download_plan)
                   if a.wheelhouse_command == "build" else verify(a.path))
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
@@ -1330,6 +1364,11 @@ def main(argv=None):
                 result = sync(cfg, source_path=a.source, image_plans=a.image_plan, output=a.output, apply=a.apply)
             else:
                 result = list_tasks(cfg, group=a.group, output=a.output)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return
+        if a.swebench_command == "images-repair":
+            from runtime.images.swebench_repair import prepare
+            result = prepare(cfg["project_root"], a.run_id, a.publication_id, a.task_id, a.kind)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return
         if a.swebench_command == "images-pull":

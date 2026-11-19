@@ -49,6 +49,7 @@ def _collect(output, evaluation_task_id, rollout_id, task, outcome, *, gold=Fals
     if outcome.get("official_result"):
         document["official_result"] = dict(outcome["official_result"])
     captured = []
+    raw_sources = {}
     if version("swebench") != "4.1.0":
         document["collection_errors"].append("Unsupported official harness/parser version")
     def read(path, required=False):
@@ -61,7 +62,8 @@ def _collect(output, evaluation_task_id, rollout_id, task, outcome, *, gold=Fals
             document["collection_errors"].append(f"Evidence escapes harness root: {path}")
             return None
         before = sha256(path)
-        value = path.read_text(encoding="utf-8", errors="replace")
+        raw_sources[path] = path.read_bytes()
+        value = raw_sources[path].decode("utf-8", errors="replace")
         if sha256(path) != before:
             document["collection_errors"].append(f"Source changed while reading: {path}")
         document["sources"].append({"path": str(path), "sha256": before})
@@ -140,27 +142,68 @@ def _collect(output, evaluation_task_id, rollout_id, task, outcome, *, gold=Fals
             import hashlib
             # The official runner appends its own timeout message after the host
             # receipt was written. Only that exact known suffix may be removed.
-            observed = text
+            observed = raw_sources[base / "test_output.txt"]
             if execution.get("timed_out"):
                 import re
-                observed = re.sub(r"\n\nTimeout error: \d+ seconds exceeded\.$", "", text)
-            if hashlib.sha256(observed.encode()).hexdigest() != execution["output_sha256"]:
+                observed = re.sub(rb"\n\nTimeout error: \d+ seconds exceeded\.$", b"", observed)
+            if hashlib.sha256(observed).hexdigest() != execution["output_sha256"]:
                 document["collection_errors"].append("Execution output digest mismatch")
+            else:
+                execution["output_verified"] = True
         if execution.get("instance_id") != iid or execution.get("evaluation_task_id") != evaluation_task_id:
             document["collection_errors"].append("Execution receipt identity mismatch")
         if eval_script and execution.get("test_command_sha256"):
-            from benchmark_evaluation.swebench_receipts import get_test_command
-            # Instrumentation adds lines within the region; host identity must
-            # reference the original command, not the instrumentation itself.
-            original = eval_script.splitlines(keepends=True)
-            original = [line for line in original if not line.startswith(('__dycon_test_rc=', "printf '\\n__DYCON_TEST_RESULT__"))]
-            details = get_test_command("".join(original))
+            from benchmark_evaluation.swebench_receipts import get_test_command, original_script, get_pytest_binding
+            details = get_test_command(original_script(eval_script))
             if not details or details["command_sha256"] != execution["test_command_sha256"]:
                 document["collection_errors"].append("Execution/test script command mismatch")
+            if get_pytest_binding(eval_script) != execution.get("pytest_binding"):
+                document["collection_errors"].append("Execution/pytest plugin binding mismatch")
+    if document.get("execution", {}).get("receipt_protocol") == 2:
+        execution = document["execution"]
+        sessions = []
+        if execution.get("receipt_error"):
+            document["collection_errors"].append("Sidecar collection failed: " + execution["receipt_error"])
+        for item in execution.get("receipt_files", []):
+            name = item.get("name", "")
+            if not name or Path(name).name != name or not name.endswith((".json", ".txt")):
+                document["collection_errors"].append("Invalid receipt filename")
+                continue
+            path = environment / "pytest-receipts" / name
+            content = read(path, True)
+            if content is None:
+                continue
+            if sha256(path) != item.get("sha256"):
+                document["collection_errors"].append("Sidecar receipt digest mismatch")
+                continue
+            if name.endswith(".txt"):
+                continue
+            try:
+                value = json.loads(content)
+                if name == "command.json":
+                    execution["sidecar_test_result"] = value
+                else:
+                    if value.get("kind") != "phase":
+                        sessions.append(value)
+            except ValueError:
+                document["collection_errors"].append("Malformed sidecar receipt")
+        execution["pytest_sessions"] = sessions
     if text:
         try:
-            statuses, found = get_logs_eval(SimpleNamespace(repo=task["repo"], version=task["version"]),
-                                          str(base / "test_output.txt"))
+            from swebench.harness import grading
+            from benchmark_evaluation.swebench_test_identity import parser_for, validate_collection, contract
+            if contract(task):
+                original = grading.MAP_REPO_TO_PARSER[task['repo']]
+                try:
+                    grading.MAP_REPO_TO_PARSER[task['repo']] = parser_for(task, getattr(original, '_dycon_identity_base', original))
+                    statuses, found = get_logs_eval(SimpleNamespace(repo=task["repo"], version=task["version"], instance_id=iid),
+                                                  str(base / "test_output.txt"))
+                finally:
+                    grading.MAP_REPO_TO_PARSER[task['repo']] = original
+                validate_collection(task, document.get('execution', {}))
+            else:
+                statuses, found = get_logs_eval(SimpleNamespace(repo=task["repo"], version=task["version"], instance_id=iid),
+                                              str(base / "test_output.txt"))
             document.update(statuses=statuses, parser_found=found)
         except Exception as exc:
             document["collection_errors"].append(f"Official parser failed: {type(exc).__name__}: {exc}")

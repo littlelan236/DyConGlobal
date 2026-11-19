@@ -53,6 +53,23 @@ desktop.ini
 /.cache/
 /tmp/
 /temp/
+
+# One-off root scripts belong in temp/; ignore legacy scratch names too
+/tmp_*.py
+/tmp_*.sh
+/temp_*.py
+/temp_*.sh
+/*_tmp.py
+/*_tmp.sh
+
+# Generated binary data and compressed artifacts
+*.arrow
+*.parquet
+*.zip
+*.zst
+
+# Generated SWE-bench verifier resource publications (not repair profiles)
+/runtime/resources/swebench-verifier-assets-*/
 /capture/**
 /online/**
 

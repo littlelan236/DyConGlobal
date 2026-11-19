@@ -1,4 +1,4 @@
-﻿"""Pure, versioned SWE-bench validity audit. Never rewrites official scores.
+"""Pure, versioned SWE-bench validity audit. Never rewrites official scores.
 
 The collector owns I/O and invokes the installed official parser. This module
 only consumes frozen evidence. Attribution supplied by a reviewer must be bound
@@ -11,7 +11,7 @@ import json
 import re
 from collections import Counter
 
-POLICY_VERSION = "swebench_verifier_audit_v3"
+POLICY_VERSION = "swebench_verifier_audit_v4"
 GROUPS = ("FAIL_TO_PASS", "PASS_TO_PASS")
 STATES = {"PASSED", "FAILED", "ERROR", "SKIPPED", "XFAIL", "XPASS"}
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -106,6 +106,59 @@ def _receipt(text, expected):
     if value.get("command_sha256") != expected or type(value.get("returncode")) is not int:
         return None
     return value
+
+
+def _inner_pytest(text, execution, statuses):
+    """Accept one completed top-level session, bound to the actual host output.
+
+    Multiple/nested sessions are ambiguous. Do not choose the one that passed.
+    """
+    binding = execution.get("pytest_binding")
+    sidecar = execution.get("receipt_protocol") == 2
+    rows = (execution.get("pytest_sessions", []) if sidecar else
+            re.findall(r"(?m)^__DYCON_PYTEST_SESSION__ (.+)$", text))
+    if not binding or len(rows) != 1:
+        return None
+    if not (execution.get("output_verified") is True or execution.get("output_sha256") == hashlib.sha256(text.encode()).hexdigest()):
+        return None
+    try:
+        value = dict(rows[0]) if sidecar else json.loads(rows[0])
+        if (value.get("schema_version") != 1 or value.get("binding") != binding
+                or binding.get("command_sha256") != execution.get("test_command_sha256")
+                or value.get("exitstatus") not in (0, 1) or value.get("collection_errors")
+                or not value.get("executable") or not value.get("argv")
+                or not value.get("pid") or not value.get("ancestors")):
+            return None
+        reports = value["reports"]
+        collected = value["collected"]
+        if len(collected) != len(set(collected)):
+            return None
+        by_test = {}
+        for row in reports:
+            phases = by_test.setdefault(row["nodeid"], {})
+            if row["when"] in phases:
+                return None
+            phases[row["when"]] = row
+        if set(by_test) != set(collected):
+            return None
+        any_failed = False
+        for test, phases in by_test.items():
+            if set(phases) != {"setup", "call", "teardown"}:
+                return None
+            if phases["setup"]["outcome"] != "passed" or phases["teardown"]["outcome"] != "passed":
+                return None
+            state = phases["call"]["outcome"]
+            if state not in {"passed", "failed"}:
+                return None
+            if test in statuses and statuses[test] != state.upper():
+                return None
+            any_failed |= state == "failed"
+        if bool(value["exitstatus"]) != any_failed:
+            return None
+        value["tests"] = by_test
+        return value
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 def _pytest_progress_token(task, test_id):
@@ -238,6 +291,17 @@ def classify(document):
         if not receipt or full_receipt != receipt:
             receipt = full_receipt
             receipt_location = "host_bound_merged_output" if receipt else None
+    if execution.get("receipt_protocol") == 2:
+        host_result = execution.get("sidecar_test_result")
+        if (execution.get("output_verified") is True and isinstance(host_result, dict)
+                and host_result.get("command_sha256") == execution.get("test_command_sha256")
+                and type(host_result.get("returncode")) is int):
+            if receipt is not None and receipt != host_result:
+                unknown.append("Sidecar and stream test receipts disagree")
+            receipt = host_result
+            receipt_location = "host_collected_sidecar"
+        else:
+            unknown.append("Missing or unbound command sidecar")
     result["execution"] = {**execution, "test_receipt": receipt,
                            "receipt_location": receipt_location,
                            "historical_receipt_missing": not bool(execution)}
@@ -248,11 +312,15 @@ def classify(document):
             unknown.append("Abnormal outer execution exit")
         if execution.get("test_command_sha256") and receipt is None:
             unknown.append("Expected test command receipt missing or conflicting")
+    inner = _inner_pytest(text, execution, statuses)
+    result["execution"]["inner_pytest"] = inner
     if receipt:
         rc, runner = receipt["returncode"], receipt.get("runner")
         if rc not in (0, 1) or receipt.get("scope") != "command":
             unknown.append("Test process interrupted, runner error or incomplete inner receipt")
-        if rc == 1 and runner not in {"pytest", "unittest", "sympy"}:
+        if (rc == 1 and runner not in {"pytest", "unittest", "sympy"}
+                and not (runner == "tox" and inner and inner["exitstatus"] == 1
+                         and required_ids.issubset(inner["tests"]))):
             unknown.append("Outer runner failure lacks inner test exit evidence")
         if rc and official.get("resolved") is True:
             unknown.append("Nonzero test command exit conflicts with official pass")
@@ -260,6 +328,7 @@ def classify(document):
             unknown.append("Successful test command conflicts with required failures")
 
     candidates = set()
+    unattributed = {}
     blocks = failure_blocks(region)
     raw_states = {}
     for state, raw_id in re.findall(r"(?m)^(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)[ \t]+([^\n]+)$", region):
@@ -279,8 +348,10 @@ def classify(document):
         if block:
             candidates.update(_candidate_errors(block["body"]))
             if row["state"] == "FAILED" and not re.search(
-                    r"(?m)^E\s+(?:AssertionError\b|assert\b|Failed: DID NOT RAISE)", block["body"]):
-                unknown.append(f"Required failure is not an attributed assertion: {row['test']}")
+                    r"(?m)^E\s+(?:AssertionError\b|assert\b|Failed: DID NOT (?:RAISE|WARN))", block["body"]):
+                message = f"Required failure is not an attributed assertion: {row['test']}"
+                unknown.append(message)
+                unattributed[row["test"]] = {"message": message, "block": block}
         elif row["state"] in {"FAILED", "ERROR"}:
             unknown.append(f"Required failure block not uniquely identified: {row['test']}")
         if row["state"] == "ERROR":
@@ -299,6 +370,7 @@ def classify(document):
 
     confirmed, extras = [], []
     patch_issues = []
+    subject_tests = set()
     sources = {(x.get("path"), x.get("sha256")) for x in document.get("sources", [])}
     for finding in document.get("findings", []):
         bound = (finding.get("evidence_digest") == result["evidence_digest"]
@@ -310,6 +382,28 @@ def classify(document):
             unknown.append("Unbound or unrelated attribution finding")
             continue
         extras.append(finding)
+        if (finding.get("reason_code") == "subject_call_exception"
+                and finding.get("attribution") == "subject"
+                and finding.get("stage") == "test"
+                and finding.get("evidence_strength") == "confirmed"
+                and finding.get("recovered") is False and finding.get("basis")
+                and finding.get("supporting_sources") and inner and not document.get("gold")
+                and all((x.get("path"), x.get("sha256")) in sources for x in finding["supporting_sources"])):
+            matched = set(finding.get("required_tests", []))
+            valid = bool(matched) and matched.issubset(unattributed)
+            for test in matched:
+                block = unattributed.get(test, {}).get("block", {})
+                call = inner["tests"].get(test, {}).get("call", {})
+                exception = finding.get("exceptions", {}).get(test)
+                valid = valid and bool(exception) and call.get("outcome") == "failed"
+                valid = valid and finding.get("failure_block_sha256", {}).get(test) == digest(block)
+                valid = valid and bool(re.search(r"(?m)^E\s+" + re.escape(exception or "") + r":", block.get("body", "")))
+                crash_type = (call.get("crash", {}).get("message") or "").split(":", 1)[0]
+                valid = valid and crash_type.rsplit(".", 1)[-1] == (exception or "").rsplit(".", 1)[-1]
+            if valid:
+                subject_tests.update(matched)
+                continue
+            unknown.append("Subject finding lacks matching call-phase exception evidence")
         if (finding.get("reason_code") == "gold_patch_defect"
                 and finding.get("attribution") == "gold_patch"
                 and finding.get("evidence_strength") == "confirmed"
@@ -323,6 +417,9 @@ def classify(document):
             confirmed.append(finding)
         elif finding not in patch_issues:
             candidates.add(finding.get("reason_code", "unknown_attribution"))
+    # Findings remove only the exact exception-attribution gap. All other
+    # identity, execution, candidate, fixture and coverage guards still apply.
+    unknown = [x for x in unknown if x not in {unattributed[t]["message"] for t in subject_tests}]
     # A dependency receipt comes from a scoped host stage or guarded installer.
     dependency = document.get("dependency_failure")
     if dependency and dependency.get("stage") in {"preflight", "bootstrap", "probe", "harness_install"}:
@@ -415,6 +512,12 @@ def classify(document):
     result["candidate_reason_codes"] = sorted(candidates)
     result["additional_findings"] = extras
     result["missing_evidence"] = list(dict.fromkeys(unknown))
+    result["blocker_codes"] = sorted({
+        "subject_call_exception_unconfirmed" if x.startswith("Required failure is not an attributed assertion") else
+        "inner_runner_receipt_missing" if x.startswith("Outer runner failure") else
+        "required_pass_nonrequired_failure" if x.startswith("Nonzero test command exit conflicts") else
+        "required_collection_incomplete" if x.startswith("Required test missing") else
+        "evidence_conflict_or_missing" for x in unknown})
     return result
 
 

@@ -40,6 +40,24 @@ def prepare(root, run_id, rollout_ids=(), source_run=None, incremental=False):
         return {"run_id": run_id, "rollout_count": len(frozen["rollout_ids"]), "selection": str(target)}
     run_catalog = RunEvidence(root, source_run)
     run_data = run_catalog.read()
+    if source_run != run_id:
+        import copy
+        run_data = copy.deepcopy(run_data)
+        for key, destination in loaded["config"]["selection"]["tasks"].items():
+            if key not in run_data["tasks"]:
+                continue
+            source = run_data["tasks"][key]
+            def benchmark_payload(row):
+                value = copy.deepcopy(row)
+                instance = value.get("instance", {})
+                instance.pop("environment_overrides", None)
+                instance.pop("nas_image", None)
+                return value
+            # Partition/catalog administration may differ, but the full source
+            # instance (patches, base, required IDs) must remain byte-equivalent.
+            if benchmark_payload(source).get("instance") != benchmark_payload(destination).get("instance"):
+                raise ValueError("Source/destination benchmark payload changed: " + key)
+            run_data["tasks"][key] = destination
     if incremental:
         frozen = read_json(target) if target.exists() else {"rollout_ids": [], "rollouts": {}}
         previously_graded = set()
@@ -134,7 +152,7 @@ def run(root, run_id, eval_id, gold=False, incremental=False):
     current_wheelhouse = current_config["environment"].get("wheelhouse")
     same_backend = (current_config.get("benchmark", {}).get("backend", "swebench")
                     == cfg.get("benchmark", {}).get("backend", "swebench"))
-    if current_wheelhouse and same_backend:
+    if current_wheelhouse and same_backend and not cfg["environment"].get("variables", {}).get("DYCON_SWEBENCH_FROZEN_ENVIRONMENT"):
         from runtime.wheelhouse import verify
         verify(current_wheelhouse)
         cfg["environment"] = {**cfg.get("environment", {}), "wheelhouse": current_wheelhouse}

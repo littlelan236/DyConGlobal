@@ -1,4 +1,4 @@
-"""Frozen SkillsBench startup policy and explicit, timed check receipts."""
+"""Frozen startup policy and explicit, timed check receipts."""
 import logging
 import time
 from contextlib import contextmanager
@@ -10,7 +10,8 @@ SKIP_REASON = "execution.preflight.long_checks=false"
 
 
 def long_checks_enabled(cfg):
-    if identity(cfg) != ("skillsbench", "openhands"):
+    if identity(cfg) not in {("skillsbench", "openhands"),
+                             ("terminalbench_2_1", "openhands"), ("swebench_pro_v2", "openhands")}:
         return True
     return cfg.get("execution", {}).get("preflight", {}).get("long_checks", True)
 

@@ -1,5 +1,6 @@
 import copy
 import math
+import re
 import socket
 from types import SimpleNamespace
 
@@ -71,6 +72,7 @@ def test_identical_attempt_ids_from_different_samples_are_cleaned_separately():
     seen = []
     factory = HarborFactory.__new__(HarborFactory)
     factory.run_id = "run"
+    factory.owner_id = "factory"
     factory.client = SimpleNamespace(
         containers=SimpleNamespace(list=lambda **kw: seen.append(kw["filters"]["label"]) or []),
         networks=SimpleNamespace(list=lambda **kw: []))
@@ -78,6 +80,53 @@ def test_identical_attempt_ids_from_different_samples_are_cleaned_separately():
     factory.cleanup_attempt("rep-000-attempt-000", "sample-two")
     assert "dycon.sample=sample-one" in seen[0]
     assert "dycon.sample=sample-two" in seen[2]
+
+
+def test_cleanup_accepts_disappearing_container_but_reports_residual_network(tmp_path):
+    from docker.errors import APIError, NotFound
+    from core.io import read_json
+
+    def removed_elsewhere(**_):
+        raise NotFound("gone", response=SimpleNamespace(status_code=404))
+
+    def active_endpoints():
+        raise APIError("still in use", response=SimpleNamespace(status_code=409))
+
+    container = SimpleNamespace(id="container", remove=removed_elsewhere)
+    network = SimpleNamespace(id="network", remove=active_endpoints)
+    containers = iter([[container], []])
+    factory = HarborFactory.__new__(HarborFactory)
+    factory.run_id, factory.owner_id = "run", "factory"
+    factory.client = SimpleNamespace(
+        containers=SimpleNamespace(list=lambda **kw: next(containers)),
+        networks=SimpleNamespace(list=lambda **kw: [network]))
+    with pytest.raises(RuntimeError, match="owned resource cleanup failed"):
+        factory.cleanup_attempt("physical", "sample", tmp_path, trial_name="trial")
+    receipt = read_json(tmp_path / "cleanup.json")
+    assert not receipt["complete"]
+    assert receipt["residual"] == []
+    assert receipt["networks_residual"] == ["network"]
+    assert receipt["errors"] == [{"kind": "network", "id": "network", "status_code": 409}]
+
+
+def test_worker_trial_identity_is_bounded_and_scoped_to_resource_owner(cfg, tmp_path):
+    cfg.update(execution_context={"profile": {"dependency_snapshot": "/offline"}}, harbor={"cpu_quota": "strict"})
+    factory = SimpleNamespace(cpu_supported=True, owner_id="owner", images={})
+    binding = {"sample_key": "sample-one", "attempt_id": "rep-000-attempt-000"}
+
+    def request(run="RUN/" * 100, sample=binding, operation="execute"):
+        row = worker_request(cfg, run, factory, harbor_task(), sample, tmp_path, operation)
+        assert row["trial_name"] == row["environment"]["trial_name"]
+        assert re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}", row["trial_name"])
+        return row["trial_name"]
+
+    original = request()
+    assert request() == original
+    others = {request(run="other"), request(sample={**binding, "sample_key": "sample-two"}),
+              request(sample={**binding, "attempt_id": "rep-000-attempt-001"}), request(operation="replay")}
+    factory.owner_id = "another-owner"
+    others.add(request())
+    assert len(others) == 5 and original not in others
 
 
 def test_worker_request_preserves_task_timeout_and_explicit_cpu_deviation(cfg, tmp_path):

@@ -48,9 +48,10 @@ def mutable_repository_index(url):
 
 class DownloadCache:
     def __init__(self):
-        self.store = Store(os.environ['DYCON_RESOURCE_CACHE'])
+        cache_directory = Path(os.environ['DYCON_RESOURCE_CACHE'])
+        self.store = Store(os.environ.get('DYCON_RESOURCE_CACHE_STORE', cache_directory))
         self.offline = os.environ['DYCON_RESOURCE_CACHE_MODE'] == 'replay'
-        descriptor = json.loads((self.store.root / 'record.json').read_text())
+        descriptor = json.loads((cache_directory / 'record.json').read_text())
         self.upstream_hosts = descriptor.get('upstream_hosts', {})
         self.pending = {}
         self.token = secrets.token_urlsafe(32)
@@ -109,7 +110,7 @@ class DownloadCache:
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), Files)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         from core.io import write_json, sha256
-        write_json(self.store.root / 'addon-ready.json', {
+        write_json(cache_directory / 'addon-ready.json', {
             'pid': os.getpid(), 'mode': 'replay' if self.offline else 'record',
             'script_sha256': sha256(Path(__file__)), 'script': str(Path(__file__).resolve())})
 

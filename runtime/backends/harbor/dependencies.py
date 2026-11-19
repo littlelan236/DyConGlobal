@@ -15,7 +15,7 @@ HARBOR_REVISION = "5eb713ff9500daced4e143b98765a7c732744a1b"
 HARBOR_VERSION = "0.25.0"
 
 
-def verify_runtime(directory):
+def verify_runtime(directory, *, deep=True):
     directory = Path(directory).resolve()
     manifest = read_json(directory / "manifest.json")
     body = {k: v for k, v in manifest.items() if k != "receipt_sha256"}
@@ -25,10 +25,12 @@ def verify_runtime(directory):
     for row in manifest["files"]:
         path = directory / row["path"]
         if (path.is_symlink() or not path.resolve().is_relative_to(directory) or not path.is_file() or
-                path.stat().st_size != row["size"] or sha256(path) != row["sha256"]):
+                path.stat().st_size != row["size"] or (deep and sha256(path) != row["sha256"])):
             raise ValueError("Harbor dependency changed: " + row["path"])
     python = directory / "venv/bin/python"
-    if sha256(python.resolve()) != manifest["python"]["executable_sha256"]:
+    if not python.is_file() or not os.access(python, os.X_OK):
+        raise ValueError("Harbor worker interpreter is unavailable")
+    if deep and sha256(python.resolve()) != manifest["python"]["executable_sha256"]:
         raise ValueError("Harbor worker interpreter changed")
     return manifest
 

@@ -10,6 +10,7 @@ from packaging.utils import canonicalize_name, parse_wheel_filename
 
 from core.io import hash_json, identifier, now, read_json, write_json
 from core.locking import file_lock
+from runtime.containers.errors import EnvironmentSetupFailed
 
 INSTALL_FAILURE_MARKER = '__DYCON_DEPENDENCY_INSTALL_FAILED__'
 _INSTALL_FAILURE = re.compile(r'^' + INSTALL_FAILURE_MARKER + r' rc=(\d+) command=(.*)$', re.M)
@@ -136,8 +137,6 @@ def from_exception(exception):
 
 def setup_error(cfg, context, message, *, stage, returncode=None, requirements=(),
                 reason=None, log_path=None, wheelhouse=None, version_checks=()):
-    from runtime.containers.factory import EnvironmentSetupFailed
-
     failure = classify_dependency_failure(message, stage=stage, returncode=returncode,
         requirements=requirements, wheelhouse=wheelhouse or cfg['environment'].get('wheelhouse'),
         reason=reason, log_path=log_path, offline=not cfg['environment'].get('network_fallback', False))

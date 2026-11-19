@@ -91,6 +91,8 @@ def test_receipt_is_bound_to_attempt_and_original_command(tmp_path, monkeypatch)
     details = get_test_command(script)
     receipt = {"instance_id": task["instance_id"], "evaluation_task_id": eid,
                "returncode": 0, "test_command_sha256": details["command_sha256"]}
+    from benchmark_evaluation.swebench_receipts import get_pytest_binding
+    receipt["pytest_binding"] = get_pytest_binding((logs / "eval.sh").read_text())
     write_json(env / "eval-execution.json", receipt)
     assert not collect(output, eid, rid, task, outcome)["collection_errors"]
     receipt["test_command_sha256"] = "wrong"
@@ -128,10 +130,11 @@ def test_live_adapter_writes_execution_without_rebuilding_metadata(tmp_path, mon
     factory = SimpleNamespace(
         policy_for=lambda row: SimpleNamespace(wrap_eval=lambda script: instrument(script)[0]),
         execute=lambda *args: {"output": "captured output", "returncode": returncode},
+        collect_eval_receipts=lambda *args: [],
         probe=lambda *args: probes.append(args), close=lambda *args: None)
     iid = "org__repo-1"
-    container = SimpleNamespace(instance={"instance_id": iid},
-                                context=SimpleNamespace(attempt_id="task-bound", output_dir=tmp_path / "environment"))
+    container = SimpleNamespace(id="container-bound", instance={"instance_id": iid},
+                                context=SimpleNamespace(run_id="run-bound", attempt_id="task-bound", output_dir=tmp_path / "environment"))
     cfg = {"environment": {"requirements_cache": str(tmp_path / "requirements")},
            "project_root": str(tmp_path), "timeouts": {"metadata_request_seconds": 1}}
     before_exec = official.exec_run_with_timeout
@@ -139,6 +142,7 @@ def test_live_adapter_writes_execution_without_rebuilding_metadata(tmp_path, mon
     try:
         script = TestSpec.eval_script.fget(SimpleNamespace(instance_id=iid))
         assert "__DYCON_TEST_RESULT__" in script
+        assert TestSpec.eval_script.fget(SimpleNamespace(instance_id=iid)) == script
         output, observed_timeout, _ = adapter.exec_run_with_timeout(container, "/bin/bash /eval.sh", 30)
         assert output == "captured output" and observed_timeout == timed_out
         receipt = json.loads((container.context.output_dir / "eval-execution.json").read_text())

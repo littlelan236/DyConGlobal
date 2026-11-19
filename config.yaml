@@ -21,16 +21,21 @@ model:
   served_name: Qwen3.5-9B
   trust_remote_code: false
 serving:
-  base_url: http://127.0.0.1:18240/v1
+  base_url: http://127.0.0.1:18250/v1
   api_key_env: DYCON_API_KEY
   management: managed
   python: /home/wangtianyi/DyConGlobal/.venvs/easysteer/bin/python
   gpus:
-  - 0
+  - 5
+  - 6
+  - 7
   tensor_parallel_size: 1
-  trajectory_sharding: none
-  replica_base_urls: []
-  max_cpu_workers_per_gpu: 1
+  trajectory_sharding: per_gpu_tp1
+  replica_base_urls:
+  - http://127.0.0.1:18250/v1
+  - http://127.0.0.1:18251/v1
+  - http://127.0.0.1:18252/v1
+  max_cpu_workers_per_gpu: 12
   startup_mode: serial
   allow_mig_sharing: false
   gpu_memory_utilization: 0.85
@@ -42,8 +47,9 @@ serving:
   language_model_only: true
   dtype: float16
   kv_cache_memory_bytes: null
-  max_num_seqs: 32
+  max_num_seqs: 8
   max_num_batched_tokens: 2048
+
 generation:
   temperature: 0.6
   top_p: 0.95
@@ -484,10 +490,11 @@ execution:
     - LimitsExceeded
     - reasoning_loop
     seed_policy: repetition_round_offset_v1
-  rollout_workers: 1
+  rollout_workers: 36
   harness_workers: 4
   infrastructure_retry_limit: 3
   pipeline_wall_seconds: 0
+
 timeouts:
   container_start_seconds: 900
   container_lifetime_seconds: 57600
@@ -765,4 +772,22 @@ harbor:
   terminal_policy: terminalbench-live-v1
   task_python_index: https://mirrors.aliyun.com/pypi/simple/
   task_apt_mirror: https://mirrors.aliyun.com/ubuntu/
-  task_resource_cache: /data3/wangtianyi/terminalbench-resource-cache-v1/record.json
+  task_resource_cache: /data3/wangtianyi/terminalbench-full89-cache-sealed-20261117-v6/replay.json
+  task_preparation:
+    '*':
+      cpu_affinity: true
+    git-multibranch:
+      cpu_affinity: true
+      sshd_runtime_directory: true
+      system_packages: [tmux]
+    mcmc-sampling-stan:
+      cpu_affinity: true
+      system_packages:
+      - cmake
+    build-cython-ext:
+      cpu_affinity: true
+      python_constraints:
+      - planarity==0.6
+    torch-tensor-parallelism:
+      cpu_affinity: false
+
