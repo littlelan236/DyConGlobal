@@ -13,6 +13,9 @@ LORA = Lora(rank=2, alpha=4, dropout=0.0, target_scope="text_backbone_all_linear
 
 
 def raw_model(layers=2, *, linear_only=False, max_positions=128):
+    from RL.gdn_backend import active_binding, install_gdn_backend
+    if active_binding() is None:
+        install_gdn_backend("reference_pytorch")
     seed_everything(123)
     config = Qwen3_5Config(
         text_config=dict(vocab_size=64, hidden_size=32, intermediate_size=48, num_hidden_layers=layers,

@@ -56,6 +56,122 @@ class UnixModelChannel:
         self.path.unlink(missing_ok=True)
 
 
+
+def process_identity(pid):
+    """Linux PID plus start ticks, excluding exited/zombie processes."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        if fields[0] == "Z":
+            return None
+        return {"pid": pid, "start_ticks": fields[19]}
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+
+
+def signal_owned(identity, sig):
+    """Pin the kernel process before checking identity; never kill by UID/group."""
+    import signal
+    if not identity:
+        return False
+    try:
+        fd = os.pidfd_open(identity["pid"])
+    except ProcessLookupError:
+        return False
+    try:
+        if process_identity(identity["pid"]) != identity:
+            return False
+        try:
+            signal.pidfd_send_signal(fd, sig)
+        except ProcessLookupError:
+            return False
+        return True
+    finally:
+        os.close(fd)
+
+
+def save_processes(path, body):
+    path = Path(path)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(body))
+    temporary.chmod(0o600)
+    temporary.replace(path)
+
+
+def supervise_acp(argv, relay_pid, receipt):
+    """Own only ACP and relay; task services outlive these runtime processes."""
+    import signal
+    import subprocess
+    record = {"schema_version": 1, "supervisor": process_identity(os.getpid()),
+              "relay": process_identity(relay_pid), "acp": None}
+    save_processes(receipt, record)
+    process = None
+
+    def terminate(signum, frame):
+        raise SystemExit(128 + signum)
+
+    previous = signal.signal(signal.SIGTERM, terminate)
+    try:
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        try:
+            process = subprocess.Popen(argv, restore_signals=True,
+                preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, mask))
+            record["acp"] = process_identity(process.pid)
+            save_processes(receipt, record)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        return process.wait()
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        if process is not None and process.poll() is None:
+            signal_owned(record["acp"], signal.SIGTERM)
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                signal_owned(record["acp"], signal.SIGKILL)
+                process.wait(timeout=3)
+        import time
+        signal_owned(record["relay"], signal.SIGTERM)
+        deadline = time.monotonic() + 3
+        with contextlib.suppress(ChildProcessError):
+            while not os.waitpid(relay_pid, os.WNOHANG)[0]:
+                if time.monotonic() >= deadline:
+                    signal_owned(record["relay"], signal.SIGKILL)
+                    os.waitpid(relay_pid, 0)
+                    break
+                time.sleep(.05)
+        record["children_stopped"] = all(process_identity(record[k]["pid"]) != record[k]
+                                         for k in ("acp", "relay") if record[k])
+        save_processes(receipt, record)
+        signal.signal(signal.SIGTERM, previous)
+
+
+def stop_owned(receipt):
+    """External docker-exec cleanup, also covering detached stdio transports."""
+    import signal
+    import time
+    record = json.loads(Path(receipt).read_text())
+    signal_owned(record["supervisor"], signal.SIGTERM)
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        if all(not record.get(k) or process_identity(record[k]["pid"]) != record[k]
+               for k in ("supervisor", "acp", "relay")):
+            break
+        time.sleep(.05)
+    updated = json.loads(Path(receipt).read_text())
+    if updated.get("supervisor") != record.get("supervisor"):
+        raise ValueError("ACP process receipt changed ownership")
+    record = updated
+    for key in ("acp", "relay", "supervisor"):
+        signal_owned(record.get(key), signal.SIGKILL)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if all(not record.get(k) or process_identity(record[k]["pid"]) != record[k]
+               for k in ("supervisor", "acp", "relay")):
+            return {"verified": True, "processes": record, "task_services_preserved": True}
+        time.sleep(.05)
+    raise RuntimeError("Owned ACP/relay processes are still alive")
+
+
 def launch_acp():
     """Runs inside the sandbox; API tokens arrive only through process env."""
     listener = socket.socket()
@@ -64,6 +180,10 @@ def launch_acp():
     port = listener.getsockname()[1]
     child = os.fork()
     if child == 0:
+        if os.environ.get("DYCON_PROCESS_RECEIPT"):
+            for fd in (0, 1, 2):
+                with contextlib.suppress(OSError):
+                    os.close(fd)
         try:
             while True:
                 incoming, _ = listener.accept()
@@ -78,9 +198,41 @@ def launch_acp():
         finally:
             os._exit(0)
     listener.close()
+    identity = process_identity(child)
+    try:
+        if os.environ.get("DYCON_PROCESS_RECEIPT"):
+            save_processes(os.environ["DYCON_PROCESS_RECEIPT"], {"schema_version": 1,
+                "supervisor": process_identity(os.getpid()), "relay": identity, "acp": None})
+        return _configure_and_launch(port, child)
+    finally:
+        if os.environ.get("DYCON_PROCESS_RECEIPT"):
+            import signal
+            signal_owned(identity, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(child, 0)
+
+
+def _configure_and_launch(port, child):
     base_url = f"http://127.0.0.1:{port}/v1"
     os.environ["LLM_BASE_URL"] = base_url
     os.environ["BENCHFLOW_PROVIDER_BASE_URL"] = base_url
+    if os.environ.get("DYCON_PROBE_CHANNEL") == "1":
+        import urllib.error
+        import urllib.request
+        checks = {}
+        for label, token, expected in (("authenticated", os.environ["LLM_API_KEY"], 200),
+                                       ("unauthenticated", "invalid", 401)):
+            request = urllib.request.Request(base_url + "/dycon-health",
+                headers={"Authorization": "Bearer " + token})
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    checks[label] = response.status == expected
+            except urllib.error.HTTPError as exc:
+                checks[label] = exc.code == expected
+        checks["verified"] = all(checks.values())
+        Path.home().joinpath("dycon-model-channel-probe.json").write_text(json.dumps(checks))
+        if not checks["verified"]:
+            raise RuntimeError("Terminal model channel authentication probe failed")
     if os.environ.get("DYCON_PROBE_NETWORK") == "1":
         import urllib.error
         import urllib.request
@@ -115,8 +267,15 @@ def launch_acp():
     settings.write_text(json.dumps({"llm": {"model": os.environ["LLM_MODEL"],
         "api_key": os.environ["LLM_API_KEY"], "base_url": base_url}}))
     settings.chmod(0o600)
-    os.execv("/opt/dycon-openhands/bin/openhands", ["openhands", "acp", "--always-approve", "--override-with-envs"])
+    argv = ["/opt/dycon-openhands/bin/openhands", "acp", "--always-approve", "--override-with-envs"]
+    if os.environ.get("DYCON_PROCESS_RECEIPT"):
+        raise SystemExit(supervise_acp(argv, child, os.environ["DYCON_PROCESS_RECEIPT"]))
+    os.execv(argv[0], argv)
 
 
 if __name__ == "__main__":
-    launch_acp()
+    import sys
+    if len(sys.argv) == 3 and sys.argv[1] == "--stop":
+        print(json.dumps(stop_owned(sys.argv[2])))
+    else:
+        launch_acp()

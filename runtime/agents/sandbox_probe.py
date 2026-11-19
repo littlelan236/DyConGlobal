@@ -1,4 +1,4 @@
-"""Shared non-root OpenHands runtime/tool probe; runs inside the owned sandbox."""
+"""Shared OpenHands runtime/tool probe with explicit sandbox identity."""
 from __future__ import annotations
 
 import json
@@ -10,12 +10,16 @@ import time
 from pathlib import Path
 
 
-def probe(workspace, model_seconds):
+def probe(workspace, model_seconds, expected_user="agent", expected_home="/home/agent"):
     from openhands_cli.stores.agent_store import AgentStore
     from openhands.tools.terminal import TerminalAction, TerminalExecutor
 
-    if os.getuid() == 0:
-        raise ValueError('OpenHands sandbox probe must run as the actual non-root agent')
+    import pwd
+    expected_uid = pwd.getpwnam(expected_user).pw_uid
+    if os.getuid() != expected_uid or (os.getuid() == 0 and expected_user != 'root'):
+        raise ValueError('OpenHands sandbox probe identity differs from expected agent')
+    if os.environ.get('HOME') != expected_home or str(Path.home()) != expected_home:
+        raise ValueError('OpenHands sandbox probe HOME differs from expected agent')
     os.chdir(workspace)
     os.environ.update(LLM_MODEL='openai/dycon-environment-probe', LLM_API_KEY='probe',
         LLM_BASE_URL='http://127.0.0.1:9/v1', DYCON_OPENHANDS_TERMINAL='subprocess',
@@ -31,7 +35,11 @@ def probe(workspace, model_seconds):
         raise ValueError('Published CLI does not consume the frozen terminal/SDK timeout contract')
     executor = TerminalExecutor(working_dir=workspace, terminal_type='subprocess')
     try:
-        observation = executor.session.execute(TerminalAction(command='printf dycon_terminal_ok', timeout=5))
+        command = ('printf dycon_terminal_ok; id -u; pwd; '
+                   'command -v python || true; command -v python3 || true; '
+                   'if command -v python >/dev/null; then python -c \"import sys; print(sys.executable)\"; '
+                   'elif command -v python3 >/dev/null; then python3 -c \"import sys; print(sys.executable)\"; fi')
+        observation = executor.session.execute(TerminalAction(command=command, timeout=5))
         if 'dycon_terminal_ok' not in str(observation):
             raise ValueError('Native OpenHands subprocess tool did not execute')
     finally:
@@ -84,9 +92,10 @@ def probe(workspace, model_seconds):
             'model_timeout_seconds': agent.llm.timeout, 'sdk_retries': agent.llm.num_retries,
             'condenser': {'max_size': agent.condenser.max_size,
                           'keep_first': agent.condenser.keep_first},
-            'real_tool_executed': True, 'acp': receipts, 'model_requests': 0, 'verified': True}
+            'real_tool_executed': True, 'terminal_identity_output': str(observation),
+            'path': os.environ.get('PATH'), 'acp': receipts, 'model_requests': 0, 'verified': True}
 
 
 if __name__ == '__main__':
     import sys
-    print(json.dumps(probe(sys.argv[1], int(sys.argv[2]))))
+    print(json.dumps(probe(sys.argv[1], int(sys.argv[2]), *sys.argv[3:])))

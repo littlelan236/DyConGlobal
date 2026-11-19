@@ -38,6 +38,8 @@ def scalar_values(row, *, include_k3=True):
     # Drift is useful even when KL is not part of the optimization objective.
     # Existing train/* tags remain compatibility aliases for saved dashboards.
     values.update({tag: row[k] for k, tag in SIGNAL_TAGS.items() if k in row})
+    if type(row.get('policy_changed')) is bool:
+        values[SIGNAL_TAGS['policy_changed']] = int(row['policy_changed'])
     from RL.grpo.signals import throughput
     values.update({SIGNAL_TAGS[k]: v for k, v in throughput(row).items()
                    if k in SIGNAL_TAGS and k not in row})

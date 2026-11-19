@@ -53,6 +53,20 @@ def main(argv=None):
     hb.add_argument("--control-id", required=True)
     hb.add_argument("--agent", choices=["oracle", "nop", "gold-replay", "empty-replay"], required=True)
     hb.add_argument("--task-id", action="append", default=[])
+    hb = hb_sub.add_parser("controls-audit", help="Reclassify saved Terminal-Bench controls into a new audit receipt")
+    hb.add_argument("run_id")
+    hb.add_argument("--control-id", required=True)
+    hb.add_argument("--audit-id", required=True)
+    from runtime.backends.harbor.resource_cache import register as register_resource_cache
+    register_resource_cache(hb_sub)
+    hb = hb_sub.add_parser("reference-publish", help="Publish an explicit derived oracle solution with unchanged verifier")
+    hb.add_argument("run_id")
+    hb.add_argument("--task-id", required=True)
+    hb.add_argument("--reference-id", required=True)
+    hb.add_argument("--source", type=Path, required=True)
+    hb.add_argument("--reason", required=True)
+    hb_sub.choices["controls"].add_argument("--reference-ref", type=Path,
+        help="Explicit derived reference publication; single oracle task only")
     webarena = sub.add_parser("webarena", help="WebArena Verified import, runtime and frozen-run preflight")
     wa_sub = webarena.add_subparsers(dest="webarena_command", required=True)
     wa = wa_sub.add_parser("import", help="Import public tasks and isolate pinned official evaluation definitions")
@@ -180,6 +194,14 @@ def main(argv=None):
     sw = sw_sub.add_parser("catalog-list", help="Summarize or export SWE catalog tasks by official group")
     sw.add_argument("--group", choices=["verified", "dev", "nonverified"])
     sw.add_argument("--output", type=Path)
+
+    sw = sw_sub.add_parser("images-pull", help="Resume pinned official Verified/dev missing images to NAS")
+    sw.add_argument("store_id")
+    sw.add_argument("--plan", type=Path, required=True)
+    sw.add_argument("--proxy")
+    sw.add_argument("--workers", type=int, default=4)
+    sw.add_argument("--attempts", type=int, default=3)
+    sw.add_argument("--check-only", action="store_true")
 
     sb = sb_sub.add_parser("cleanup-network", help="Reconcile a stopped run owned legacy proxy")
     sb.add_argument("run_id")
@@ -376,13 +398,13 @@ def main(argv=None):
     artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
     q = artifact_sub.add_parser("show")
     q.add_argument("run_id", nargs="?")
-    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-dataset", "rl-cache", "rl-replay", "rl-probability", "rl-probability-plan", "rl-prepared", "rl-reference", "rl-extension"], default="run")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-full-attempt", "rl-dataset", "rl-cache", "rl-replay", "rl-probability", "rl-probability-plan", "rl-prepared", "rl-reference", "rl-extension"], default="run")
     q.add_argument("--storage-root", type=Path)
     q.add_argument("--with-tensors", action="store_true")
     q.add_argument("--dataset-id")
     q = artifact_sub.add_parser("verify")
     q.add_argument("run_id", nargs="?")
-    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-dataset", "rl-cache", "rl-replay", "rl-probability", "rl-probability-plan", "rl-prepared", "rl-reference", "rl-extension"], default="run")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-full-attempt", "rl-dataset", "rl-cache", "rl-replay", "rl-probability", "rl-probability-plan", "rl-prepared", "rl-reference", "rl-extension"], default="run")
     q.add_argument("--storage-root", type=Path)
     q.add_argument("--with-tensors", action="store_true")
     q.add_argument("--dataset-id")
@@ -654,7 +676,7 @@ def main(argv=None):
     p.add_argument("--dataset-id", required=True)
     p.add_argument("--task-partitions", required=True, type=Path)
     a = parser.parse_args(argv)
-    if a.command in {"lora-export", "lora-train", "lora-prepare", "lora-status", "lora-tensorboard", "lora-advantages", "lora-memory", "lora-probe", "lora-probe-plot"} or (a.command == "artifact" and a.scope == "lora-attempt"):
+    if a.command in {"rl-gradient-compare", "rl-status", "rl-tensorboard", "rl-advantages", "rl-train", "rl-export", "rl-probe", "lora-export", "lora-train", "lora-prepare", "lora-status", "lora-tensorboard", "lora-advantages", "lora-memory", "lora-probe", "lora-probe-plot"} or (a.command == "artifact" and a.scope in {"lora-attempt", "rl-full-attempt"}):
         if a.set or a.analysis_run_id:
             parser.error("LoRA uses an independent training YAML; do not pass --set or --run-id")
         from RL.cli import execute as execute_lora
@@ -939,7 +961,7 @@ def main(argv=None):
                     or (a.command in run_commands and not (
                         a.command == "artifact" and getattr(a, "scope", "run") != "run"))
                     or (a.command == "webarena" and a.webarena_command == "preflight")
-                    or (a.command == "harbor" and a.harbor_command in {"preflight", "controls"})
+                    or (a.command == "harbor" and a.harbor_command in {"preflight", "controls", "controls-audit"})
                     or a.analysis_run_id is not None
                     or (a.command in {"enrich", "token-trace", "trajectory-token-audit", "hidden", "dataset-index", "token-join"} and explicit_run is not None))
     if use_snapshot:
@@ -956,7 +978,13 @@ def main(argv=None):
         if a.set or a.analysis_run_id:
             parser.error("harbor registry commands use the root configuration")
         from runtime.backends.harbor.dependencies import prepare_runtime, probe_schemas, verify_runtime
-        if a.harbor_command == "runtime-prepare":
+        if a.harbor_command == "resource-cache":
+            from runtime.backends.harbor.resource_cache import dispatch
+            result = dispatch(cfg["project_root"], a, cfg)
+        elif a.harbor_command == "reference-publish":
+            from runtime.backends.harbor.reference_solutions import publish_reference
+            result = publish_reference(cfg["project_root"], a.run_id, a.task_id, a.reference_id, a.source, a.reason)
+        elif a.harbor_command == "runtime-prepare":
             result = prepare_runtime(cfg, a.publication_id, a.source, a.uv, a.python)
         elif a.harbor_command == "runtime-verify":
             result = verify_runtime(a.publication)
@@ -974,9 +1002,12 @@ def main(argv=None):
         elif a.harbor_command == "preflight":
             from runtime.backends.harbor.operations import preflight
             result = preflight(cfg["project_root"], a.run_id)
+        elif a.harbor_command == "controls-audit":
+            from runtime.backends.harbor.operations import audit_controls
+            result = audit_controls(cfg["project_root"], a.run_id, a.control_id, a.audit_id)
         else:
             from runtime.backends.harbor.operations import controls
-            result = controls(cfg["project_root"], a.run_id, a.control_id, a.agent, a.task_id)
+            result = controls(cfg["project_root"], a.run_id, a.control_id, a.agent, a.task_id, reference_ref=a.reference_ref)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         if a.harbor_command == "preflight" and not result["passed"]:
             raise SystemExit(2)
@@ -1311,6 +1342,12 @@ def main(argv=None):
                 result = sync(cfg, source_path=a.source, image_plans=a.image_plan, output=a.output, apply=a.apply)
             else:
                 result = list_tasks(cfg, group=a.group, output=a.output)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return
+        if a.swebench_command == "images-pull":
+            from runtime.images.swebench_pull import pull
+            result = pull(cfg, a.store_id, plan_path=a.plan, proxy=a.proxy,
+                          workers=a.workers, attempts=a.attempts, check_only=a.check_only)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return
         if a.swebench_command == "openhands-profile":

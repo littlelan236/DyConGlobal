@@ -133,6 +133,14 @@ Native streaming 的单卡/双卡正式 CLI 连续、暂停、独立进程两次
 
 ## Whole-step memory policy
 
+For opt-in `memory_pressure`, each rank selects checkpoint tensors using its own
+driver-free GPU memory and compute/H2D headroom. Hooks contain no collectives.
+All ranks still exchange compute/cleanup status before the first gradient
+collective and retry the same window together, including ranks that succeeded or
+had no groups. `host_offload` checks the process-wide pinned budget and all local
+ranks' aggregate startup demand even if optional resource preflight is off.
+See [managed host allocation and policy contract](HOST_OFFLOAD_PRESSURE.md).
+
 Deployment status (2026-11-14): CPU state-machine and real 1/2/4-process Gloo
 checks pass; the v11 fresh configuration passes CLI dry-run. Production GPU
 acceptance is deferred while existing GPU workloads are preserved. Earlier short

@@ -1,0 +1,73 @@
+schema_version: 2
+run:
+  attempt_id: full-9b-fsdp2-gpu56-pause-20261117-v3
+  mode: smoke
+  seed: 42
+  start:
+    mode: fresh
+    checkpoint: null
+model:
+  path: /VM/wangtianyi/DyConGlobal/models/Qwen3.5-9B
+  dtype: bfloat16
+  attention_backend: sdpa
+  gradient_checkpointing: true
+  gdn_backend: reference_pytorch
+runtime:
+  gpus:
+  - 5
+  - 6
+  output_root: /home/wangtianyi/DyConGlobal
+  distributed_timeout_seconds: 1800
+training:
+  max_updates: 2
+  gradient_accumulation_steps: 1
+  learning_rate: 1.0e-06
+  weight_decay: 0.0
+  grad_clip: 1.0
+  scheduler: constant
+  checkpoint_every_updates: 2
+  memory:
+    loss_chunk_tokens: 16
+    exact_length: true
+    activation_offload: none
+    oom_retry:
+      enabled: false
+validation:
+  fixture_id: causal-text-smoke-v1
+  max_sequence_length: 128
+  stop_after_update: 1
+algorithm:
+  name: offline_grpo_k3_v1
+  dataset_root: /home/wangtianyi/DyConGlobal
+  dataset_id: synthetic-grpo-smoke-v1
+  require_data_ready: true
+grpo:
+  group_batch_size: 4
+  max_epochs: 1
+  shuffle_seed: 42
+  top_k: 1
+  top_k_fraction: null
+  score_scale_floor: 0.1
+  boundary_tie_sigma: 0.05
+  clip_epsilon: 0.1
+  kl_beta: 0.02
+  reference: initial_policy
+  probability_mode: raw_t1
+  k3_cap: 1.0
+  prefix_reuse:
+    mode: disabled
+tuning:
+  mode: full
+  scope: language_model
+  freeze_vision: true
+execution:
+  backend: fsdp2
+  sharding: full_shard
+  topology_policy: exact
+optimizer:
+  name: adamw
+  master_weights_dtype: float32
+  states_dtype: float32
+preflight:
+  verify_identity: true
+  check_resources: true

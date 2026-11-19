@@ -2,7 +2,9 @@
 
 Only token positions in the MLP and output projection are chunked. Attention always
 sees the complete causal sequence. No parameter gradients or collectives are written
-here; autograd owns both. FSDP, compilation and higher-order gradients are unsupported.
+here; autograd owns both. The boundary offloader also supports FSDP2 local
+checkpoint inputs; the custom chunked MLP/CE backends do not support FSDP.
+Compilation and higher-order gradients are unsupported.
 """
 
 import contextlib
@@ -16,6 +18,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from RL.allocator import HOST_POLICY_VERSION
 
 
 def local_saved_tensors():
@@ -236,12 +239,22 @@ def install_mlp_backend(model, chunk_tokens):
 
 class BoundaryOffload:
     """Offload only non-reentrant checkpoint input activations, never model weights."""
-    def __init__(self, model, budget_bytes, *, enabled=True):
+    def __init__(self, model, budget_bytes, *, enabled=True, host_settings=None, pressure_settings=None):
         self.budget_bytes = budget_bytes
         self.enabled = enabled
-        self.parameter_storages = {p.untyped_storage().data_ptr() for p in model.parameters()}
+        self.host_settings, self.pressure_settings = host_settings, pressure_settings
+        self.pool = None
+        self.retry_headroom_bytes = 0
+        # FSDP2 parameters are DTensors; storage access is valid only on their
+        # local shards. This does not gather/materialize distributed weights.
+        self.parameter_storages = {
+            (p.to_local() if hasattr(p, "to_local") else p).untyped_storage().data_ptr()
+            for p in model.parameters()}
         self.live_bytes = self.peak_bytes = 0
         self.reset()
+        if host_settings is not None and host_settings.enabled and next(model.parameters()).is_cuda:
+            from RL.host_offload import ManagedHostPool
+            self.pool = ManagedHostPool(host_settings)
 
     def reset(self):
         self.d2h_bytes = self.h2d_bytes = 0
@@ -249,6 +262,51 @@ class BoundaryOffload:
         self.events = {"d2h": [], "h2d": []}
         self.peak_bytes = self.live_bytes
         self.budget_rejection = None
+        self._boundary_clean = False
+        self.selected_boundaries = self.retained_boundaries = 0
+        self.selection_reasons = {}
+        self.last_selection = None
+
+    def begin_window(self):
+        # Retry feedback is window-local: exact resume has no hidden policy state.
+        self.retry_headroom_bytes = 0
+
+    def safe_boundary(self):
+        if self.pool is None: return None
+        # Adam staging shares this pool but does not pack an activation, so it
+        # can dirty the allocator after the activation boundary was clean.
+        pool_dirty = (self.pool.native_release_pending or getattr(self.pool, "_needs_reclaim", False)
+                      or bool(getattr(self.pool, "pending_admission_releases", ())))
+        if self._boundary_clean and not pool_dirty: return None
+        import gc
+        if self.live_bytes: gc.collect()
+        if self.live_bytes:
+            raise RuntimeError("Pinned checkpoint activations survived safe boundary")
+        if self.pool.blocks or self.pool.native_release_pending: torch.cuda.synchronize()
+        row = self.pool.safe_boundary()
+        self._boundary_clean = True
+        return row
+
+    def reclaim_completed(self):
+        if self.pool is not None: return self.pool.poll()
+
+    def close(self):
+        if self.pool is None or self.pool.closed: return None
+        self.safe_boundary()
+        return self.pool.close()
+
+    def _select(self, tensor, size):
+        if self.pressure_settings is None: return True
+        from RL.host_offload import pressure_choice
+        free, _ = torch.cuda.mem_get_info(tensor.device)
+        choice = pressure_choice(driver_free_bytes=int(free),
+            allocated_bytes=torch.cuda.memory_allocated(tensor.device),
+            reserved_bytes=torch.cuda.memory_reserved(tensor.device), tensor_bytes=size,
+            headroom_bytes=int(self.pressure_settings.device_headroom_gib * 2**30),
+            retry_headroom_bytes=self.retry_headroom_bytes)
+        self.last_selection = choice
+        self.selection_reasons[choice["reason"]] = self.selection_reasons.get(choice["reason"], 0) + 1
+        return choice["offload"]
 
     def _release(self, size):
         self.live_bytes -= size
@@ -267,21 +325,49 @@ class BoundaryOffload:
         def pack(tensor):
             # Non-reentrant checkpoint's input saver also saves an empty sentinel.
             # Only rank-3 hidden-state boundaries can be moved; weights stay resident.
-            if (tensor.device.type != "cuda" or tensor.ndim != 3 or not tensor.numel()
+            if (isinstance(tensor, torch.nn.Parameter) or hasattr(tensor, "placements")
+                    or tensor.device.type != "cuda" or tensor.ndim != 3 or not tensor.numel()
                     or tensor.untyped_storage().data_ptr() in self.parameter_storages):
                 return False, tensor
             size = tensor.numel() * tensor.element_size()
+            if not self._select(tensor, size):
+                self.retained_boundaries += 1
+                return False, tensor
             if self.live_bytes + size > self.budget_bytes:
                 self.budget_rejection = {"requested_bytes": size, "live_bytes": self.live_bytes,
                                          "budget_bytes": self.budget_bytes}
                 raise RuntimeError("Pinned activation host budget exceeded; offload was not disabled")
             started = time.monotonic()
-            packed = self._copy("d2h", lambda: native.pack_hook(tensor))
+            self._boundary_clean = False
+            if self.host_settings is not None and self.host_settings.enabled:
+                from RL.host_offload import ManagedHostPool, HostLease
+                if self.pool is None: self.pool = ManagedHostPool(self.host_settings)
+                block = self.pool.acquire(size)
+                try:
+                    packed = HostLease(self.pool, block, tensor)
+                    self._copy("d2h", lambda: packed.tensor.copy_(tensor, non_blocking=True))
+                    block["events"].append(self.events["d2h"][-1][1])
+                except BaseException:
+                    # Even a failing copy callback may have enqueued work. Keep
+                    # the block unavailable until this stream dependency passes.
+                    try:
+                        failed_copy = torch.cuda.Event()
+                        failed_copy.record()
+                        block["events"].append(failed_copy)
+                    except BaseException:
+                        block["poisoned"] = True
+                    self.pool.release(block)
+                    raise
+                finalizable = packed
+            else:
+                packed = self._copy("d2h", lambda: native.pack_hook(tensor))
+                finalizable = packed[1]
             self.pack_seconds += time.monotonic() - started
             self.d2h_bytes += size
             self.live_bytes += size
             self.peak_bytes = max(self.peak_bytes, self.live_bytes)
-            weakref.finalize(packed[1], self._release, size)
+            self.selected_boundaries += 1
+            weakref.finalize(finalizable, self._release, size)
             return True, packed
 
         def unpack(packed):
@@ -289,7 +375,14 @@ class BoundaryOffload:
             if not moved:
                 return value
             started = time.monotonic()
-            tensor = self._copy("h2d", lambda: native.unpack_hook(value))
+            if self.pool is not None:
+                # Order H2D after D2H even if backward uses another CUDA stream.
+                stream = torch.cuda.current_stream(value.device)
+                for event in value.block["events"]: stream.wait_event(event)
+                tensor = self._copy("h2d", lambda: value.tensor.to(value.device, non_blocking=True))
+                value.block["events"].append(self.events["h2d"][-1][1])
+            else:
+                tensor = self._copy("h2d", lambda: native.unpack_hook(value))
             self.unpack_seconds += time.monotonic() - started
             self.h2d_bytes += tensor.numel() * tensor.element_size()
             return tensor
@@ -314,6 +407,13 @@ class BoundaryOffload:
                   "offload_unpack_wall_seconds": self.unpack_seconds,
                   "offload_host_budget_bytes": self.budget_bytes,
                   "offload_budget_rejection": self.budget_rejection}
+        from RL.host_offload import host_allocator_stats
+        values.update(self.pool.metrics() if self.pool is not None else host_allocator_stats())
+        values.update(offload_selected_boundaries=self.selected_boundaries,
+                      offload_retained_boundaries=self.retained_boundaries,
+                      offload_selection_reasons=dict(self.selection_reasons),
+                      offload_last_selection=self.last_selection,
+                      offload_retry_headroom_bytes=self.retry_headroom_bytes)
         for kind, events in self.events.items():
             try:
                 seconds = sum(start.elapsed_time(end) for start, end in events) / 1000
@@ -343,11 +443,20 @@ class MemoryEventLogger:
         if enabled: self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def memory(self):
-        if self.device.type != "cuda": return {}
+        from RL.resources import host_memory
+        from RL.host_offload import host_allocator_stats
+        host = host_memory()
+        result = {"cpu_rss_bytes": host.get("VmRSS"), "cpu_hwm_bytes": host.get("VmHWM"),
+                  "host_global_mem_available_bytes": host.get("MemAvailable"),
+                  "host_global_mem_total_bytes": host.get("MemTotal"),
+                  "cgroup_limit_bytes": host.get("cgroup_limit_bytes"),
+                  "cgroup_remaining_bytes": host.get("cgroup_remaining_bytes"),
+                  "cgroup_capability": host.get("cgroup_capability"), **host_allocator_stats()}
+        if self.device.type != "cuda": return result
         try:
             free, total = torch.cuda.mem_get_info(self.device)
             stats = torch.cuda.memory_stats(self.device)
-            return {"allocated_bytes": int(torch.cuda.memory_allocated(self.device)),
+            return {**result, "allocated_bytes": int(torch.cuda.memory_allocated(self.device)),
                     "reserved_bytes": int(torch.cuda.memory_reserved(self.device)),
                     "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(self.device)),
                     "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(self.device)),
@@ -355,7 +464,7 @@ class MemoryEventLogger:
                     "inactive_split_bytes": stats.get("inactive_split_bytes.all.current"),
                     "allocation_retries": stats.get("num_alloc_retries"), "allocator_ooms": stats.get("num_ooms")}
         except Exception as exc:
-            return {"memory_sample_error": f"{type(exc).__name__}: {exc}"}
+            return {**result, "memory_sample_error": f"{type(exc).__name__}: {exc}"}
 
     def write(self, *, event, phase=None, **fields):
         if not self.enabled: return
@@ -382,6 +491,8 @@ class MemoryController:
         memory = config.training.memory
         self.mode = memory.activation_offload
         self.max_retries = memory.oom_retry.max_retries if memory.oom_retry.enabled else 0
+        if self.mode == "memory_pressure":
+            self.max_retries = memory.memory_pressure.max_retries if memory.oom_retry.enabled else 0
         self.logger = MemoryEventLogger(directory, attempt_id=config.run.attempt_id, rank=rank,
             world_size=world_size, physical_gpu=physical_gpu, device=device,
             enabled=memory.memory_telemetry.enabled)
@@ -407,8 +518,9 @@ class MemoryController:
                    "max_sequence_tokens": max((p+c for p,c in zip(prompts, completions)), default=0),
                    "branch_count": group.group_size}
             reasons = []
-            if row["prompt_tokens"] >= auto.prompt_tokens_threshold: reasons.append("prompt_tokens_threshold")
-            if row["max_sequence_tokens"] >= auto.sequence_tokens_threshold: reasons.append("sequence_tokens_threshold")
+            if self.mode == "auto":
+                if row["prompt_tokens"] >= auto.prompt_tokens_threshold: reasons.append("prompt_tokens_threshold")
+                if row["max_sequence_tokens"] >= auto.sequence_tokens_threshold: reasons.append("sequence_tokens_threshold")
             local.append({**row, "reasons": reasons})
         payload = {"rank": self.rank, "groups": local, "mode": self.mode}
         peers = parallel.control_step(global_step + 1, 0, "risk", payload) if parallel else [payload]
@@ -416,13 +528,41 @@ class MemoryController:
             raise ValueError("Distributed offload configurations differ")
         trigger_ranks = [peer["rank"] for peer in peers if any(g["reasons"] for g in peer["groups"])]
         enabled = self.mode == "checkpoint_boundary" or (self.mode == "auto" and bool(trigger_ranks))
+        if self.mode == "memory_pressure": enabled = True
         self.last_decision = {"mode": "checkpoint_boundary" if enabled else "none", "configured_mode": self.mode,
             "trigger_ranks": trigger_ranks if self.mode == "auto" else [], "ranks": peers,
             "thresholds": auto.model_dump() if hasattr(auto, "model_dump") else vars(auto),
             "policy_version": "global_step_length_or_v1", "capacity_prediction": None,
             "headroom_usage": "recorded_only_no_capacity_model"}
+        if self.mode == "memory_pressure":
+            self.last_decision.update(mode="memory_pressure", trigger_ranks=[], thresholds=None,
+                policy_version=HOST_POLICY_VERSION,
+                headroom_usage="per_tensor_driver_free_conservative",
+                state_scope="window_local_reset_before_each_update")
+        if self.offloader and hasattr(self.offloader, "begin_window"): self.offloader.begin_window()
         if self.offloader: self.offloader.set_enabled(enabled)
         return self.last_decision
+
+    def retry_limit(self, decision):
+        return self.max_retries if decision["mode"] in {"none", "memory_pressure"} else 0
+
+    def safe_boundary(self):
+        if self.offloader is not None and hasattr(self.offloader, "safe_boundary"):
+            row = self.offloader.safe_boundary()
+            if row is not None:
+                self.logger.write(event="host_pool_trim", phase="safe_boundary", **self.context,
+                                  reclaim=row, **self.logger.memory(), offload_metrics=self.offload_metrics())
+
+    def reclaim_completed(self):
+        if self.offloader is not None and hasattr(self.offloader, "reclaim_completed"):
+            return self.offloader.reclaim_completed()
+
+    def close(self):
+        if self.offloader is not None and hasattr(self.offloader, "close"):
+            row = self.offloader.close()
+            if row is not None:
+                self.logger.write(event="host_pool_close", phase="shutdown", reclaim=row,
+                                  **self.logger.memory(), offload_metrics=self.offload_metrics())
 
     def begin_attempt(self, window, *, global_step, attempt_id):
         self.context = {"global_step": global_step, "global_step_semantics": "committed",
@@ -472,8 +612,13 @@ class MemoryController:
         self.phase_name = None
 
     def offload_metrics(self):
-        return self.offloader.metrics() if self.offloader else {"offload_d2h_bytes": 0, "offload_h2d_bytes": 0,
-                                                               "offload_live_bytes": 0, "offload_pinned_peak_bytes": 0}
+        try:
+            return self.offloader.metrics() if self.offloader else {"offload_d2h_bytes": 0, "offload_h2d_bytes": 0,
+                                                                   "offload_live_bytes": 0, "offload_pinned_peak_bytes": 0}
+        except Exception as exc:
+            # Diagnostics must not prevent a FATAL control envelope reaching peers.
+            # Allocation and safe-boundary capability failures remain terminal.
+            return {"host_metrics_error": f"{type(exc).__name__}: {exc}", "host_stats_available": False}
 
     def result(self, statuses):
         self.flush_phases()
@@ -499,6 +644,12 @@ class MemoryController:
     def retry(self, window, *, global_step, attempt_id):
         if self.offloader is None: raise RuntimeError("OOM retry lacks an offloader")
         self.offloader.set_enabled(True)
+        if self.mode == "memory_pressure":
+            increment = int(self.config.training.memory.memory_pressure.retry_headroom_increment_gib * 2**30)
+            self.offloader.retry_headroom_bytes = attempt_id * increment
+            self.last_decision = {**self.last_decision, "mode": "memory_pressure",
+                "reason": "cuda_oom_increase_headroom", "retry_headroom_bytes": attempt_id * increment}
+            return
         self.last_decision = {**self.last_decision, "mode": "checkpoint_boundary", "reason": "cuda_oom_retry"}
 
     def committed(self, *, global_step, window, attempt_id):
@@ -512,11 +663,13 @@ def configure_checkpointing(model, config, budget_bytes):
     from RL.modeling import enable_checkpointing
     offloader = None
     memory = config.training.memory
-    if (memory.activation_offload != "none" or memory.oom_retry.enabled):
+    if (memory.activation_offload != "none" or memory.oom_retry.enabled or memory.host_offload.enabled):
         # Keep a controller available for an auto decision or an OOM retry even
         # when the first attempt intentionally stays entirely on device.
         offloader = BoundaryOffload(model, budget_bytes,
-                                    enabled=memory.activation_offload == "checkpoint_boundary")
+            enabled=memory.activation_offload in {"checkpoint_boundary", "memory_pressure"},
+            host_settings=memory.host_offload,
+            pressure_settings=memory.memory_pressure if memory.activation_offload == "memory_pressure" else None)
     if config.training.checkpoint_policy == "layer":
         enable_checkpointing(model)
         if offloader:

@@ -450,6 +450,56 @@ resume inheritance and limits, and [validation](OBSERVABILITY_VALIDATION.md) for
 the tested current/legacy and GPU fresh/resume paths.
 
 
+## Per-token K3 hard cap (2026-11-17)
+
+The standalone training YAML supports an optional cap on each completion
+token's K3, before beta multiplication and the existing branch/group means:
+
+```yaml
+grpo:
+  kl_beta: 0.02
+  k3_cap: 1.0
+  ratio_guard:
+    enabled: false
+```
+
+`k3_cap: null` (the default) preserves the uncapped objective and legacy
+schedule contract. A configured cap must be finite, positive and representable
+within the float32 upper range. The objective uses
+`K_used = min(expm1(-log_ratio) + log_ratio, k3_cap)`.
+Only K3 is capped: policy surrogate, PPO clipping, native target masks, original
+token denominators and branch/group weights stay the same. A token strictly
+above the cap contributes the constant cap and has zero direct K3 gradient;
+its policy contribution is retained. Equality retains the original derivative.
+This is a hard loss cap, not a gradient-only clipping rule or a straight-through
+estimator. It does not restore extreme-token probabilities through K3.
+
+For numerical stability, saturated tokens are removed from the differentiable
+inverse-ratio exponentiation before it can overflow. Finite extreme negative
+log-ratios can therefore produce a finite capped objective and gradients even
+if uncapped K3 overflows. Nonfinite input logprob differences, policy ratios,
+or final objective values are still rejected. If ratio guard is independently
+enabled, guard exclusion happens first and excluded tokens do not count toward
+cap saturation.
+
+`k3_penalty_mean` is the actual capped objective mean before beta. Existing
+`k3_penalty_max` and `k3_cap_1/5/10_*` diagnostics still describe the uncapped
+K3 after any guard, so historical comparisons remain meaningful. New metrics:
+`k3_cap`, `k3_cap_clipped_tokens`, `k3_cap_eligible_tokens`,
+`k3_cap_clipped_fraction`, `k3_raw_penalty_mean`,
+`k3_raw_nonfinite_tokens`, and `k3_capped_penalty_max`.
+Raw mean/max are null when unavailable due to overflow; the nonfinite count
+retains that evidence. These metrics also appear in the existing observability
+and TensorBoard interfaces under `drift/k3/`.
+
+An enabled cap enters the frozen schedule/checkpoint contract. Exact resume
+must preserve its value; enabling, disabling or changing it requires a new
+fresh attempt or another explicitly supported start mode. The existing
+`dycon lora-train --training-config YAML` remains the only training entrypoint,
+including whole-parent, distinct-parent two-pass and portable 2/4/8-GPU paths.
+No running training or historical frozen configuration is changed by adding
+this option. The example beta is a configurable value, not an experiment result.
+
 ## Per-token extreme-ratio guard (2026-11-12)
 
 The guard defaults to disabled for existing configurations. Enable it in the

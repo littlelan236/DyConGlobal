@@ -1,5 +1,8 @@
 # Qwen3.5-9B LoRA foundation
 
+Full language-policy FSDP2 RL is available through the common `dycon rl-train`
+service with schema 2. See [configuration, persistence and acceptance boundaries](FULL_FSDP2.md).
+
 GRPO checkpoint resume can explicitly opt into `runtime.topology_policy:
 preserve_updates` for bidirectional 2/4/8-GPU execution. It retains the source
 logical windows, weights, frozen advantages, anchor, optimizer/scheduler and
@@ -12,6 +15,10 @@ real Qwen/NCCL cross-topology GPU acceptance remains pending.
 Fixed checkpoint preference diagnostics are available through `dycon lora-probe`:
 explicit checkpoint and fixed complete group IDs, JSON reports and optional baseline
 comparison, with no TensorBoard or training-state writes. See [FIXED_PROBE.md](FIXED_PROBE.md).
+
+BF16 FLA GDN training is available through explicit `model.gdn_backend: fla_chunk`
+using the same training CLI. See [backend setup, smoke checks and scope](FLA_BACKEND.md).
+The default remains `reference_pytorch`.
 
 Native streaming GRPO supports exact checkpoint resume through the same training CLI, retaining the original anchor and each rank's optimizer/scheduler/RNG. Unlike prepared cache reuse, streaming requires unconsumed native ledgers and raw probability sources to remain accessible. See [streaming recovery](STREAMING_RESUME.md) for complete recovery bundles, read-only historical compatibility, strict paths/topology and validation boundaries.
 

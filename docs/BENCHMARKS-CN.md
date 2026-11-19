@@ -40,4 +40,8 @@ SkillsBench verifier resource releases and their exact profile/task snapshot ref
 
 SWE-bench 官方分组和 NAS 同步见 [catalog 分类指南](SWEBENCH-CATALOG-CN.md)。
 
+## Terminal-Bench 2.1 执行策略
+
+Terminal-Bench/OpenHands 支持显式 `harbor.terminal_policy: terminalbench-live-v1`。新 run 冻结容器 root 身份、官方 PATH/工作目录、完整 agent 预算及 ACP/relay 定向清理，使任务服务保留到 live verifier 完成。配置、资源准备、回执与验收边界见 [Terminal-Bench 操作指南](TERMINALBENCH-CN.md)。
+
 SWE-bench 验证有效性与 gold 控制策略见 [审计指南](SWEBENCH-VERIFIER-AUDIT-CN.md)。

@@ -2,6 +2,11 @@
 from RL.grpo.k3_diagnostics import K3_SCALARS
 
 SIGNAL_TAGS = {
+    "trainable_parameters": "full/trainable_parameters",
+    "global_grad_norm": "full/global_grad_norm",
+    "policy_changed": "full/policy_changed",
+    "microsteps": "full/microsteps",
+    "compute_seconds": "timing/compute_seconds",
     "loss": "loss/total", "policy_loss": "loss/policy",
     "positive_logprob_change": "learning/logprob/positive_advantage",
     "negative_logprob_change": "learning/logprob/negative_advantage",
@@ -20,6 +25,13 @@ SIGNAL_TAGS = {
     "ratio_guard_excluded_fraction": "policy/guard/excluded_token_fraction",
     "ratio_guard_excluded_tokens": "policy/guard/excluded_tokens",
     "ratio_guard_eligible_tokens": "policy/guard/eligible_tokens",
+    "k3_cap": "drift/k3/configured_cap",
+    "k3_cap_clipped_tokens": "drift/k3/clipped_tokens",
+    "k3_cap_eligible_tokens": "drift/k3/cap_eligible_tokens",
+    "k3_cap_clipped_fraction": "drift/k3/clipped_token_fraction",
+    "k3_raw_penalty_mean": "drift/k3/raw_mean_after_guard",
+    "k3_raw_nonfinite_tokens": "drift/k3/raw_nonfinite_tokens",
+    "k3_capped_penalty_max": "drift/k3/capped_max",
     "fully_guarded_branches": "policy/guard/fully_excluded_branches",
     "fully_guarded_groups": "policy/guard/fully_excluded_groups",
     "policy_active_tokens": "policy/active/tokens",
@@ -51,6 +63,15 @@ for field in ("updates_per_second", "groups_per_second", "branches_per_second", 
 for field in ("queue_wait_seconds", "failed_attempt_seconds", "successful_attempt_seconds", "gradient_sync_seconds",
               "rank_critical_path_seconds", "checkpoint_seconds"):
     SIGNAL_TAGS[field] = "timing/" + field
+
+for field in ("cpu_rss_bytes", "cpu_hwm_bytes", "host_active_bytes", "host_allocated_bytes",
+              "host_active_peak_bytes", "host_allocated_peak_bytes", "host_native_cache_bytes",
+              "host_pool_reserved_bytes", "host_pool_idle_bytes", "host_pool_leased_bytes",
+              "host_pool_pending_bytes", "host_actual_budget_bytes",
+              "offload_selected_boundaries", "offload_retained_boundaries"):
+    SIGNAL_TAGS[field] = "memory/process/" + field
+# A host-global sample belongs to the recording rank; never sum across ranks.
+SIGNAL_TAGS["host_global_mem_available_bytes"] = "memory/host_global/mem_available_bytes"
 
 SIGNAL_SCALARS = tuple(SIGNAL_TAGS) + ("group_count", "branch_count", "token_count", "ratio_guard_enabled",
     "ratio_guard_threshold", "positive_branches", "negative_branches")

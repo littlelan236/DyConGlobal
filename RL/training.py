@@ -45,8 +45,8 @@ def optimizer_and_scheduler(model, settings):
         raise ValueError("Model has no trainable parameters")
     optimizer = torch.optim.AdamW(parameters, lr=settings.learning_rate, betas=(0.9, 0.999),
                                   weight_decay=settings.weight_decay)
-    schedule = (lambda step: max(0.0, 1 - step / settings.max_updates)) if settings.scheduler == "linear" else (
-        lambda step: 1.0)
+    from RL.lr_schedule import factor
+    schedule = lambda step: factor(step, settings)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
     return optimizer, scheduler
 
@@ -210,6 +210,7 @@ def _grpo_local_attempt(model, window, objective, parameters, *, cursor, paralle
                     del loss, result
                     enter("boundary_accumulate")
                     if hasattr(objective, "after_branch_backward"): objective.after_branch_backward()
+                    if memory and hasattr(memory, "reclaim_completed"): memory.reclaim_completed()
                 if not group_rows: raise ValueError("Objective returned no group contribution")
                 if execution_plan:
                     chunk = group.metadata["execution_chunk"]
@@ -221,6 +222,7 @@ def _grpo_local_attempt(model, window, objective, parameters, *, cursor, paralle
                     before = time.monotonic(); objective.finish_group()
                     if device.type == "cuda": torch.cuda.synchronize(device)
                     backward += time.monotonic() - before
+                if memory and hasattr(memory, "reclaim_completed"): memory.reclaim_completed()
                 if remapped:
                     assert_rng_unchanged(compute_rng)
                 rows.append((index, group_rows))
@@ -241,6 +243,7 @@ def _grpo_local_attempt(model, window, objective, parameters, *, cursor, paralle
         for parameter in parameters:
             if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
                 raise ValueError("Nonfinite GRPO gradient; optimizer update rejected")
+        if memory: memory.safe_boundary()
         return {"status": {"state": "OK", "phase": phase}, "rows": rows, "loss": loss_value,
                 "prefixes": (objective.drain_prefix_metrics() if hasattr(objective, "drain_prefix_metrics")
                              else list(getattr(objective, "prefix_metrics", []))),
@@ -282,6 +285,7 @@ def _rollback_grpo(model, objective, optimizer, buffers, on_abort, memory):
             torch.cuda.empty_cache()
         if memory and memory.offloader and memory.offloader.live_bytes:
             raise RuntimeError("Pinned checkpoint activations survived whole-step cleanup")
+        if memory: memory.safe_boundary()
         return {"state": "OK"}
     except BaseException as exc:
         return {"state": "FATAL", "error": f"Cleanup failed: {type(exc).__name__}: {exc}"}
@@ -345,7 +349,7 @@ def train_grpo(model, groups, objective_callback, optimizer, scheduler, *,
                   completed_groups_in_update=0, group_id=None, branch_ordinal=None)
             decision = (memory.decide(window, global_step=state["global_step"],
                         group_cursor=consumed(), parallel=parallel) if memory else {"mode": "none"})
-            retry_limit = memory.max_retries if memory and decision["mode"] == "none" else 0
+            retry_limit = memory.retry_limit(decision) if memory else 0
             step_rng = capture_rng() if retry_limit else None
             # Qwen's explicit cache facade is per-forward, not a model buffer.
             # Snapshot registered rotary/other mutable buffers without copying weights.
@@ -358,7 +362,9 @@ def train_grpo(model, groups, objective_callback, optimizer, scheduler, *,
                     attempt=attempt, step=state["global_step"], on_start=on_window_start,
                     rng=step_rng if attempt else None, execution_plan=execution_plan)
                 if memory: memory.pause()
-                status = {**local["status"], "rank": parallel.rank if parallel else 0}
+                status = {**local["status"], "rank": parallel.rank if parallel else 0,
+                          "memory": memory.logger.memory() if memory else None,
+                          "offload_metrics": memory.offload_metrics() if memory else None}
                 statuses = parallel.control_step(step, attempt, "compute_result", status) if parallel else [status]
                 if memory: memory.result(statuses)
                 errors = [peer for peer in statuses if peer["state"] != "OK"]
@@ -393,6 +399,8 @@ def train_grpo(model, groups, objective_callback, optimizer, scheduler, *,
                 parallel.local_phase_seconds = {"forward_seconds": local["forward_seconds"],
                     "backward_seconds": local["backward_seconds"], "queue_wait_seconds": queue_wait_seconds,
                     **getattr(all_groups, "window_io", {})}
+                parallel.local_memory = memory.logger.memory() if memory else None
+                parallel.local_offload_metrics = memory.offload_metrics() if memory else None
                 rows, loss_value, prefixes, parallel_metrics = parallel.finish_window(
                     model, parameters, window, local["rows"], loss_value, prefixes, local["seconds"])
                 stage("gradient_sync_complete", completed_groups_in_update=len(window))
@@ -439,6 +447,8 @@ def train_grpo(model, groups, objective_callback, optimizer, scheduler, *,
                 memory.committed(global_step=state["global_step"], window=window, attempt_id=attempt)
                 metrics.update(memory.peaks)
                 metrics["offload_decision"] = memory.last_decision
+                metrics.update(memory.logger.memory())
+                metrics.update(memory.offload_metrics())
             if execution_plan:
                 metrics.update(parent_group_count=len(window), execution_chunk_count=len(window),
                     parent_branch_count=32, completed_parent_groups_in_update=(

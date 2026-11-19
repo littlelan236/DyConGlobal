@@ -5,6 +5,8 @@ from contextlib import contextmanager
 import warnings
 
 ALIASES = ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF")
+HOST_POLICY_VERSION = "scoped_host_reclaim_v2"
+HOST_NATIVE_CACHE_MB = 1
 
 
 @contextmanager
@@ -46,7 +48,7 @@ def _parse(value):
     return result
 
 
-def configure_cuda_allocator(settings, *, apply=True):
+def configure_cuda_allocator(settings, *, apply=True, host_offload=None):
     original = {name: os.environ.get(name) for name in ALIASES}
     options = {}
     for value in original.values():
@@ -55,6 +57,13 @@ def configure_cuda_allocator(settings, *, apply=True):
                 raise ValueError("CUDA allocator aliases conflict: " + key)
             options[key] = val
     requested = {"expandable_segments": str(settings.expandable_segments)}
+    if host_offload is not None and host_offload.enabled:
+        # Small native blocks remain cacheable (including scalar readbacks).
+        # The managed pool requests strictly larger blocks, owns their reuse,
+        # and can return them without leaving large native cached allocations.
+        requested.update(pinned_max_cached_size_mb=str(HOST_NATIVE_CACHE_MB),
+                         pinned_max_round_threshold_mb=str(HOST_NATIVE_CACHE_MB),
+                         pinned_use_background_threads="False", pinned_use_cuda_host_register="False")
     if settings.backend: requested["backend"] = settings.backend
     for key, val in requested.items():
         if key in options and options[key].lower() != val.lower():

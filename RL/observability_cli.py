@@ -12,14 +12,14 @@ def register(subparsers):
     memory.add_argument('--rank', type=int)
     memory.add_argument('--phase')
     memory.add_argument('--limit', type=int, default=100)
-    status = subparsers.add_parser('lora-status', help='Read committed updates, liveness, stages and recoverable checkpoint')
+    status = subparsers.add_parser('lora-status', aliases=['rl-status'], help='Read committed updates, liveness, stages and recoverable checkpoint')
     status.add_argument('attempt_id', nargs='?')
     status.add_argument('--active', action='store_true')
     status.add_argument('--storage-root')
     status.add_argument('--watch', type=float)
     status.add_argument('--format', choices=('table','json'), default='table')
     status.add_argument('--recent-updates', type=int, default=10)
-    tb = subparsers.add_parser('lora-tensorboard', help='Manage an owned TensorBoard + metrics synchronizer')
+    tb = subparsers.add_parser('lora-tensorboard', aliases=['rl-tensorboard'], help='Manage an owned TensorBoard + metrics synchronizer')
     tb.add_argument('attempt_id')
     tb.add_argument('--action', choices=('start','status','stop','rebuild','renew'), default='status')
     tb.add_argument('--storage-root')
@@ -27,7 +27,7 @@ def register(subparsers):
     tb.add_argument('--port', type=int, default=16006)
     tb.add_argument('--lease-seconds', type=int, default=1800,
                     help='Query lease for a non-running attempt (default: 1800)')
-    advantage = subparsers.add_parser('lora-advantages', help='Query frozen advantages; explicitly build legacy metadata index')
+    advantage = subparsers.add_parser('lora-advantages', aliases=['rl-advantages'], help='Query frozen advantages; explicitly build legacy metadata index')
     advantage.add_argument('attempt_id')
     advantage.add_argument('--storage-root')
     group = advantage.add_mutually_exclusive_group()
@@ -88,6 +88,8 @@ def render_advantages(result, fmt):
 
 
 def execute(args, cfg):
+    args.command = {'rl-status': 'lora-status', 'rl-tensorboard': 'lora-tensorboard',
+                    'rl-advantages': 'lora-advantages'}.get(args.command, args.command)
     if args.command == 'lora-memory':
         from RL.memory_summary import summarize
         return summarize(cfg, args.attempt_id, storage_root=args.storage_root,

@@ -492,3 +492,11 @@ streaming additionally requires selected native ledgers and probability sources.
 Reports use new paths outside sealed artifacts and never enter TensorBoard.
 
 Full merged checkpoints for rollout: `.venvs/rl/bin/dycon lora-export --checkpoint PATH --base-model PATH --output PATH`; see [LoRA serving export](../RL/EXPORT.md). Uses CPU only and registers the model for the existing run/serving interfaces.
+
+### Terminal-Bench verifier health
+
+`dycon harbor controls-audit RUN_ID --control-id CONTROL_ID --audit-id AUDIT_ID`
+reclassifies saved Terminal-Bench oracle/nop evidence through the same verifier health
+policy used by live rollout. It writes a new immutable audit receipt under the run;
+original control results and frozen configuration remain intact. See
+[Terminal-Bench](TERMINALBENCH-CN.md) for error, valid negative, and Review semantics.

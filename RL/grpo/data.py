@@ -38,6 +38,22 @@ def source_groups(config):
                  "dataset_receipt_sha256": digest,
                  "synthetic": False, "tokenizer_fingerprint": cohort.get("tokenizer_fingerprint"),
                  "dataset_model": cohort.get("model")}
+    if binding.group_ids:
+        selected = set(binding.group_ids)
+        original = iter(raw)
+        def selected_groups():
+            seen = set()
+            for row in original:
+                gid = row["group"]["group_id"]
+                if gid in selected:
+                    if gid in seen:
+                        raise ValueError("Duplicate selected parent in source dataset")
+                    seen.add(gid)
+                    yield row
+            if seen != selected:
+                raise ValueError("Selected full-policy parent IDs missing from dataset: " + repr(sorted(selected - seen)[:8]))
+        raw = selected_groups()
+        proof["explicit_parent_selection"] = {"group_ids": sorted(selected), "sha256": hash_json(sorted(selected))}
     return iter(raw), proof
 
 

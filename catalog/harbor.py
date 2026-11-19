@@ -177,4 +177,12 @@ def execution_context(cfg, tasks):
             "image_references": image_references,
             "task_keys": sorted(tasks), "evaluator": evaluator,
             "generation": cfg["generation"], "decoder": cfg.get("parallel", {})}
+    if cfg.get("harbor", {}).get("task_preparation") is not None:
+        body["task_preparation"] = cfg["harbor"]["task_preparation"]
+    from runtime.backends.harbor.policy import configured_policy
+    policy = configured_policy(cfg)
+    if policy:
+        body["terminal_policy"] = policy
+        from runtime.agents.openhands import condenser_context
+        body.update(condenser_context(cfg, profile))
     return {**body, "context_sha256": hash_json(body)}

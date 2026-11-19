@@ -1,5 +1,40 @@
 # RL OOM 恢复与自适应激活卸载验证记录
 
+## 2026-11-18：受控 host allocator 与压力策略补充
+
+本节是 `10.249.189.84` 原工程的 opt-in 修改，未部署到 `10.249.187.9`，
+也未切换 GPU0–3 的现有生产任务。下文 2026-11-14 内容保留为历史记录，
+其中“已卸载后不再重试”仅适用于旧策略。
+
+新增 `host_offload` 实际 pinned 分配预算、总空闲缓存上限和整机协作检查；
+新增 `memory_pressure` 逐 tensor 决策及最多三次有界重试。预算包含进程级
+pinned 基线、4 KiB 取整和 drain scratch；它不是进程 RSS 上限或 OS 硬预留。
+Torch 2.13 公开 host stats 与经验证的原生无缓存分配方式用于实现，未调用
+私有 host 清缓存函数，也未用 `cuda.empty_cache()` 冒充 host 回收。
+
+配置、恢复合同、回退和复现命令见 [HOST_OFFLOAD_PRESSURE.md](HOST_OFFLOAD_PRESSURE.md)。
+详细验收以本地任务目录 `修改测试报告.md` 和远程
+`temp/rl-cpu-memory-offload-20261118/` 的逐次日志/JSON 为准；测试数量存在重叠，
+不可累加。新增 CPU 测试覆盖真实 1/2/4 进程 Gloo；单卡 20 轮生命周期测试
+与双卡 NCCL/Gloo 严格数值对照已通过。双卡采用测试故障注入，不代表观察到
+自然 CUDA OOM；压力输入受控，不代表真实 9B 长序列的自然显存压力。
+
+最终核心 CPU 集为 156 passed；扩展集 174 passed、1 个八进程 Gloo 超时，
+相同用例独立复跑 2 passed，首次超时根因尚未确证。正式 9B `real-9b-v3`
+完成 A/B/C/D 各三次六步训练及 C 的暂停/恢复，产物校验、adapter/loss
+对照和 optimizer/scheduler/RNG 恢复通过。双卡依据为原始严格容差的
+`gpu-dual-strict-v6`，不是中间临时宽容差结果。
+
+三次重复的稳态秒/步中位数：A 旧 auto 1.0056、B managed auto 1.0537、
+C memory_pressure 1.9626、D none 0.9629。B 相比 A 慢 4.79%；
+C 相比 D 慢 103.82%，未达到 10% 退化目标。纯监控 3% 目标尚未独立验证。
+`acceptance.json` 的 passed 是功能/数值结果，性能及未验收项另见
+`acceptance-verdict.json`。所有测试任务已结束，测试 GPU 已释放。
+
+真实四卡容量、历史长序列窗口和生产部署仍须独立验收。性能目标为纯监控
+开销不超过 3%、总策略稳态退化不超过 10%；只有可比的至少三次重复测量
+才能据此判定，不能从 tiny 功能通过推导性能达标。
+
 日期：2026-11-14（Asia/Shanghai）。状态：代码及 CPU 验证完成，正式 GPU 验收延期。
 工程：`/home/wangtianyi/DyConGlobal`，服务器 `10.249.187.9`。
 

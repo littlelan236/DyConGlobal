@@ -66,6 +66,7 @@ def test_new_fields_strict(field, value):
 def settings(mode="none", retry=True):
     cfg, _ = load(ROOT / "RL/experiments/grpo-offline-k3-smoke.yaml", ROOT)
     cfg.training.memory = Memory(activation_offload=mode,
+        host_offload={"enabled": mode == "memory_pressure"},
         oom_retry={"enabled": retry, "max_retries": 1},
         auto_offload={"prompt_tokens_threshold": 8, "sequence_tokens_threshold": 12, "device_headroom_gib": 8.0})
     return cfg
@@ -201,9 +202,10 @@ def _worker(rank, world, path, case):
             assert decision["trigger_ranks"] == [3 % world]
         else:
             # Rank zero can finish all local groups before the failing rank reports.
-            fault = "once" if rank == 2 % world and case == "retry" else None
+            fault = "once" if rank == 2 % world and case in {"retry", "pressure_retry"} else None
             want = execute(Path(path)/f"direct-{rank}", parallel=parallel, mode="checkpoint_boundary")
-            got = execute(Path(path)/f"retry-{rank}", parallel=parallel, fault=fault)
+            got = execute(Path(path)/f"retry-{rank}", parallel=parallel, fault=fault,
+                          mode="memory_pressure" if case == "pressure_retry" else "none")
             torch.save({"want": want, "got": got}, Path(path)/f"comparison-{rank}.pt")
             from tests.test_grpo_lifecycle import assert_tree_close
             for key in ("model", "optimizer", "scheduler", "state", "rng", "grads"):
@@ -212,14 +214,14 @@ def _worker(rank, world, path, case):
                 except AssertionError as exc:
                     raise AssertionError(f"rank={rank} key={key} draws={want['draws']} vs {got['draws']}") from exc
             assert got["yields"] == got["commits"] == 2
-            assert got["updates"][0][1]["step_attempt"] == (1 if case == "retry" else 0)
+            assert got["updates"][0][1]["step_attempt"] == (1 if case in {"retry", "pressure_retry"} else 0)
             assert len(got["calls"]) > len(want["calls"]) if case == "retry" and rank < 4 else True
     finally:
         dist.destroy_process_group()
 
 
 @pytest.mark.parametrize("world", [1, 2, 4])
-@pytest.mark.parametrize("case", ["risk", "retry"])
+@pytest.mark.parametrize("case", ["risk", "retry", "pressure_retry"])
 def test_real_gloo_risk_or_and_whole_window_retry(tmp_path, world, case):
     mp.spawn(_worker, args=(world, str(tmp_path), case), nprocs=world, join=True)
 

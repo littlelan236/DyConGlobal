@@ -1,0 +1,584 @@
+{
+  "schema_version": 1,
+  "policy_id": "swebench-verifier-environment-20261117-v1",
+  "baseline_run": "swebench-full-gold-20261116",
+  "scope": "candidate repairs; complete new gold evaluation required before acceptance",
+  "tasks": {
+    "pvlib__pvlib-python-1026": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "2fc48d9d6c20645da69da4ce451540ee8f2b1e32b0fa1e81dd3889c61435530c"
+    },
+    "pvlib__pvlib-python-1033": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "aaee5c7995ed48089c162da7e3222b5bb9b65f57a74a7180230a6f3e50587251"
+    },
+    "pvlib__pvlib-python-1048": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "4ac3939460d40df528816620378e6bd930edd5519a56501904595933225f6c2a"
+    },
+    "pvlib__pvlib-python-1053": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "aacd4f67f729f6828a6c5d2592c9c8a47b691b364d6c923f1a99a359d400fb63"
+    },
+    "pvlib__pvlib-python-1072": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "6ccefcb35a566a24cf9b69adf1f8a5eb68d40426ffbeac2ec091fa7a65d5a041"
+    },
+    "pvlib__pvlib-python-1073": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "66beb0f9393c78ba738b1de966efaf93a2018e6758daea279883fdb5b9b62f7b"
+    },
+    "pvlib__pvlib-python-1089": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "c12ed889ba277c6fcd457c1c92d5b4cd471250ed0a3921a41715f732449cbd15"
+    },
+    "pvlib__pvlib-python-1093": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "5f23d43048f24c7752c8f84bb4ed6c46fe516e3e2ada86725738dcf93f38835c"
+    },
+    "pvlib__pvlib-python-1138": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "7410cb7502da58459dd9c23b5c477188087adea1c6f8c32b3083ca3e8d007c99"
+    },
+    "pvlib__pvlib-python-1140": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "4c2ef746160806efefbbe2b82ffe238459f379f17c705f49dfc857ca162444ac"
+    },
+    "pvlib__pvlib-python-1154": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "d75522e94566083d9b6620f4f36db845c451f1f23acdb434d642015e42bb464c"
+    },
+    "pvlib__pvlib-python-1160": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "9d79ff7e07fabfc57cc9a6501229316e91730e53d01311960baa8e69431744c1"
+    },
+    "pvlib__pvlib-python-1165": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "ec1bfd5a89f299f595c056dde5d6f78288b68cf67a0a9573361082409292ffac"
+    },
+    "pvlib__pvlib-python-1176": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "8dfeb8a5da7ff1ee129adbca54a776292f4831b4738df8d149311a606d488c29"
+    },
+    "pvlib__pvlib-python-1181": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "01d5e466fb523528f0d46b9189b1f6af80c4891bc5d899305282f3142694dd55"
+    },
+    "pvlib__pvlib-python-1186": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "d6cd67b6f57528e4d2118b701d57c040348a21a63ef4018c28dd1c41d17b203f"
+    },
+    "pvlib__pvlib-python-1191": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "9d545572ef2fe30803ebf78802005ef624850eee65626a34ceec98f350fc11f5"
+    },
+    "pvlib__pvlib-python-1193": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "c59b621478de674491bea3f0b9d5d8fbed92a73f586eb28ad0aeac44afc75b0a"
+    },
+    "pvlib__pvlib-python-1213": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "58561ce4d239d8df737275cacd39926ac5f96dd5bd6a97b27132a87a159f7faf"
+    },
+    "pvlib__pvlib-python-1216": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "e8366bd9ea7f39508a250aeb3870b02a3b3640ffbac1cbdb0c31409b70c0d998"
+    },
+    "pvlib__pvlib-python-1224": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "9412b0c8ecc4562690b1bd750f7aa25261d79ea5aa2f840d339148e8a8f20105"
+    },
+    "pvlib__pvlib-python-1239": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "657386f53a5be16aa9c2e12f132352f40fe50214f0d09fc15fa00250ea701d61"
+    },
+    "pvlib__pvlib-python-1273": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "6a8b805a9f744ab7a4cd8e80dede4371e5dd3af3cebd17c70dff820e529ba694"
+    },
+    "pvlib__pvlib-python-1296": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "5e91e777dcb27a2630f2e0635a4e27a24048207bca1c2c60daeef4bef89433b8"
+    },
+    "pvlib__pvlib-python-1349": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "e6d8756b1b9dca2e778a166cc52746060595cbb9e87a1823a46796fa3386f10d"
+    },
+    "pvlib__pvlib-python-1368": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "592670ddc2851f052c5ecdd0b5a87ec949261e7bd1d5067c6f9a7fe8b309edcd"
+    },
+    "pvlib__pvlib-python-1395": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "1e23202aea60d8892974a768d675ec62119b0159d2bed41df32eee3f57ea79a5"
+    },
+    "pvlib__pvlib-python-1426": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "1baf7f165013353f6afb091962c1b19e3f0031c46f27fe4c837cd1ee8678c280"
+    },
+    "pvlib__pvlib-python-1448": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "b4648c4f5b7cf96a3b9800f4f266373214b4e40aa4545abfe6f694c83c1e26ac"
+    },
+    "pvlib__pvlib-python-1458": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "adfd931551168b226ccbb5b7296c2d7f9f50f0b29da50520fe878b5ac1f300f7"
+    },
+    "pvlib__pvlib-python-1469": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "c0ff0f9f595ff714121b7102e7e1918e37af6981934223dc5fa471d98f516346"
+    },
+    "pvlib__pvlib-python-1478": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "9a89aadcc82731cb17d31f88a7bf32762871e3886294ae09a64c6eead66366cf"
+    },
+    "pvlib__pvlib-python-1480": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "0ff0b74b5278dcdea9848dc8c7aba94b9fc40107333b07f0c5d6d316bd6d73ef"
+    },
+    "pvlib__pvlib-python-1518": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "3bbf4f0eb4ed3870793336827db8aea2883457a79ad9a46f78f8e5b2efe30862"
+    },
+    "pvlib__pvlib-python-1589": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "83832cacf1db7ae5c9754f12a5129a20a0e9a9b6a8eb2f6e61d2b03dd0000f80"
+    },
+    "pvlib__pvlib-python-1606": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "972b997d08e01afab03dea90bfefc22dadcadda0d9c1270c8fec4d0aba2c32ca"
+    },
+    "pvlib__pvlib-python-1616": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "1ea318d71b11423652174fb632cc60f39df80cdef6374e1230a7f8ba7d5eaef5"
+    },
+    "pvlib__pvlib-python-1623": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "ef8e8cb84e965f142e007f775cec293f5b553eb682d0e196e305c0d496ca2ae9"
+    },
+    "pvlib__pvlib-python-1653": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "2c4481bc279d868049366d73e6a7c35b2f6d5e2442c34b15fce67d0958dbf27f"
+    },
+    "pvlib__pvlib-python-1666": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "3fe2a8101a245d0f50e99755246a030fbd1c7ddfb18f948b28ce96a10d9e6c59"
+    },
+    "pvlib__pvlib-python-1682": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "da97a7d22b63fe5cdaa01a60d22ed9a41eea3df41598ab29a1432ed61cd442ec"
+    },
+    "pvlib__pvlib-python-1707": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "ea21da0baf4a36e5485026ed85372a1d8c3c9a787a72c417c4e42ae7a8cdf6a8"
+    },
+    "pvlib__pvlib-python-1737": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "2864109a73abb691927f0e688e79c5325dddc9df41c82de2d95599f928b1b216"
+    },
+    "pvlib__pvlib-python-1738": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "01bc40aa42be0d1e799d9e399d5245e9eb423fd2076f78f9da189a8f6207c676"
+    },
+    "pvlib__pvlib-python-1739": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "57c5a0925f87f58b131e5eee8b0757b89104e1ef91a6a91c21bdcfdaea048c41"
+    },
+    "pvlib__pvlib-python-1764": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "4a5539d85c35e596701a3ccb7b8d7c50c5aa1e6381b15eb97fd3152d50cbcf72"
+    },
+    "pvlib__pvlib-python-1782": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "95820e2d8adee7d4c616a07aad6873d30b493cad659c1e6057980b081efa07d7"
+    },
+    "pvlib__pvlib-python-1822": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "6d1ffd467fdd217cd163c9ea46f706e5bb75650d4d2d58907ef722b61d6349c5"
+    },
+    "pvlib__pvlib-python-1832": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "d659d2042beaf9a60174a6c91a3183693eae3215cf94b684d08e306806034df7"
+    },
+    "pvlib__pvlib-python-1852": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "10be2091c9a52a8481cf3302b7b2f70d48ae396cc9b4ba4e1a07bdab46252e25"
+    },
+    "pvlib__pvlib-python-1854": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "555b85d7b8ca8caeb6798e6f0a54a2089bb9480dc85858b049bb17e92ebdee1a"
+    },
+    "pvlib__pvlib-python-763": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "ef96bb3f4a8b548c38713357f094237caa9f2356ef87ecd1813c32496f6f670a"
+    },
+    "pvlib__pvlib-python-807": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "3051d8049a6129bfaab9123ab630ffca8887103e12b4451b7f466e04786f5364"
+    },
+    "pvlib__pvlib-python-823": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "e60d0eed0904d7f1a1b89445ebe78a9a241c667e428a635547a6d0c0b91abbaf"
+    },
+    "pvlib__pvlib-python-907": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "6a11ec26ed647ddebcad41ff6309f72797d1db35babe07abcf465bcc686355d8"
+    },
+    "pvlib__pvlib-python-980": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "runtime_dependency_incompatible",
+      "baseline_evidence_digest": "0f27a93f27304af2aef7c2d1b08eea8aaeb56ceed635e052b753f018520fa6e6"
+    },
+    "pydicom__pydicom-1031": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "7bb2ddcc122a5767f117bfebf6c7e5112aefdf182702ed91afdf0fdd697f58e1"
+    },
+    "pydicom__pydicom-1048": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "a92bc1b2bf1a9edd356db1911571f987cd4bf8a318e77a1c4bbd24effb2b75cf"
+    },
+    "pydicom__pydicom-1069": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "b413c851e9f94f298c167b542921694b2d6d45511fe81e6a533136df9d7e94fa"
+    },
+    "pydicom__pydicom-1076": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "dcb7cd7400692c3902edb434fe4cb43d077f73f9a6b01da1620531bb2e83a997"
+    },
+    "pydicom__pydicom-1090": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "55a30f5270bb5b2f353bb80a7f644a284c2834060e2dc8c281b6653f692dbf2f"
+    },
+    "pydicom__pydicom-1139": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "9fb9e16dfff891ab683ece439d149a47974c2335783a122ff24d2788c46d78f6"
+    },
+    "pydicom__pydicom-1194": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "ebb34d1a388760f15c848b21638f5eb53fd420522aa6fd4df28f4803e2f5011b"
+    },
+    "pydicom__pydicom-1236": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "04f8740f3f59d57a21b3eeb13325df7f882827ac459471dc16b4ad9e00629cae"
+    },
+    "pydicom__pydicom-1334": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "5325ad98828c48c6a387847dda0480088dbd91b859b3bec1037091d68c3bd5f5"
+    },
+    "pydicom__pydicom-1365": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "e5f48a30bab8639a407f80bff18ff4838793c284160996e204ec0b4e94fae9b2"
+    },
+    "pydicom__pydicom-1375": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "7241253cfe743f4e1e786cb0364341c4c32600c424d79900c1f3776bad5948b3"
+    },
+    "pydicom__pydicom-1413": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "80b9bfec34760de5e8d1d15bba7212a32a0801ff42d40e4e2792912e0a75f913"
+    },
+    "pydicom__pydicom-1416": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "52dbca8736c2736095581a448fc1d060793e6ee20e90d28653548ce9ef026a5f"
+    },
+    "pydicom__pydicom-1428": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "b6c8fe3903c9b4670b4b258cafc186a2fd51e2f77d5f3df879d50103a7dcc87d"
+    },
+    "pydicom__pydicom-1539": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "0d7f158bbe02ffc19463ee7786f3f3f67dede8296a1e3b67ee192feaf8101557"
+    },
+    "pydicom__pydicom-1555": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "0b1013996d19e63116cf37748783e123bf810a0a7ecf0d976c479aefe23114cf"
+    },
+    "pydicom__pydicom-1598": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "4a6e2af70147354b471873e8f6717891a4b7b55d60069d016fbe503ecc0a5b57"
+    },
+    "pydicom__pydicom-1608": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "48dfe54869bbb68cee054e35efce356f51cec00aff47936b798b26e0e5571c3f"
+    },
+    "pydicom__pydicom-1633": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "10b8a8bd5d02a1778744e43e09de111f59c81fcfaeb6959a0094298bb2e061bc"
+    },
+    "pydicom__pydicom-1674": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "63df3856baab06b89272d3d032c50b328e28235bb8bd2b9d17abb031edb29ddc"
+    },
+    "pydicom__pydicom-1720": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "test_framework_nose_compatibility",
+      "baseline_evidence_digest": "b3b7fbc9f999a400f3728e6e7b90e8318e2ce8f3f4ece8d4c6bb151ff21862a6"
+    },
+    "pvlib__pvlib-python-718": {
+      "requirements": [
+        "numpy==1.26.4"
+      ],
+      "reason": "coexisting_runtime_control"
+    },
+    "pydicom__pydicom-1241": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "coexisting_runtime_control"
+    },
+    "pydicom__pydicom-1439": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "coexisting_runtime_control"
+    },
+    "pydicom__pydicom-995": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "coexisting_runtime_control"
+    },
+    "pydicom__pydicom-1458": {
+      "requirements": [
+        "pytest==7.4.4"
+      ],
+      "reason": "coexisting_runtime_control"
+    },
+    "sphinx-doc__sphinx-9711": {
+      "requirements": [],
+      "variables": {
+        "PYTEST_ADDOPTS": "-rA -v --color=no"
+      },
+      "reason": "explicit_nodeid_output_control"
+    }
+  }
+}

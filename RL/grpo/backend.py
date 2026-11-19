@@ -97,7 +97,8 @@ class GroupObjective:
             torch.ones_like(current[None], dtype=torch.bool),
             clip_epsilon=self.settings.clip_epsilon, kl_beta=self.settings.kl_beta,
             ratio_guard_enabled=self.settings.ratio_guard.enabled,
-            ratio_guard_threshold=self.settings.ratio_guard.threshold)
+            ratio_guard_threshold=self.settings.ratio_guard.threshold,
+            k3_cap=self.settings.k3_cap)
         if diagnostics is not None:
             from .token_diagnostics import compare_branch_scores
             compare_branch_scores(model, group, index, current, reference, diagnostics,
