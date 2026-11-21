@@ -4,7 +4,8 @@ from collections import Counter
 import re
 
 from core.io import hash_json
-from .advantage import ADVANTAGE_VERSION, CONSENSUS_ADVANTAGE_VERSION, SAME_ACTION_ADVANTAGE_VERSION
+from .advantage import (ADVANTAGE_VERSION, CONSENSUS_ADVANTAGE_POLICIES,
+                        CONSENSUS_ADVANTAGE_VERSION, SAME_ACTION_ADVANTAGE_VERSION)
 
 ACTION_HASH = re.compile(r"[0-9a-f]{64}")
 LINEAGE_KEYS = ("source_group_id", "action_hash")
@@ -99,7 +100,7 @@ def order_record(value, policy=ADVANTAGE_VERSION):
     if type(policy) is bool:
         policy = CONSENSUS_ADVANTAGE_VERSION if policy else ADVANTAGE_VERSION
     keys = ("branch_sample_id", "prompt_token_ids", "completion_token_ids", "historical_score")
-    if policy == CONSENSUS_ADVANTAGE_VERSION:
+    if policy in CONSENSUS_ADVANTAGE_POLICIES:
         keys += ("retained",)
     group = value["group"]
     record = {"group_id": group["group_id"],

@@ -71,6 +71,10 @@ def _preflight(config, root, parent):
     if config.preflight.check_resources or config.training.memory.host_offload.enabled:
         memory_plan(config)
     base = base_identity(config.model.path, root, config.preflight.verify_identity)
+    if config.algorithm is not None and config.algorithm.name == "online_bootstrap_grpo_v1":
+        # Online batches are supplied by the rollout provider, never by the
+        # offline dataset preparer. Keep model identity preflight shared.
+        return base
     prepared_input = None
     if config.algorithm is not None and config.prepared_data is not None and parent is None:
         from RL.grpo.prepared_service import for_training
@@ -180,6 +184,11 @@ def run(root_config, training_config):
     """Run/dry-run one immutable engineering attempt; no implicit resume or CPU fallback."""
     root = Path(root_config["project_root"]).resolve()
     config, source = load(training_config, root)
+    if config.algorithm is not None and config.algorithm.name == "online_bootstrap_grpo_v1":
+        from RL.online_bootstrap import dry_run_from_config
+        if config.run.mode == "dry-run":
+            return {"purpose": "online_bootstrap", "config": config.model_dump(),
+                    "training_config": str(source), **dry_run_from_config(config)}
     from RL.allocator import configure_cuda_allocator
     allocator = configure_cuda_allocator(config.runtime.cuda_allocator, apply=config.run.mode != "dry-run",
                                          host_offload=config.training.memory.host_offload)
@@ -435,6 +444,11 @@ def _train_impl(config, root, directory, base, parent, attempt, *, allocator_war
     manifest["extra_backbone_targets"] = [t for t in targets if t["category"] == "extra"]
     write_json(directory / "trainable-parameters.json", manifest)
     if config.algorithm is not None:
+        if config.algorithm.name == "online_bootstrap_grpo_v1":
+            return _train_online(config, root, directory, base, parent, attempt, model, targets,
+                                 optimizer_settings=config.training, environment=environment,
+                                 loading=loading, mlps=mlps, offloader=offloader,
+                                 memory_controller=memory_controller)
         return _train_grpo(config, root, directory, base, parent, attempt, model, targets,
                            optimizer_settings=config.training, environment=environment,
                            loading=loading, mlps=mlps, offloader=offloader,
@@ -491,7 +505,10 @@ def _train_impl(config, root, directory, base, parent, attempt, *, allocator_war
     attempt.update(status="training", contract=contract, loading=loading, initial_state=initial_state)
     write_json(directory / "attempt.json", attempt)
     metrics_path = directory / "metrics.jsonl"
-    metrics_path.touch(exist_ok=False)
+    # A resumed online attempt may already have a metrics journal.  The
+    # per-step receipt below provides exactly-once append semantics.
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path.touch(exist_ok=True)
     stop = config.validation.stop_after_update or config.training.max_updates
     total_microbatches = (stop - state["global_step"]) * config.training.gradient_accumulation_steps
     cursor = state["consumed_microbatches"]
@@ -983,3 +1000,451 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
                    contract_sha256=hash_json(contract), **receipt_metadata(contract, state))
     return {"attempt_id": config.run.attempt_id, "status": status, "path": str(directory),
             "state": state, "group_count": proof["group_count"], "branch_count": proof["branch_count"]}
+
+
+
+def _train_online(config, root, directory, base, parent, attempt, model, targets, **kwargs):
+    state_path = config.online_bootstrap.state_path or str(directory / "online-state.json")
+    with file_lock(Path(state_path).with_name(Path(state_path).name + ".campaign.lock"), nonblocking=True):
+        return _train_online_impl(config, root, directory, base, parent, attempt, model, targets, **kwargs)
+
+
+def _train_online_impl(config, root, directory, base, parent, attempt, model, targets, *,
+                  optimizer_settings, environment=None, loading=None, mlps=(),
+                  offloader=None, memory_controller=None):
+    """Run the online bootstrap coordinator over a verified rollout provider.
+
+    The rollout provider is deliberately explicit. The first production adapter
+    is a sealed JSONL manifest; a shared-vLLM adapter can implement the same
+    callable contract and therefore keeps the update/barrier semantics identical.
+    """
+    import numpy as np
+    import torch
+    from RL.checkpoints import adapter_contract, export_adapter, restore_checkpoint, save_checkpoint
+    from RL.modeling import adapter_fingerprint, Coverage, frozen_checksums
+    from RL.online_bootstrap import (EstimatorDatasetStore, OnlineCoordinator,
+                                     SourceMass, TaskSchedule)
+    from RL.online_runtime import (HttpRolloutClient, JsonlRolloutProvider,
+                                   SharedVllmRolloutProvider, TorchOnlineUpdater)
+
+    options = config.online_bootstrap
+    if options.rollout_manifest is not None and options.rollout_endpoint is not None:
+        raise ValueError("configure exactly one of rollout_manifest or rollout_endpoint")
+    if options.rollout_manifest is None and options.rollout_endpoint is None:
+        raise RuntimeError("online bootstrap requires rollout_manifest or rollout_endpoint")
+    # A campaign can span physical attempts. Publish immutable policy/fit
+    # artifacts under its original owner rather than regenerating S0 on resume.
+    state_path = options.state_path or str(directory / "online-state.json")
+    binding_path = Path(state_path).with_name(Path(state_path).name + ".campaign.json")
+    campaign_contract = {"campaign_id": options.campaign_id or config.run.attempt_id,
+                         "initial_sha256": sha256(options.initial_estimator),
+                         "options": options.model_dump(exclude={"state_path", "estimator_store"})}
+    for key in ("baseline_failure_reward", "verifier_error_retries"):
+        if getattr(options, key) is None:
+            campaign_contract["options"].pop(key, None)
+    if options.baseline_training_mode == "agent_step":
+        # Preserve pre-trace campaign bindings for legacy/resumed runs.
+        campaign_contract["options"].pop("baseline_training_mode", None)
+        campaign_contract["options"].pop("max_trace_input_tokens", None)
+    numerics = {"bf16_allow_reduced_precision_reduction": config.runtime.bf16_allow_reduced_precision_reduction,
+                "bf16_allow_split_k": config.runtime.bf16_allow_split_k}
+    if binding_path.is_file():
+        binding = read_json(binding_path)
+        if "numerics" in binding["contract"]:
+            campaign_contract["numerics"] = numerics
+        if binding["contract"] != campaign_contract:
+            raise ValueError("online campaign inputs differ from original attempt")
+        online_root = Path(binding["online_root"])
+        checkpoint_root = Path(binding["checkpoint_root"])
+    else:
+        campaign_contract["numerics"] = numerics
+        online_root, checkpoint_root = directory / "online", directory / "checkpoints"
+        EstimatorDatasetStore._atomic_json(binding_path, {"contract": campaign_contract,
+            "online_root": str(online_root), "checkpoint_root": str(checkpoint_root)})
+    online_root.mkdir(parents=True, exist_ok=True)
+    from RL.online_initial import load_initial
+    parsed_points, initial_value = load_initial(options.initial_estimator)
+    from RL.online_policy import publish_adapter, restore_policy_checkpoint, InitialPolicyScorer
+    if options.rollout_endpoint is not None:
+        client = HttpRolloutClient(options.rollout_endpoint,
+                                   timeout_seconds=options.rollout_timeout_seconds)
+        provider = SharedVllmRolloutProvider(
+            client, m=options.m, dycon_candidate_portion=options.dycon_candidate_portion,
+            max_inflight=options.max_inflight,
+            worker_ids=tuple(options.rollout_gpus or ("shared",)))
+    else:
+        provider = JsonlRolloutProvider(options.rollout_manifest)
+    schedule = TaskSchedule.build(options.tasks, n=options.n, epochs=options.epochs,
+                                  seed=options.shuffle_seed)
+    state_path = options.state_path or str(directory / "online-state.json")
+    store_root = options.estimator_store or str(online_root.parent / "estimator")
+    source_mass = SourceMass(options.dycon_weight, options.baseline_weight)
+    updater = TorchOnlineUpdater(model, optimizer_settings, source_mass=source_mass,
+                                 kl_beta=options.kl_beta, clip_epsilon=options.clip_epsilon,
+                                 k3_cap=options.k3_cap,
+                                 baseline_training_mode=options.baseline_training_mode,
+                                 max_trace_input_tokens=options.max_trace_input_tokens)
+    adapter_identity = adapter_contract(base, targets, config.lora)
+    initial_adapter = adapter_fingerprint(model)
+    frozen_before = frozen_checksums(model) if config.preflight.verify_model_state else None
+    fit_spec = {"model_kind": "ridge", "alpha": 1.0, "target": "submission_remaining_steps_linear",
+                "split_policy": "train_only", "blas_threads": 4, **dict(initial_value.get("fit_spec", {}) if isinstance(initial_value, dict) else {})}
+    capacity = options.estimator_capacity or len(parsed_points)
+    if len(parsed_points) != capacity:
+        raise ValueError("initial estimator point count must equal estimator_capacity")
+    store = EstimatorDatasetStore(store_root, capacity=capacity,
+                                  tie_seed=options.estimator_tie_seed,
+                                  feature_family=options.feature_family)
+    if store.archive_path.is_file() and store.active_path.is_file():
+        store.restore()
+    else:
+        store.initialize(parsed_points)
+    online_root.mkdir(parents=True, exist_ok=True)
+    if options.rollout_manifest is not None:
+        rollout_input = {
+            "kind": "jsonl_manifest",
+            "path": str(Path(options.rollout_manifest).resolve()),
+            "sha256": __import__("hashlib").sha256(Path(options.rollout_manifest).read_bytes()).hexdigest(),
+            "schema": "online_bootstrap_rollout_batch_v1",
+        }
+    else:
+        rollout_input = {
+            "kind": "shared_vllm_http",
+            "endpoint": options.rollout_endpoint,
+            "timeout_seconds": options.rollout_timeout_seconds,
+            "worker_ids": list(options.rollout_gpus or ["shared"]),
+            "schema": "online_bootstrap_rollout_batch_v1",
+        }
+    write_json(online_root / "rollout-provider.json", rollout_input)
+    write_json(online_root / "estimator-initial.json", store.manifest())
+    metrics_path = directory / "metrics.jsonl"
+    metrics_path.touch(exist_ok=False)
+    contract = {"schedule": schedule.manifest(), "objective": {
+        "version": "online_bootstrap_grpo_v1", "source_mass": source_mass.normalized(),
+        "clip_epsilon": options.clip_epsilon, "kl_beta": options.kl_beta,
+        "k3_cap": options.k3_cap, "baseline_supervision": "all_completion_tokens_v1"},
+        "input": {"rollout_provider": rollout_input},
+        "adapter": adapter_identity, "dependencies": (environment or {}).get("versions", {})}
+    if options.baseline_training_mode != "agent_step":
+        contract["objective"]["baseline_training"] = {
+            "mode": options.baseline_training_mode, "version": "strict_token_prefix_v1",
+            "max_trace_input_tokens": options.max_trace_input_tokens}
+    initial_export = online_root / "serving/step-000000/adapter"
+    if Path(state_path).is_file() and not initial_export.is_dir():
+        raise ValueError("resuming online campaign has lost its immutable initial adapter")
+    publish_adapter(model, initial_export, adapter_identity)
+    if options.kl_beta:
+        updater.reference_scorer = InitialPolicyScorer(model, initial_export)
+
+    def deployment(policy_version, estimator_version):
+        from RL.online_server import request_digest
+        from RL.grpo.advantage import advantage_settings
+        from runtime.serving.parallel import artifact_contract
+        policy_step = int(policy_version.removeprefix("S"))
+        estimator_step = int(estimator_version.removeprefix("E"))
+        adapter = online_root / "serving" / f"step-{policy_step:06d}" / "adapter"
+        from RL.checkpoints import verify_adapter
+        verify_adapter(adapter, adapter_identity, verify_owner=False)
+        if estimator_step == 0:
+            predictor_path = initial_value.get("initial_predictor")
+            if not predictor_path:
+                raise ValueError("native rollout needs an initial published predictor")
+        else:
+            published = read_json(online_root / f"estimator-step-{estimator_step:06d}.publication.receipt.json")
+            predictor_path = published["predictor"]["manifest"]
+        predictor_sha = sha256(predictor_path)
+        artifact_contract(predictor_path, predictor_sha, base["fingerprint"])
+        feature = {**initial_value.get("feature", {}), "new_point_split": initial_value.get("new_point_split")}
+        adapter_sha = sha256(adapter / "identity.json")
+        result = {"adapter": str(adapter), "adapter_identity_sha256": adapter_sha,
+                  "base_fingerprint": base["fingerprint"],
+                  "policy_fingerprint": request_digest({"base": base["fingerprint"], "adapter": adapter_sha}),
+                  "estimator_manifest": str(predictor_path), "estimator_manifest_sha256": predictor_sha,
+                  "feature": feature, "branch_count": options.branch_count,
+                  "request_admission": options.request_admission,
+                  "dycon_candidate_portion": options.dycon_candidate_portion,
+                  "advantage_settings": advantage_settings(options.dycon_advantage)}
+        failure_policy = {k: getattr(options, k) for k in ("baseline_failure_reward", "verifier_error_retries")}
+        if any(v is not None for v in failure_policy.values()):
+            result["failure_policy"] = failure_policy
+        EstimatorDatasetStore._atomic_json(online_root / "deployments" / f"{policy_version}-{estimator_version}.json", result)
+        return result
+
+    if options.rollout_endpoint:
+        provider.deployment_resolver = deployment
+
+    # Restore optimizer/scheduler and adapter state when a coordinator state
+    # points at a committed checkpoint from an interrupted attempt.
+    if Path(state_path).is_file():
+        saved_state = json.loads(Path(state_path).read_text(encoding="utf-8"))
+        checkpoint_path = saved_state.get("checkpoint_path")
+        if saved_state.get("committed_step", 0) and checkpoint_path:
+            restore_policy_checkpoint(model, checkpoint_path, updater.optimizer, updater.scheduler, contract,
+                                      adapter_identity, verify=config.preflight.verify_checkpoint)
+    restored_step = 0
+    if Path(state_path).is_file():
+        restored_step = int(json.loads(Path(state_path).read_text(encoding="utf-8")).get("committed_step", 0))
+    attempt.update(status="online_training", contract=contract, loading=loading,
+                   online_artifacts={"campaign_id": options.campaign_id or config.run.attempt_id,
+                       "online_root": str(online_root), "checkpoint_root": str(checkpoint_root),
+                       "state_path": str(state_path)},
+                   initial_state={"global_step": restored_step})
+    write_json(directory / "attempt.json", attempt)
+
+    def rollout(tasks, step, policy_version, estimator_version):
+        import time
+        stamp = time.monotonic()
+        timing = {"step": step, "policy_version": policy_version,
+                  "estimator_version": estimator_version, "started_at": now()}
+        path = online_root / "timing" / f"rollout-{step:06d}.json"
+        EstimatorDatasetStore._atomic_json(path, timing)
+        try:
+            result = provider(tasks, step, policy_version, estimator_version)
+        except BaseException as exc:
+            EstimatorDatasetStore._atomic_json(path, {**timing, "finished_at": now(),
+                "seconds": time.monotonic() - stamp, "status": "failed", "error": type(exc).__name__})
+            raise
+        EstimatorDatasetStore._atomic_json(path, {**timing, "finished_at": now(),
+            "seconds": time.monotonic() - stamp, "status": "complete"})
+        return result
+
+    def resolved_points(batch):
+        if batch.resolved_points:
+            return batch.resolved_points
+        # Providers may attach resolved hidden/label payloads to rows rather
+        # than duplicate a second point inventory. Only rows explicitly marked
+        # resolved are admitted to the estimator dataset.
+        points = []
+        for row in batch.rows:
+            if row.resolved is not True:
+                continue
+            meta = dict(row.hidden_meta or {})
+            required = {"base_fingerprint", "tokenizer_fingerprint", "site", "width", "dtype"}
+            if row.hidden is None or row.target is None or not required.issubset(meta):
+                raise ValueError("resolved rollout row lacks the hidden feature contract")
+            points.append(row.point(model_fingerprint=batch.policy_version,
+                                    feature_family=options.feature_family,
+                                    base_fingerprint=str(meta["base_fingerprint"]),
+                                    tokenizer_fingerprint=str(meta["tokenizer_fingerprint"]),
+                                    site=str(meta["site"]), width=int(meta["width"]),
+                                    dtype=str(meta["dtype"]), birth_step=batch.step))
+        return tuple(point for point in points if point is not None)
+
+    def ingest(points, step):
+        return store.ingest(points, step=step + 1)
+
+    def refit(step, ingest_result):
+        live.emit("online_estimator_refit", inflight_update=step + 1)
+        # Refitting is a committed per-step artifact.  If the process died after
+        # writing it but before the coordinator barrier, validate and reuse the
+        # same bytes instead of producing a second estimator version.
+        version = f"E{step + 1}"
+        out = online_root / f"estimator-step-{step + 1:06d}.json"
+        receipt_path = online_root / f"estimator-step-{step + 1:06d}.publication.receipt.json"
+        if out.is_file() and receipt_path.is_file():
+            receipt = read_json(receipt_path)
+            digest = __import__("hashlib").sha256(out.read_bytes()).hexdigest()
+            payload = read_json(out)
+            from runtime.serving.parallel import artifact_contract
+            if (receipt.get("version") != version or receipt.get("estimator_sha256") != digest
+                    or receipt.get("point_ids") != [p.point_id for p in store.pool.points]
+                    or sha256(payload["dataset_snapshot"]["path"]) != payload["dataset_snapshot"]["sha256"]
+                    or sha256(receipt["fit_receipt"]["receipt"]) != receipt["fit_receipt"]["receipt_sha256"]
+                    or sha256(receipt["fit_receipt"]["checkpoint"]) != receipt["fit_receipt"]["checkpoint_sha256"]):
+                raise ValueError("existing estimator receipt does not match estimator artifact")
+            artifact_contract(receipt["predictor"]["manifest"], receipt["predictor"]["manifest_sha256"], base["fingerprint"])
+            pointer = online_root / "estimator-current.json"
+            write_json(pointer, {"version": version, "path": str(out), "sha256": digest,
+                                     "receipt": str(receipt_path),
+                                     "receipt_sha256": __import__("hashlib").sha256(receipt_path.read_bytes()).hexdigest(),
+                                     "predictor": receipt.get("predictor")})
+            return {"version": version, "path": str(out), "count": int(receipt["count"]),
+                    "receipt": str(receipt_path), "predictor": receipt.get("predictor"), "reused": True}
+        points = list(store.pool.points)
+        if not points:
+            raise ValueError("estimator active pool is empty")
+        dataset_path = online_root / f"estimator-dataset-step-{step + 1:06d}.jsonl"
+        with dataset_path.open("w", encoding="utf-8") as handle:
+            for row in store.active_records():
+                handle.write(json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
+            handle.flush(); os.fsync(handle.fileno())
+        digest_fn = __import__("hashlib").sha256
+        dataset_sha256 = digest_fn(dataset_path.read_bytes()).hexdigest()
+        predictor_checkpoint = online_root / f"estimator-step-{step + 1:06d}.npz"
+        from difficulty.training.online import fit_snapshot
+        fit_receipt_path = predictor_checkpoint.with_suffix(".receipt.json")
+        if predictor_checkpoint.is_file() and fit_receipt_path.is_file():
+            fitted_receipt = read_json(fit_receipt_path)
+            if (fitted_receipt.get("snapshot_sha256") != dataset_sha256
+                    or fitted_receipt.get("checkpoint_sha256") != sha256(predictor_checkpoint)
+                    or fitted_receipt.get("fit_spec") != fit_spec):
+                raise ValueError("existing online fit input/checkpoint/config differs")
+            fit_result = {"checkpoint": str(predictor_checkpoint),
+                "checkpoint_sha256": sha256(predictor_checkpoint), "receipt": str(fit_receipt_path),
+                "receipt_sha256": sha256(fit_receipt_path), "count": len(points)}
+        else:
+            fit_result = fit_snapshot(
+                {"model": {"fingerprint": points[0].base_fingerprint}}, dataset_path,
+                predictor_checkpoint, expected_feature_family=options.feature_family, fit_spec=fit_spec)
+        with np.load(predictor_checkpoint, allow_pickle=False) as fitted:
+            coef = np.concatenate([np.asarray(fitted["coef"], dtype=np.float64).reshape(-1),
+                                   [float(np.asarray(fitted["intercept"]).item())]])
+            standardizer = {key: np.asarray(fitted[key]).tolist() for key in ("feature_mean", "feature_scale")}
+        payload = {"version": "online_estimator_linear_v1", "step": step,
+                   "feature_family": options.feature_family, "point_ids": [p.point_id for p in points],
+                   "model_fingerprints": sorted({p.model_fingerprint for p in points}),
+                   "base_fingerprint": points[0].base_fingerprint,
+                   "tokenizer_fingerprint": points[0].tokenizer_fingerprint,
+                   "site": points[0].site, "width": points[0].width,
+                   "coef": coef.tolist(), "standardizer": standardizer, "dataset": store.manifest(),
+                   "dataset_snapshot": {"path": str(dataset_path), "sha256": dataset_sha256,
+                                         "count": len(points), "hidden_locator": "inline_jsonl_v1"},
+                   "fit_contract": {"kind": "online_active_pool", "scope": "active_pool",
+                                    "split_policy": "train_only", "fit_spec": fit_spec, "replacement": "oldest_first_uniform_tie_v1"}}
+        write_json(out, payload)
+        estimator_sha = digest_fn(out.read_bytes()).hexdigest()
+        # Register the same fit through the existing predictor artifact contract.
+        # The online active pool has one feature site; its site label is accepted
+        # as either ``layer_N`` or a numeric string for compatibility with native
+        # hidden metadata.
+        site_label = str(points[0].site)
+        if not site_label.removeprefix("layer_").isdigit():
+            raise ValueError("estimator site must explicitly identify a public layer index")
+        site_index = int(site_label.removeprefix("layer_"))
+        # ``fit_snapshot`` owns checkpoint and fit-receipt publication; this
+        # stage only binds that checkpoint to the serving predictor artifact.
+        from RL.online_estimator import publish_online_predictor
+        campaign = str(options.campaign_id or config.run.attempt_id)
+        predictor_id = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in campaign)
+        predictor_id = f"{predictor_id}-online-e{step + 1:06d}"
+        predictor = publish_online_predictor(
+            {"project_root": str(root), "model": {"fingerprint": base["fingerprint"]}},
+            predictor_id, predictor_checkpoint, target=fit_spec["target"],
+            site=site_index, width=int(points[0].width))
+        write_json(receipt_path, {"schema_version": 1, "state": "complete", "version": version,
+                                  "step": step, "estimator": str(out),
+                                  "estimator_sha256": estimator_sha,
+                                  "dataset_snapshot_sha256": dataset_sha256,
+                                  "fit_receipt": fit_result,
+                                  "count": len(points), "feature_family": options.feature_family,
+                                  "point_ids": [p.point_id for p in points],
+                                  "predictor": predictor})
+        pointer = online_root / "estimator-current.json"
+        write_json(pointer, {"version": version, "path": str(out), "sha256": estimator_sha,
+                             "receipt": str(receipt_path),
+                             "receipt_sha256": digest_fn(receipt_path.read_bytes()).hexdigest(),
+                             "predictor": predictor})
+        return {"version": version, "path": str(out), "count": len(points),
+                "receipt": str(receipt_path), "predictor": predictor, "reused": False}
+
+    def update(batch, step, policy_version, estimator_version):
+        # The step receipt makes the update boundary idempotent if the process
+        # dies after checkpoint/export but before the coordinator barrier state.
+        checkpoint = checkpoint_root / f"step-{step + 1:06d}"
+        step_dir = online_root / "steps" / f"step-{step + 1:06d}"
+        step_dir.mkdir(parents=True, exist_ok=True)
+        update_receipt = step_dir / "update-result.json"
+        cached = read_json(update_receipt) if update_receipt.is_file() else None
+        if checkpoint.is_dir() and cached is not None:
+            cached_result = cached.get("result", cached)
+            if options.baseline_training_mode == "prefix_trace" and batch.rows and not cached_result.get("skipped_update"):
+                from RL.online_trace import build_training_traces
+                from RL.online_runtime import online_row_masses, effective_source_mass
+                _, _, rebuilt = build_training_traces(batch.rows,
+                    online_row_masses(batch.rows, effective_source_mass(batch, source_mass)),
+                    max_input_tokens=options.max_trace_input_tokens)
+                if rebuilt != cached_result.get("trace_training"):
+                    raise ValueError("cached trace training view differs from current evidence")
+            restore_policy_checkpoint(model, checkpoint, updater.optimizer, updater.scheduler, contract,
+                                      adapter_identity, verify=config.preflight.verify_checkpoint)
+            result = dict(cached.get("result", cached))
+        else:
+            started_at = now()
+            with torch.enable_grad():
+                result = updater(batch, step, policy_version, estimator_version)
+            result.update(update_started_at=started_at, update_finished_at=now())
+            if "trace_training" in result:
+                from dataclasses import asdict
+                trace_view = result["trace_training"]
+                write_json(step_dir / "trace-training.json", {
+                    "batch_sha256": __import__("hashlib").sha256(json.dumps(asdict(batch), sort_keys=True,
+                        separators=(",", ":")).encode()).hexdigest(),
+                    "policy_version": batch.policy_version,
+                    "estimator_version": batch.estimator_version, **trace_view})
+            # Checkpoint receipts require an optimizer boundary with no live grads.
+            updater.optimizer.zero_grad(set_to_none=True)
+            result["checkpoint_path"] = str(checkpoint)
+            write_json(update_receipt, {"version": "online_step_update_v1", "step": step,
+                                        "result": result, "policy_version": policy_version,
+                                        "estimator_version": estimator_version})
+            if checkpoint.exists():
+                raise ValueError(f"incomplete online checkpoint already exists: {checkpoint}")
+            save_checkpoint(model, updater.optimizer, updater.scheduler,
+                            {"global_step": step + 1}, checkpoint, contract, adapter_identity)
+            write_json(step_dir / "checkpoint-saved.json", {
+                "step": step, "checkpoint": str(checkpoint),
+                "sha256": __import__("hashlib").sha256((checkpoint / "receipt.json").read_bytes()).hexdigest()})
+        export_dir = online_root / "serving" / f"step-{step + 1:06d}" / "adapter"
+        publish_adapter(model, export_dir, adapter_identity)
+        result["checkpoint_path"] = str(checkpoint)
+        write_json(online_root / "serving-pointer.json", {
+            "policy_version": f"S{step + 1}", "checkpoint": str(checkpoint),
+            "adapter": str(export_dir), "lineage": {"rollout_policy_version": policy_version,
+            "updated_from": policy_version}})
+        write_json(step_dir / "published.json", {"step": step, "policy_version": f"S{step + 1}",
+                                                   "estimator_version": estimator_version,
+                                                   "checkpoint": str(checkpoint), "adapter": str(export_dir)})
+        # Reused checkpoint results retain their original update receipt. Each
+        # physical attempt publishes a standard positive optimizer cursor for
+        # the shared rl-status / TensorBoard metric reader.
+        result.update(global_step=step + 1, observed_at=now(), attempt_id=config.run.attempt_id)
+        if result.get("update_seconds") is not None:
+            result["step_seconds"] = result["update_seconds"]
+        existing_steps = set()
+        if metrics_path.is_file():
+            for line in metrics_path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    try:
+                        existing_steps.add(int(json.loads(line).get("step")))
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        pass
+        if step not in existing_steps:
+            with metrics_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(result, allow_nan=False) + "\n")
+                handle.flush(); os.fsync(handle.fileno())
+        live.emit("update_committed", last_completed_update=step + 1, inflight_update=None)
+        live.emit("online_barrier")
+        print(json.dumps({"attempt_id": config.run.attempt_id, **result}, allow_nan=False), flush=True)
+        return result
+
+    from RL.observability import LiveTelemetry
+    live = LiveTelemetry({"project_root": str(root)}, config.run.attempt_id, config.runtime.output_root)
+    updater.on_stage = live.emit
+    live.emit("online_cold_rollout", last_completed_update=restored_step)
+    try:
+        coordinator = OnlineCoordinator(schedule, rollout=rollout, update=update,
+                                        resolved_points=resolved_points,
+                                        estimator_ingest=ingest, estimator_refit=refit,
+                                        campaign_id=options.campaign_id or config.run.attempt_id,
+                                        state_path=state_path)
+        history = coordinator.run()
+        committed_step = coordinator.state.committed_step
+        final_adapter = adapter_fingerprint(model)
+        if frozen_before is not None and frozen_before != frozen_checksums(model):
+            raise ValueError("Frozen base tensor checksums changed")
+        write_json(online_root / "history.json", history)
+        write_json(directory / "final-adapter.json", final_adapter)
+        write_json(directory / "validation.json", {"purpose": "online_bootstrap", "state": {"global_step": committed_step},
+                  "adapter_changed": initial_adapter != final_adapter,
+                  "estimator": store.manifest(), "history_steps": len(history)})
+        attempt.update(status="completed", ended_at=now(), final_state={"global_step": committed_step})
+        write_json(directory / "attempt.json", attempt)
+        commit_receipt(directory, "lora-attempt-v1", status="completed",
+                       attempt_id=config.run.attempt_id, contract_sha256=hash_json(contract))
+        live.emit("completed", last_completed_update=committed_step, inflight_update=None)
+        return {"attempt_id": config.run.attempt_id, "status": "completed", "path": str(directory),
+                "state": {"global_step": committed_step}, "history": history}
+    finally:
+        live.close()
+        if memory_controller is not None:
+            memory_controller.close()

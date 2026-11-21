@@ -58,7 +58,14 @@ class Model(Strict):
     verify_identity: bool = True
 
 
+class ServingLoRA(Strict):
+    adapter: str
+    identity_sha256: str
+    rank: int = Field(gt=0)
+
+
 class Serving(Strict):
+    lora: ServingLoRA | None = None
     base_url: str
     api_key_env: str
     management: Literal["external", "managed"]
@@ -226,6 +233,11 @@ class LimitsRetry(Strict):
         return self
 
 
+class SelectionRetry(Strict):
+    enabled: bool = False
+    max_retries: int = Field(default=3, ge=0, le=100)
+
+
 class Cancellation(Strict):
     control_request_seconds: float = Field(default=3.0, gt=0, le=30)
     cooperative_grace_seconds: float = Field(default=10.0, gt=0, le=300)
@@ -238,13 +250,20 @@ class Preflight(Strict):
     long_checks: bool = True
 
 
+class OnlineRLFailurePolicy(Strict):
+    baseline_failure_reward: float | None = Field(default=None, lt=0, allow_inf_nan=False)
+    verifier_error_retries: int | None = Field(default=None, ge=0)
+
+
 class Execution(Strict):
+    online_rl_failure_policy: OnlineRLFailurePolicy | None = None
     sample_completion_token_budget: int | None = Field(default=None, gt=0)
     # Soft RLIMIT_NOFILE for the run supervisor and its managed descendants.
     supervisor_max_open_files: int = Field(default=262144, ge=1024)
     preflight: Preflight = Field(default_factory=Preflight)
     cancellation: Cancellation = Field(default_factory=Cancellation)
     limits_retry: LimitsRetry = Field(default_factory=LimitsRetry)
+    selection_retry: SelectionRetry = Field(default_factory=SelectionRetry)
     rollout_workers: int = Field(gt=0)
     harness_workers: int = Field(gt=0)
     infrastructure_retry_limit: int = Field(ge=0)
@@ -449,6 +468,8 @@ class Parallel(Strict):
     estimator_ref: str | None = None
     max_inflight_branches: int = Field(default=16, gt=0, json_schema_extra={"readOnly": True})
     dynamic_branch_admission: bool = False
+    request_admission: Literal["capacity_only", "round_robin_by_trajectory"] = "capacity_only"
+    dycon_candidate_portion: int = Field(default=1, ge=1)
     admission_timeout_seconds: int = Field(default=1800, gt=0, le=28800)
     score_timeout_ms: int = Field(default=200, ge=1, le=30000)
     control_request_seconds: int | None = Field(default=None, gt=0)
@@ -465,6 +486,8 @@ class Parallel(Strict):
 
     @model_validator(mode="after")
     def validate_policy(self):
+        if self.request_admission == "round_robin_by_trajectory" and not self.dynamic_branch_admission:
+            raise ValueError("round-robin request admission requires dynamic_branch_admission=true")
         if self.mode == "parallel_consensus" and self.enabled:
             if self.branch_count <= 1:
                 raise ValueError("parallel consensus requires branch_count > 1")
@@ -774,7 +797,7 @@ def resolve_values(raw, path, *, overrides=(), run_policy=False, source_sha256=N
                     prune_implicit_nulls(value[key], source[key])
         prune_implicit_nulls(cfg.get('parallel', {}), raw.get('parallel', {}))
     # New serving modes must not change hashes of existing YAML configurations.
-    for field in ("trajectory_sharding", "replica_base_urls", "max_cpu_workers_per_gpu", "startup_mode"):
+    for field in ("trajectory_sharding", "replica_base_urls", "max_cpu_workers_per_gpu", "startup_mode", "lora"):
         if field not in raw["serving"]:
             cfg["serving"].pop(field, None)
     for section, fields in (("agent", ("backend", "profile_ref", "condenser_max_size", "condenser_keep_first", "condenser_max_tokens")),
@@ -802,14 +825,21 @@ def resolve_values(raw, path, *, overrides=(), run_policy=False, source_sha256=N
         cfg["execution"].pop("preflight", None)
     if "cancellation" not in raw["execution"]:
         cfg["execution"].pop("cancellation", None)
+    if "online_rl_failure_policy" not in raw["execution"]:
+        cfg["execution"].pop("online_rl_failure_policy", None)
     if "limits_retry" not in raw["execution"]:
         cfg["execution"].pop("limits_retry", None)
+    if "selection_retry" not in raw["execution"]:
+        cfg["execution"].pop("selection_retry", None)
     if 'startup_failure_limit' not in raw['execution']:
         cfg['execution'].pop('startup_failure_limit', None)
     if 'sample_completion_token_budget' not in raw['execution']:
         cfg['execution'].pop('sample_completion_token_budget', None)
     if 'supervisor_max_open_files' not in raw['execution']:
         cfg['execution'].pop('supervisor_max_open_files', None)
+    for field in ("request_admission", "dycon_candidate_portion"):
+        if field not in raw.get("parallel", {}):
+            cfg["parallel"].pop(field, None)
     # Adding host storage configuration must not alter legacy config identities.
     if "docker_data_root" not in raw["environment"]:
         cfg["environment"].pop("docker_data_root", None)

@@ -51,7 +51,6 @@ def prepare_capture_graph(
             for key in ("sequence_parallel", "sequence_parallel_moe", "expert_parallel")
         )
         and runner.speculative_config is None
-        and runner.lora_config is None
         and (steer is None or steer.graph_mode == "in_graph")
     ):
         return None
@@ -146,6 +145,7 @@ def _initialize_capture_graph(
     runner: "GPUModelRunner", state: CaptureGraphState
 ) -> "ModelCudaGraphManager":
     from vllm.v1.worker.gpu.cudagraph_utils import ModelCudaGraphManager
+    from vllm.v1.worker.gpu.lora_utils import create_lora_capture_hook
 
     idle = runner.cudagraph_manager
     assert idle is not None
@@ -155,12 +155,15 @@ def _initialize_capture_graph(
         else CUDAGraphMode.FULL_DECODE_ONLY
     )
     manager = ModelCudaGraphManager(
-        runner.vllm_config, runner.device, mode, runner.decode_query_len
+        runner.vllm_config, runner.device, mode, runner.decode_query_len,
+        lora_capture_cases=idle.lora_capture_cases,
     )
     # Capture outputs must never overlap the ordinary graph pool.
     manager.pool = current_platform.graph_pool_handle()
     allocated_before = torch.accelerator.memory_allocated(runner.device)
-    with state.record_outputs(runner.model):
+    # Match ordinary V2 graph adapter cases and setup. prepare_inputs restores
+    # the real request adapters and mappings before the first replay.
+    with runner.maybe_setup_dummy_loras(runner.lora_config), state.record_outputs(runner.model):
         manager.capture(
             runner.model,
             runner.model_state,
@@ -169,6 +172,9 @@ def _initialize_capture_graph(
             runner.block_tables,
             runner.attn_groups,
             runner.kv_cache_config,
+            has_lora=runner.lora_config is not None,
+            use_aux_hidden_state_outputs=runner.use_aux_hidden_state_outputs,
+            lora_capture_hook=create_lora_capture_hook(runner.lora_config, runner),
             skip_compiled=True,
             progress_bar_desc="Capturing activation extraction graphs",
         )

@@ -76,7 +76,7 @@ def _selection_from_tasks(catalog: Catalog, task_ids=(), partition=None, cfg=Non
 
 def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partition=None, repeat_count=1,
                from_run=None, clone_overrides=(), parallel_config=None,
-               reverse_task_order=False):
+               reverse_task_order=False, online_work_items=None):
 
     run_id = identifier(run_id)
 
@@ -99,6 +99,8 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
 
     if reverse_task_order and from_run is None:
         raise ValueError("--reverse-task-order requires --from-run")
+    if online_work_items is not None and operation != "rollout":
+        raise ValueError("online_work_items are only supported for rollout runs")
 
     catalog = Catalog(root)
     clone_receipt = None
@@ -173,6 +175,11 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
     # This is creation, including clones of older snapshots. Loading/resuming
     # the source still uses its frozen capacity without modifying its bytes.
     cfg = with_derived_parallel_capacity(cfg)
+    if "supervisor_max_open_files" not in cfg["execution"]:
+        from core.config import Execution
+        cfg = copy.deepcopy(cfg)
+        cfg["execution"]["supervisor_max_open_files"] = Execution.model_fields["supervisor_max_open_files"].default
+        cfg["config_hash"] = hash_json({k: v for k, v in cfg.items() if k != "config_hash"})
     parallel = cfg.get("parallel", {})
     if (parallel.get("enabled") and not parallel.get("dynamic_branch_admission", False)
             and parallel.get("branch_count", 1) > parallel["max_inflight_branches"]):
@@ -220,6 +227,27 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
     cfg = copy.deepcopy(cfg)
     cfg["execution_binding"] = resolve_execution(cfg, selection["tasks"]).as_dict()
     cfg["config_hash"] = hash_json({k: v for k, v in cfg.items() if k != "config_hash"})
+    branch_count = cfg.get("parallel", {}).get("branch_count", 1) if operation == "rollout" else 1
+    online_contract = None
+    if online_work_items is None:
+        work_items = make_work_items(selection, run_id, repeat_count, cfg["generation"]["seed"], branch_count)
+    else:
+        if repeat_count < 2:
+            raise ValueError("online runs require one DyCon and at least one baseline repetition")
+        from RL.online_runtime import make_online_run_work_items
+        work_items = make_online_run_work_items(selection, run_id, m=repeat_count - 1,
+            base_seed=cfg["generation"]["seed"], branch_count=branch_count)
+        if (not isinstance(online_work_items, dict)
+                or online_work_items.get("run_id") != run_id
+                or sorted(online_work_items.get("items", []), key=lambda item: item["sample_key"])
+                   != sorted(work_items["items"], key=lambda item: item["sample_key"])
+                or online_work_items.get("seed_policy") != work_items["seed_policy"]):
+            raise ValueError("online work-item identities/profiles differ from frozen selection/config")
+        work_items["items"] = copy.deepcopy(online_work_items["items"])
+        online_contract = dict(work_items["online_contract"])
+        online_contract["sample_order"] = [item["sample_key"] for item in work_items["items"]]
+        work_items["online_contract"] = dict(online_contract)
+        work_items["source_selection_sha256"] = online_work_items.get("selection_sha256")
     run = snapshot(cfg, run_id, selection)
 
     if parallel_input is not None:
@@ -310,6 +338,9 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
 
     }
 
+    if online_contract is not None:
+        plan["online_contract"] = online_contract
+        plan["work_items_sha256"] = hash_json(work_items["items"])
     plan["plan_sha256"] = hash_json(plan)
 
     write_json(run / "plan.json", plan)
@@ -326,9 +357,7 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
 
         (run / folder).mkdir(parents=True, exist_ok=True)
 
-    branch_count = cfg.get("parallel", {}).get("branch_count", 1) if operation == "rollout" else 1
-
-    write_work_items(run, make_work_items(selection, run_id, repeat_count, cfg["generation"]["seed"], branch_count))
+    write_work_items(run, work_items)
 
     if operation == "rollout":
 
@@ -487,6 +516,22 @@ def load_plan(root, run_id, *, allow_incomplete_revision=None, allow_incomplete_
         extension=plan.get("sampling_extension"),
 
     )
+
+    if plan.get("online_contract") is not None:
+        from RL.online_runtime import make_online_run_work_items
+        expected = make_online_run_work_items(cfg["selection"], run_id,
+            m=plan["repeat_count"] - 1, base_seed=cfg["generation"]["seed"],
+            branch_count=cfg.get("parallel", {}).get("branch_count", 1))
+        order = plan["online_contract"].get("sample_order", [])
+        by_key = {item["sample_key"]: item for item in expected["items"]}
+        if len(order) != len(by_key) or set(order) != set(by_key):
+            raise ValueError("Online sample order is not an exact frozen work permutation")
+        expected["items"] = [by_key[key] for key in order]
+        expected["online_contract"]["sample_order"] = order
+        if (expected["online_contract"] != plan["online_contract"]
+                or plan.get("work_items_sha256") != hash_json(work_items["items"])
+                or work_items.get("online_contract") != plan["online_contract"]):
+            raise ValueError("Online profile contract differs from immutable run plan")
 
     if expected["items"] != work_items["items"]:
 

@@ -10,6 +10,7 @@ import importlib
 import queue
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -80,6 +81,9 @@ class ScoringBroker:
         self.run_cancelled = False
         self.peak_active = 0
         self.saturated_waiting_peak = 0
+        self.admission_turns = deque()
+        self.admission_portion_used = 0
+        self.admission_waiters = {}
         threading.Thread(target=self._run, name="dycon-score", daemon=True).start()
 
     def _run(self):
@@ -225,29 +229,57 @@ class ScoringBroker:
             remaining = initial["expires"] - time.monotonic()
             if remaining <= 0:
                 raise RuntimeError("Parallel decision deadline exceeded")
+            fair = self.cfg.get("request_admission") == "round_robin_by_trajectory"
+            if fair and branch_id in initial.get("pending", set()):
+                self.admission_waiters.setdefault(decision_id, set()).add(branch_id)
+            if fair and decision_id not in self.admission_turns and initial.get("pending"):
+                self.admission_turns.append(decision_id)
+            def fair_turn():
+                while self.admission_turns and (self.admission_turns[0] not in self.groups
+                        or not self.admission_waiters.get(self.admission_turns[0])
+                        or self.groups[self.admission_turns[0]]["expires"] <= time.monotonic()
+                        or self.admission_turns[0] in self.cancelled):
+                    self.admission_turns.popleft()
+                    self.admission_portion_used = 0
+                return not self.admission_turns or self.admission_turns[0] == decision_id
             def ready():
                 self.status()
                 group = self.groups.get(decision_id)
-                return self.closed or self.run_cancelled or decision_id in self.cancelled or group is None or branch_id not in group.get("pending", set()) or sum(len(g["active"]) for g in self.groups.values()) < self.cfg["max_inflight_branches"]
-            if not self.condition.wait_for(ready, min(self.cfg.get("admission_timeout_seconds", 1800), remaining)):
-                raise RuntimeError("Parallel scoring capacity exhausted")
-            self.check_cancelled(decision_id)
-            group = self.groups.get(decision_id)
-            if self.closed or group is None or branch_id not in group["branches"]:
-                raise RuntimeError("Unknown parallel decision branch")
-            if group["expires"] <= time.monotonic():
-                raise RuntimeError("Parallel decision deadline exceeded")
-            if branch_id in group["active"]:
-                return {"acquired": True, "already_acquired": True}
-            if branch_id not in group.get("pending", set()):
-                if branch_id in group.get("results", {}):
-                    return {"acquired": False, "already_released": True}
-                raise RuntimeError("Parallel branch is not pending")
-            group["pending"].remove(branch_id)
-            group["active"].add(branch_id)
-            self.status()
-            self.condition.notify_all()
-            return {"acquired": True, "active_branches": sum(len(g["active"]) for g in self.groups.values())}
+                return self.closed or self.run_cancelled or decision_id in self.cancelled or group is None or branch_id not in group.get("pending", set()) or (sum(len(g["active"]) for g in self.groups.values()) < self.cfg["max_inflight_branches"] and (not fair or fair_turn()))
+            try:
+                if not self.condition.wait_for(ready, min(self.cfg.get("admission_timeout_seconds", 1800), remaining)):
+                    if fair:
+                        self.admission_waiters.get(decision_id, set()).discard(branch_id)
+                        self.condition.notify_all()
+                    raise RuntimeError("Parallel scoring capacity exhausted")
+                self.check_cancelled(decision_id)
+                group = self.groups.get(decision_id)
+                if self.closed or group is None or branch_id not in group["branches"]:
+                    raise RuntimeError("Unknown parallel decision branch")
+                if group["expires"] <= time.monotonic():
+                    raise RuntimeError("Parallel decision deadline exceeded")
+                if branch_id in group["active"]:
+                    return {"acquired": True, "already_acquired": True}
+                if branch_id not in group.get("pending", set()):
+                    if branch_id in group.get("results", {}):
+                        return {"acquired": False, "already_released": True}
+                    raise RuntimeError("Parallel branch is not pending")
+                group["pending"].remove(branch_id)
+                group["active"].add(branch_id)
+                if fair:
+                    self.admission_waiters.get(decision_id, set()).discard(branch_id)
+                    self.admission_portion_used += 1
+                    if self.admission_portion_used >= int(self.cfg.get("dycon_candidate_portion", 1)) or not group["pending"]:
+                        if self.admission_turns and self.admission_turns[0] == decision_id:
+                            self.admission_turns.rotate(-1)
+                        self.admission_portion_used = 0
+                self.status()
+                self.condition.notify_all()
+                return {"acquired": True, "active_branches": sum(len(g["active"]) for g in self.groups.values())}
+            finally:
+                if fair:
+                    self.admission_waiters.get(decision_id, set()).discard(branch_id)
+                    self.condition.notify_all()
 
     def release_branch(self, metadata, request_id=None, reason="native_output"):
         """Release one vLLM sequence slot while retaining decision evidence."""
@@ -354,6 +386,7 @@ class ScoringBroker:
     def release(self, decision_id):
         with self.condition:
             group = self.groups.pop(decision_id, None)
+            self.admission_waiters.pop(decision_id, None)
             self.condition.notify_all()
             return {"released": group is not None}
 
@@ -361,6 +394,8 @@ class ScoringBroker:
         with self.condition:
             self.closed = True
             self.groups.clear()
+            self.admission_waiters.clear()
+            self.admission_turns.clear()
             self.condition.notify_all()
         while True:
             try:

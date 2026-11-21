@@ -21,6 +21,22 @@ def _check_finalization(completion, rollout_id, coverage, coverage_scope):
     raise ValueError('Attempt has no successful immutable capture finalization for requested scope')
 
 
+def _completion_receipt(root, row, rollout_id, session_id):
+    source = owned_path(root, row['provenance']['source'])
+    # Mini's terminal attempt.json is the immutable capture completion receipt;
+    # OpenHands retains its dedicated capture-finalization.json one level up.
+    attempt = source.parent
+    if (attempt / 'attempt.json').is_file():
+        path = attempt / 'attempt.json'
+        value = read_json(path)
+        if (value.get('rollout_id') != rollout_id or value.get('capture_session_id') != session_id
+                or value.get('attempt_id') != row.get('attempt_id') or value.get('disposition') != 'accepted'):
+            raise ValueError('Terminal attempt receipt differs from selected capture identity')
+        return path, value
+    path = attempt.parent / 'capture-finalization.json'
+    return path, read_json(path)
+
+
 def publish_finalized(cfg,run_id,publication_id,session_ids,*,eligibility="resolved_only",coverage_scope="all_branches"):
     from difficulty.datasets.eligibility import eligible_evaluation, validate_policy
     validate_policy(eligibility)
@@ -53,8 +69,7 @@ def publish_finalized(cfg,run_id,publication_id,session_ids,*,eligibility="resol
             rid=final['rollout_id'];row=data['rollouts'][rid]
             if not eligible_evaluation(row, data, rid, eligibility):
                 raise ValueError('Session does not satisfy official evaluation eligibility: '+eligibility)
-            attempt=owned_path(root,row['provenance']['source']).parent.parent
-            final_receipt=attempt/'capture-finalization.json';completion=read_json(final_receipt)
+            final_receipt,completion=_completion_receipt(root,row,rid,sid)
             _check_finalization(completion, rid, coverage, coverage_scope)
             proofs[str(final_receipt)]=sha256(final_receipt)
             trajectory=owned_path(root,row['trajectory_path'])

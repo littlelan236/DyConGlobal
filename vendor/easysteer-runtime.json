@@ -867,7 +867,7 @@
     "v1/worker/gpu/eplb_utils.py": "1829fac11464aed4649179b302df198de51b95d0589f4e56bea305a876a63e26",
     "v1/worker/gpu/model_runner.py": "808ee2074cab7ad98b763bfd2fd9749d181b3ce5ec650c7be7de0e24ec85e316",
     "v1/worker/gpu/input_batch.py": "3929c92e42ae90e4410bb4537dcbdcd171a662e44afc1189a9a3e19037a84410",
-    "v1/worker/gpu/model_hook_utils.py": "9d45e32c8651aed62537e6bee155cc220224bb3193aadb985307fb67f792c8d6",
+    "v1/worker/gpu/model_hook_utils.py": "fbf2d03865ece6f2fd0d8085e40e91b2f49730571e55871290b0f7ff1418a25f",
     "v1/worker/sentinel/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "v1/worker/sentinel/gpu_worker_sentinel.py": "3959b8619d052c5dd247815074e03ec21ec9b43cc424ff2d296abc19b227b852",
     "v1/worker/gpu/mm/rope.py": "8d1de6397e64e657a70a6ed4fc9c0fb64e7ca71c470d559bc7b7647281581d94",

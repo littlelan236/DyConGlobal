@@ -278,7 +278,10 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None, incremental=False):
             prediction = {"instance_id": iid, "model_name_or_path": rid, "model_patch": patch}
             timeout = rows[iid].get("evaluation_timeout_seconds", cfg["timeouts"]["evaluation_seconds"])
             attempts = []
-            for attempt in range(MAX_NETWORK_RETRIES + 1):
+            from RL.online_failures import failure_policy, verifier_error
+            online_retries = failure_policy(cfg).get('verifier_error_retries')
+            retry_limit = MAX_NETWORK_RETRIES if online_retries is None else online_retries
+            for attempt in range(retry_limit + 1):
                 identity = {"evaluation": eval_id, "rollout": rid}
                 if attempt:
                     identity["attempt"] = attempt + 1
@@ -345,9 +348,15 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None, incremental=False):
                 # Replace the final outcome so successful retries cannot retain
                 # stale network failure_type/error fields.
                 result = {"patch_sha256": result["patch_sha256"], **attempt_result}
-                if not retryable or attempt == MAX_NETWORK_RETRIES:
+                if online_retries is not None:
+                    retryable = verifier_error(attempt_result)
+                if not retryable or attempt == retry_limit:
                     break
                 time.sleep(NETWORK_RETRY_DELAY_SECONDS * (attempt + 1))
+            if online_retries is not None and verifier_error(result):
+                result['online_rl_discard'] = {
+                    'reason': 'verifier_error_retries_exhausted',
+                    'retry_limit': online_retries, 'attempt_count': len(attempts)}
             result["attempts"] = attempts
             return rid, result
 

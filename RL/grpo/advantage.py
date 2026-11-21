@@ -5,6 +5,8 @@ import statistics
 
 ADVANTAGE_VERSION = "historical_topk_zero_sum_v1"
 CONSENSUS_ADVANTAGE_VERSION = "consensus_top_half_zero_sum_v1"
+CONSENSUS_BINARY_ADVANTAGE_VERSION = "consensus_top_half_binary_v1"
+CONSENSUS_ADVANTAGE_POLICIES = frozenset({CONSENSUS_ADVANTAGE_VERSION, CONSENSUS_BINARY_ADVANTAGE_VERSION})
 SAME_ACTION_ADVANTAGE_VERSION = "same_action_top_half_v1"
 
 
@@ -35,9 +37,9 @@ class AdvantageResult:
 
 def compute_advantages(scores, *, top_k=4, top_k_fraction=None, score_scale_floor=0.1,
                        boundary_tie_sigma=0.05, advantage_policy=ADVANTAGE_VERSION, retained=None):
-    if advantage_policy not in {ADVANTAGE_VERSION, CONSENSUS_ADVANTAGE_VERSION, SAME_ACTION_ADVANTAGE_VERSION}:
+    if advantage_policy not in CONSENSUS_ADVANTAGE_POLICIES | {ADVANTAGE_VERSION, SAME_ACTION_ADVANTAGE_VERSION}:
         raise ValueError("Unknown advantage policy")
-    consensus = advantage_policy == CONSENSUS_ADVANTAGE_VERSION
+    consensus = advantage_policy in CONSENSUS_ADVANTAGE_POLICIES
     same_action = advantage_policy == SAME_ACTION_ADVANTAGE_VERSION
     if (consensus or same_action) and (top_k is not None or top_k_fraction != 0.5 or boundary_tie_sigma != 0):
         label = "Consensus top-half" if consensus else "Same-action top-half"
@@ -110,5 +112,7 @@ def compute_advantages(scores, *, top_k=4, top_k_fraction=None, score_scale_floo
     result = [-m / (n - m)] * n
     for i, weight in zip(positive, weights):
         result[i] = weight / mean_weight
+    if advantage_policy == CONSENSUS_BINARY_ADVANTAGE_VERSION:
+        result = [math.copysign(1.0, a) for a in result]
     return AdvantageResult(result, order, ranks, m, n - m, math.fsum(result), k,
         {**info, "status": "ok", "scale": scale})

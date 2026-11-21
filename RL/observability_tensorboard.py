@@ -25,12 +25,29 @@ TAGS = {**{k: 'train/' + k for k in ('loss', 'policy_loss', 'k3_penalty_mean',
             'planned_parent_groups', 'planned_execution_chunks')},
         **{k: 'timing/' + k for k in ('forward_seconds', 'backward_seconds')}}
 
+K3_LOSS_TAG = 'train/k3_loss'
+K3_LOSS_FRACTION_TAG = 'train/k3_loss_fraction'
+PINNED_CHARTS = (
+    ('Gradient L2 norm', TAGS['gradient_norm']),
+    ('Total loss', TAGS['loss']),
+    ('K3 (before beta)', SIGNAL_TAGS['k3_penalty_mean']),
+    ('Weighted K3 / total loss', K3_LOSS_FRACTION_TAG),
+    ('Policy ratio: positive advantage tokens', TAGS['positive_ratio_mean']),
+    ('Policy ratio: negative advantage tokens', TAGS['negative_ratio_mean']),
+    ('Training step duration (seconds)', 'timing/step_seconds'),
+)
+SERVICE_MODULE = 'RL.observability_tensorboard'
+
 TERMINAL_ATTEMPT_STATES = frozenset(('paused', 'completed', 'failed', 'dry_run'))
 DEFAULT_QUERY_LEASE_SECONDS = 1800
 MAX_QUERY_LEASE_SECONDS = 7 * 24 * 60 * 60
 
 
-def scalar_values(row, *, include_k3=True):
+def finite_number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def scalar_values(row, *, include_k3=True, kl_beta=None):
     values = {tag: row[k] for k, tag in TAGS.items() if k in row}
     if not include_k3:
         values = {key: value for key, value in values.items()
@@ -49,7 +66,94 @@ def scalar_values(row, *, include_k3=True):
                      ('peak_reserved_bytes', 'peak_reserved_gib'), ('free_bytes', 'free_gib')]:
         if key in row:
             values['memory/' + tag] = row[key] / 1024**3
-    return {k:v for k,v in values.items() if type(v) in (int, float) and math.isfinite(v)}
+    penalty = row.get('k3_penalty_mean')
+    if finite_number(kl_beta) and finite_number(penalty):
+        weighted = kl_beta * penalty
+        values[K3_LOSS_TAG] = weighted
+        loss = row.get('loss')
+        if finite_number(loss) and loss != 0:
+            values[K3_LOSS_FRACTION_TAG] = weighted / loss
+    attribution = row.get('gradient_attribution') or {}
+    for name, component in attribution.get('components', {}).items():
+        for field, value in component.items():
+            values[f'gradient/{name}/{field}'] = value
+    for field in ('total_norm', 'source_cosine', 'source_sum_residual_norm'):
+        if field in attribution:
+            values[f'gradient/{field}'] = attribution[field]
+    if 'kl_backward_seconds' in attribution:
+        values['timing/gradient_kl_backward_seconds'] = attribution['kl_backward_seconds']
+    return {k: v for k, v in values.items() if finite_number(v)}
+
+
+def pinned_summary():
+    import re
+    from tensorboard.compat.proto import summary_pb2, tensor_pb2, types_pb2
+    from tensorboard.plugins.custom_scalar import layout_pb2, metadata
+
+    layout = layout_pb2.Layout(version=0)
+    category = layout.category.add(title='Pinned')
+    for title, tag in PINNED_CHARTS:
+        category.chart.add(title=title).multiline.tag.append('^' + re.escape(tag) + '$')
+    return summary_pb2.Summary(value=[summary_pb2.Summary.Value(
+        tag=metadata.CONFIG_SUMMARY_TAG,
+        metadata=metadata.create_summary_metadata(),
+        tensor=tensor_pb2.TensorProto(dtype=types_pb2.DT_STRING,
+                                      string_val=[layout.SerializeToString()]),
+    )])
+
+
+def serve():
+    import sys
+    from absl import app
+    from tensorboard import default, main_lib, program
+    from tensorboard.plugins import base_plugin
+    from tensorboard.plugins.custom_scalar.custom_scalars_plugin import CustomScalarsPlugin
+
+    class PinnedPlugin(CustomScalarsPlugin):
+        def frontend_metadata(self):
+            return base_plugin.FrontendMetadata(
+                element_name='tf-custom-scalar-dashboard', tab_name='Pinned')
+
+    main_lib.global_init()
+    plugins = [PinnedPlugin if plugin is CustomScalarsPlugin else plugin
+               for plugin in default.get_plugins()]
+    tb = program.TensorBoard(plugins=plugins)
+    try:
+        app.run(tb.main, flags_parser=tb.configure)
+    except base_plugin.FlagsError as exc:
+        print(f'Error: {exc}', file=sys.stderr)
+        raise SystemExit(1) from exc
+
+
+def server_flags(folder, port):
+    return ['--logdir', str(folder / 'visible'), '--host', '127.0.0.1',
+            '--port', str(port), '--reload_interval', '2', '--load_fast', 'false']
+
+
+def belongs_to_source(name, command, folder, port):
+    if name == 'sync':
+        return command[1:] == ['-m', SERVICE_MODULE, '--worker', str(folder.parent / 'source.json')]
+    flags = server_flags(folder, port)
+    return command[1:] in (['-m', SERVICE_MODULE, '--serve', *flags],
+                           ['-m', 'tensorboard.main', *flags])
+
+
+def owned_process(name, record, folder, *, strict=False):
+    registered = record.get(name)
+    if not registered:
+        return None
+    actual = process(registered.get('pid', -1))
+    if actual is None or actual['starttime'] != registered.get('starttime'):
+        return None
+    if actual != registered and registered.get('command') != []:
+        return None
+    if belongs_to_source(name, actual['command'], folder, record.get('port')):
+        return actual
+    # Older launchers could snapshot an empty argv before exec. Require the
+    # full command for this source before recovering any such receipt.
+    if strict and registered.get('command') != []:
+        raise ValueError('Registered '+name+' command does not belong to this source; refusing to signal')
+    return None
 
 
 def worker(descriptor):
@@ -62,7 +166,7 @@ def worker(descriptor):
     directory = Path(binding['directory'])
     cursor_path = folder / 'sync-cursor.json'
     reader = MetricReader(directory / 'metrics.jsonl')
-    include_k3 = binding.get('kl_beta') != 0
+    kl_beta = binding.get('kl_beta')
     stopped = False
     def stop(*_):
         nonlocal stopped
@@ -98,13 +202,9 @@ def worker(descriptor):
     def stop_peer(reason):
         service_path = folder / 'service.json'
         record = read_json(service_path) if service_path.exists() else {}
-        owned = record.get('tensorboard')
-        if owned and matches(owned):
-            command = owned.get('command', [])
-            expected = ('tensorboard.main', '--logdir', str(folder / 'visible'))
-            if ('-m' in command and command[command.index('-m') + 1] == expected[0]
-                    and expected[1] in command and command[command.index(expected[1]) + 1] == expected[2]):
-                os.kill(owned['pid'], signal.SIGTERM)
+        owned = owned_process('tensorboard', record, folder)
+        if owned:
+            os.kill(owned['pid'], signal.SIGTERM)
         record.update(state='stopped', stopped_at=now(), auto_stop_reason=reason)
         write_json(service_path, record)
     with file_lock(folder / 'writer.lock', nonblocking=True):
@@ -130,6 +230,7 @@ def worker(descriptor):
                 reader = MetricReader(reader.path)
             elif previous.get('error'):
                 raise ValueError('Previous synchronization failed; use --action rebuild')
+            writer.add_event(Event(wall_time=time.time(), summary=pinned_summary()))
             write_json(cursor_path, cursor)
             first = True
             while not stopped:
@@ -139,7 +240,7 @@ def worker(descriptor):
                     wall = datetime.fromisoformat(observed).timestamp() if observed else 0.
                     if not observed:
                         cursor['historical_wall_time_estimated'] = True
-                    values = scalar_values(row, include_k3=include_k3)
+                    values = scalar_values(row, include_k3=kl_beta != 0, kl_beta=kl_beta)
                     values['progress/inherited'] = int(row['global_step'] <= binding.get('inherited_through_step', 0))
                     writer.add_event(Event(wall_time=wall, step=row['global_step'],
                         summary=Summary(value=[Summary.Value(tag=k, simple_value=v) for k,v in values.items()])))
@@ -182,7 +283,7 @@ def status_at(folder):
     cursor = read_json(folder / 'sync-cursor.json') if (folder / 'sync-cursor.json').exists() else None
     if cursor and cursor.get('stop_reason') and not record.get('auto_stop_reason'):
         record['auto_stop_reason'] = cursor['stop_reason']
-    alive = {name + '_alive': matches(record.get(name)) for name in ('sync', 'tensorboard')}
+    alive = {name + '_alive': bool(owned_process(name, record, folder)) for name in ('sync', 'tensorboard')}
     visible = folder / 'visible'
     event_files = list(visible.glob('*/events.out.tfevents.*')) if visible.exists() else []
     event_mtime = max((p.stat().st_mtime for p in event_files), default=None)
@@ -193,16 +294,9 @@ def status_at(folder):
 
 def stop_owned(folder, record):
     for name in ('tensorboard', 'sync'):
-        owned = record.get(name)
-        if not owned or not matches(owned):
+        owned = owned_process(name, record, folder, strict=True)
+        if not owned:
             continue
-        command = owned['command']
-        expected = ('RL.observability_tensorboard', '--worker', str(folder.parent/'source.json')) if name == 'sync' else (
-            'tensorboard.main', '--logdir', str(folder/'visible'))
-        module, flag, value = expected
-        if ('-m' not in command or command[command.index('-m')+1:command.index('-m')+2] != [module]
-                or flag not in command or command[command.index(flag)+1:command.index(flag)+2] != [value]):
-            raise ValueError('Registered '+name+' command does not belong to this source; refusing to signal')
         # Identity contains exact argv AND proc starttime, excluding PID reuse.
         os.kill(owned['pid'], signal.SIGTERM)
         deadline = time.monotonic() + 10
@@ -272,7 +366,7 @@ def manage(cfg, attempt_id, *, action='status', storage_root=None, port=16006, h
                         parent_checkpoint=attempt.get('parent'),
                         inherited_through_step=attempt.get('initial_state', {}).get('global_step', 0))
         write_json(cache / 'source.json', identity)
-        base = [str(python), '-m', 'RL.observability_tensorboard']
+        base = [str(python), '-m', SERVICE_MODULE]
         record = {'schema_version': 1, 'state': 'starting', 'attempt_id': attempt_id,
                   'host': host, 'port': port, 'logdir': str(folder / 'visible'), 'started_at': now(),
                   'url': f'http://127.0.0.1:{port}',
@@ -283,9 +377,17 @@ def manage(cfg, attempt_id, *, action='status', storage_root=None, port=16006, h
             with (folder / (name + '.log')).open('ab') as log:
                 child = subprocess.Popen(command, cwd=cfg['project_root'], stdin=subprocess.DEVNULL,
                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-            owned = process(child.pid)
-            if not owned:
-                raise RuntimeError(name + ' exited during startup')
+            deadline = time.monotonic() + 5
+            while child.poll() is None and time.monotonic() < deadline:
+                owned = process(child.pid)
+                if owned and owned['command'] == command:
+                    break
+                time.sleep(.02)
+            else:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=3)
+                raise RuntimeError(name + ' did not exec the expected command during startup')
             record[name] = owned
             write_json(folder / 'service.json', record)
             return child
@@ -301,8 +403,7 @@ def manage(cfg, attempt_id, *, action='status', storage_root=None, port=16006, h
                 time.sleep(.2)
             else:
                 raise TimeoutError('Historical replay not ready within 180 seconds')
-            tb = launch('tensorboard', [str(python), '-m', 'tensorboard.main', '--logdir', str(folder / 'visible'),
-                '--host', host, '--port', str(port), '--reload_interval', '2', '--load_fast', 'false'])
+            tb = launch('tensorboard', base + ['--serve', *server_flags(folder, port)])
             deadline = time.monotonic()+25
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             while time.monotonic() < deadline:
@@ -325,6 +426,11 @@ def manage(cfg, attempt_id, *, action='status', storage_root=None, port=16006, h
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Internal CLI-managed RL observability worker')
-    parser.add_argument('--worker', required=True)
-    worker(parser.parse_args().worker)
+    import sys
+    if sys.argv[1:2] == ['--serve']:
+        del sys.argv[1]  # TensorBoard parses the remaining arguments.
+        serve()
+    else:
+        parser = argparse.ArgumentParser(description='Internal CLI-managed RL observability worker')
+        parser.add_argument('--worker', required=True)
+        worker(parser.parse_args().worker)

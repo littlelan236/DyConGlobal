@@ -25,6 +25,7 @@ from rollout.retry import (
     counts_recorded,
     disposition,
     enabled,
+    resampling_enabled,
     initialize_counts,
     publish_once,
     rebuild_counts,
@@ -421,11 +422,12 @@ def _recover_attempt(cfg, run_id, task, sample, context, out, runtime):
     info = raw.get('info', {})
     binding = info.get('dycon', {}).get('attempt_context')
     status = info.get('exit_status')
-    if not fact_path.exists() and (status not in TERMINAL or binding is None):
+    recoverable = status in TERMINAL or disposition(cfg, status) == 'selection_retry'
+    if not fact_path.exists() and (not recoverable or binding is None):
         return None
     if binding != context or info.get('attempt_id') != context['attempt_id'] or raw.get('instance_id') != sample.instance_id:
         raise ValueError('Saved trajectory does not match reserved attempt context')
-    if status not in TERMINAL and not fact_path.exists():
+    if not recoverable and not fact_path.exists():
         return None
     if counts_recorded(run):
         record_agent_outcome(run, out, context, status)
@@ -458,7 +460,7 @@ def _retry_cursor(cfg, history):
     for record in history:
         round_id = record.get('seed_round', round_id)
         kind = record.get('disposition') or disposition(cfg, record.get('exit_status'))
-        if kind == 'retry_pending':
+        if kind in {'retry_pending', 'selection_retry'}:
             round_id += 1
             retry_kind = 'resample'
         elif kind == 'infrastructure_retry':
@@ -470,6 +472,8 @@ def _retry_cursor(cfg, history):
 
 def _decorate_result(cfg, sample, work, out, result, history):
     result = {**sample.as_dict(), **result}
+    if cfg.get("_online_rl_source") == "baseline":
+        result["online_source"] = "baseline"
     assignment = out / 'serving-assignment.json'
     if assignment.exists():
         result['serving_assignment'] = read_json(assignment)
@@ -484,6 +488,13 @@ def _decorate_result(cfg, sample, work, out, result, history):
         physical_attempts=len(started) + len(legacy),
         resample_retry_count=len({c['seed_round'] for c in contexts if c['seed_round'] > 0}),
         infrastructure_retry_count=max(0, len(legacy) - 1) + sum(read_json(p / 'attempt-started.json').get('retry_kind') == 'infrastructure' for p in started))
+    selection_failures = sum(r.get('exit_status') == 'ParallelSelectionError' for r in records)
+    if cfg.get('execution', {}).get('selection_retry', {}).get('enabled', False):
+        result['selection_retry_count'] = selection_failures
+    if result.get('disposition') == 'selection_retry':
+        result['selection_retry_count'] = selection_failures - 1
+        if selection_failures > cfg['execution']['selection_retry']['max_retries']:
+            result.update(exit_status='selection_retry_exhausted', last_exit_status='ParallelSelectionError', disposition='failed')
     if result.get('disposition') == 'infrastructure_retry' and result['infrastructure_retry_count'] >= cfg['execution']['infrastructure_retry_limit']:
         result.update(exit_status='infrastructure_exhausted', last_exit_status=result['exit_status'], disposition='failed')
     write_json(out / 'attempt.json', result)
@@ -492,8 +503,9 @@ def _decorate_result(cfg, sample, work, out, result, history):
         'sample_key': sample.sample_key, 'seed_round': next_round, 'retry_kind': retry_kind,
         'last_attempt_id': result['attempt_id'], 'last_status': result['exit_status'],
         'resample_retry_count': result['resample_retry_count'],
+        'selection_retry_count': result.get('selection_retry_count', 0),
         'infrastructure_retry_count': result['infrastructure_retry_count']})
-    if result['disposition'] not in {'retry_pending', 'infrastructure_retry'}:
+    if result['disposition'] not in {'retry_pending', 'selection_retry', 'infrastructure_retry'}:
         write_json(work / 'result.json', result)
     else:
         (work / 'result.json').unlink(missing_ok=True)
@@ -555,7 +567,7 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
                 for key in ('run_id', 'task_key', 'sample_key', 'repetition_id', 'sample_seed'):
                     if context.get(key) != sample.as_dict()[key]:
                         raise ValueError('Reserved attempt identity changed')
-                expected_policy = SEED_POLICY if enabled(cfg) else sample.seed_policy
+                expected_policy = SEED_POLICY if resampling_enabled(cfg) else sample.seed_policy
                 if context.get('seed_policy') != expected_policy:
                     raise ValueError('Reserved attempt seed policy changed')
                 if context['attempt_id'] != out.name:
@@ -623,7 +635,7 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
             out.mkdir(exist_ok=True)
             context = AttemptContext(run_id, task_key, sample.sample_key, sample.repetition_id,
                                      attempt_id, round_id, seed, sample.sample_seed,
-                                     SEED_POLICY if enabled(cfg) else sample.seed_policy).as_dict()
+                                     SEED_POLICY if resampling_enabled(cfg) else sample.seed_policy).as_dict()
             publish_once(out / 'attempt-context.json', context)
         boundary = _boundary(run, factory)
         if boundary:
@@ -752,6 +764,8 @@ def _run_manifest_active(cfg, run_id, loaded, adapter, settled, factory, operato
             capture_producers = ([worker.manager.runtime.get('capture_controller') for worker in serving.workers]
                                  if sharded else [runtime.get('capture_controller')])
             worker_limit = serving.capacity if sharded else cfg['execution']['rollout_workers']
+            if loaded['plan'].get('online_contract'):
+                worker_limit = min(worker_limit, cfg['execution']['rollout_workers'])
             cancellation = CURRENT.get()
             runtime['cancellation'] = cancellation
             wake = CompletionWake(cancellation)
@@ -828,6 +842,15 @@ def _run_manifest_active(cfg, run_id, loaded, adapter, settled, factory, operato
                         item = pending.popleft()
                         task = selection['tasks'][item['task_key']]
                         task_runtime = {**runtime, 'queue_wait_seconds': time.monotonic() - queued_at[item['sample_key']]}
+                        # Online bootstrap work manifests carry a source profile
+                        # per logical trajectory; preserve it through the
+                        # existing attempt runtime so OpenHands can select
+                        # baseline versus estimator-consensus semantics while
+                        # reusing the same managed serving process.
+                        if item.get('online_source') in {'baseline', 'dycon'}:
+                            task_runtime['online_source'] = item['online_source']
+                        if item.get('candidate_index') is not None:
+                            task_runtime['online_candidate_index'] = item['candidate_index']
                         if worker is not None:
                             task_runtime.update(worker.runtime())
                         tracker.phase(item['sample_key'], 'admission')
@@ -876,7 +899,7 @@ def _run_manifest_active(cfg, run_id, loaded, adapter, settled, factory, operato
                         boundary = _boundary(run, factory)
                         if boundary:
                             stopped = boundary
-                        if kind in {'retry_pending', 'infrastructure_retry', 'admission_waiting'} and not stopped:
+                        if kind in {'retry_pending', 'selection_retry', 'infrastructure_retry', 'admission_waiting'} and not stopped:
                             pending.append(item)
                             queued_at[item['sample_key']] = time.monotonic()
                             tracker.phase(item['sample_key'], 'ready')
@@ -930,6 +953,15 @@ def admitted_task(cfg, run_id, key, task, factory, runtime, sample=None):
     # and config_hash remain authoritative for all other execution semantics.
     if 'serving_cfg' in runtime:
         cfg = copy.deepcopy(runtime['serving_cfg'])
+    if runtime.get('online_source') == 'baseline':
+        # The shared server keeps the estimator broker available for DyCon.
+        # Only this trajectory's agent bypasses branch generation/scoring.
+        cfg = copy.deepcopy(cfg)
+        if (cfg.get('execution', {}).get('online_rl_failure_policy') or {}).get('baseline_failure_reward') is not None:
+            cfg['_online_rl_source'] = 'baseline'
+            cfg['execution']['limits_retry'] = {**cfg['execution'].get('limits_retry', {}), 'enabled': False}
+        cfg['parallel']['enabled'] = False
+        cfg['parallel']['branch_count'] = 1
     run = Path(cfg['project_root']) / 'runs' / run_id
     boundary = _boundary(run, factory)
     if boundary:
@@ -947,3 +979,74 @@ def admitted_task(cfg, run_id, key, task, factory, runtime, sample=None):
                     'disposition': 'admission_waiting', 'error': str(exc)}
     runtime = {**runtime, 'admission_wait_seconds': time.monotonic() - stamp}
     return run_task(cfg, run_id, key, task, factory, runtime, sample=sample)
+
+
+def run_online_manifest(cfg, run_id, *, task_ids, m, branch_count=None, resume=False, request=None):
+    """Execute one mixed online batch through the standard run lifecycle.
+
+    The run planner freezes one DyCon item plus ``m`` baseline repetitions per
+    task.  Existing supervisor, serving, retry, cancellation and evidence code
+    then owns execution; this helper only supplies the online profile manifest.
+    """
+    from application.execution.run_plan import _selection_from_tasks, create_run
+    from catalog.store import Catalog
+    from RL.online_runtime import make_online_run_work_items
+
+    root = Path(cfg["project_root"])
+    run_id = identifier(run_id)
+    from core.io import run_path as locate_run
+    run_directory = locate_run(root, run_id)
+    if not run_directory.exists():
+        if not task_ids or len(set(task_ids)) != len(task_ids):
+            raise ValueError("online task_ids must be non-empty and unique")
+        selection = _selection_from_tasks(Catalog(root), task_ids=task_ids, cfg=cfg)
+        branches = int(branch_count or cfg.get("parallel", {}).get("branch_count", 1))
+        manifest = make_online_run_work_items(selection, run_id, m=int(m),
+                                              base_seed=int(cfg["generation"]["seed"]),
+                                              branch_count=branches)
+        if request is not None:
+            ordered = []
+            available = {(item["instance_id"], item["online_source"], item["online_repetition"]): item
+                         for item in manifest["items"]}
+            repetitions = {}
+            for work in request["work_items"]:
+                pair = (work["task_id"], work["source"])
+                repetition = repetitions.get(pair, 0)
+                repetitions[pair] = repetition + 1
+                ordered.append(available.pop((*pair, repetition)))
+            if available:
+                raise ValueError("online work order does not cover all frozen samples")
+            manifest["items"] = ordered
+        create_run(cfg, run_id, operation="rollout", task_ids=list(task_ids),
+                   repeat_count=int(m) + 1, online_work_items=manifest)
+        resume = False
+    from application.execution.run_plan import load_plan
+    from application.execution.supervisor import launch, wait
+    from core.io import read_json
+    loaded = load_plan(root, run_id)
+    deployment = (request or {}).get("deployment")
+    if deployment:
+        frozen = loaded["config"]
+        if (frozen.get("execution", {}).get("online_rl_failure_policy") or {}) != (deployment.get("failure_policy") or {}):
+            raise ValueError("existing online run differs from frozen failure policy")
+        if ((frozen["serving"].get("lora") or {}).get("identity_sha256") != deployment["adapter_identity_sha256"]
+                or frozen["parallel"].get("estimator_sha256") != deployment["estimator_manifest_sha256"]
+                or frozen["parallel"]["branch_count"] != int(deployment["branch_count"])
+                or frozen["model"]["fingerprint"] != deployment["base_fingerprint"]
+                or frozen["serving"]["gpus"] != request["worker_ids"]):
+            raise ValueError("existing online run differs from immutable generating deployment")
+    if (loaded["plan"].get("online_contract", {}).get("baseline_repetitions_per_task") != int(m)
+            or set(loaded["config"]["selection"]["tasks"][key]["instance_id"]
+                   for key in loaded["config"]["selection"]["task_keys"]) != set(task_ids)):
+        raise ValueError("existing online run differs from requested task/profile contract")
+    latest = run_directory / "execution/latest.json"
+    if latest.is_file():
+        attempt = run_directory / "execution/attempts" / read_json(latest)["attempt"]
+        receipt_path = attempt / "exit.json"
+        if not receipt_path.is_file():
+            return wait(root, run_id)
+        receipt = read_json(receipt_path)
+        if receipt.get("exit_code") == 0:
+            return wait(root, run_id)
+        resume = True
+    return launch(root, run_id, resume=resume, detach=False)

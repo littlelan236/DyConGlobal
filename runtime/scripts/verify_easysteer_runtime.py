@@ -19,6 +19,8 @@ for name, digest in manifest["source_files_sha256"].items():
         "v1/worker/gpu/cudagraph_utils.py",
         "v1/worker/gpu_worker.py",
         "v1/worker/gpu/model_runner.py",
+        "v1/worker/gpu/model_hook_utils.py",
+        "v1/worker/gpu/lora_utils.py",
         "v1/worker/gpu/sample/sampler.py",
         "v1/worker/gpu/sample/raw_t1.py",
         "v1/worker/gpu/sample/logprob.py",

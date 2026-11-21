@@ -52,7 +52,7 @@ class ServingManager:
             "--model",
             cfg["model"]["path"],
             "--served-model-name",
-            cfg["model"]["served_name"],
+            cfg["model"]["served_name"] + ("-base" if s.get("lora") else ""),
             "--host",
             host,
             "--port",
@@ -78,6 +78,10 @@ class ServingManager:
             "--max-num-batched-tokens",
             str(s["max_num_batched_tokens"]),
         ]
+        if s.get("lora"):
+            adapter = s["lora"]
+            args += ["--enable-lora", "--max-lora-rank", str(adapter["rank"]),
+                     "--lora-modules", cfg["model"]["served_name"] + "=" + adapter["adapter"]]
         if s.get("kv_cache_memory_bytes") is not None:
             args += ["--kv-cache-memory-bytes", str(s["kv_cache_memory_bytes"])]
         if cfg['generation'].get('require_reasoning_close'):
@@ -145,6 +149,17 @@ class ServingManager:
         self.output.mkdir(parents=True, exist_ok=True)
         capture_cfg = cfg.get("capture", {})
         raw_checkpoint_identity = None
+        if s.get("lora"):
+            from RL.checkpoints import verify_adapter
+            adapter = s["lora"]
+            if sha256(Path(adapter["adapter"]) / "identity.json") != adapter["identity_sha256"]:
+                raise ValueError("serving LoRA export identity changed")
+            identity = verify_adapter(adapter["adapter"], verify_owner=False)
+            if (identity["contract"]["base_fingerprint"] != cfg["model"]["fingerprint"]
+                    or identity["contract"]["lora"]["rank"] != adapter["rank"]):
+                raise ValueError("serving LoRA base/rank differs from frozen deployment")
+            if cfg.get("steering", {}).get("enabled") or s["management"] != "managed":
+                raise ValueError("online LoRA serving requires managed unsteered deployment")
         if capture_cfg.get("logprobs", {}).get("enabled"):
             from core.model_identity import describe
             raw_checkpoint_identity = describe(Path(cfg["model"]["path"]))
@@ -244,7 +259,7 @@ class ServingManager:
                         "raw_probability_source_identity": {
                             "model_fingerprint": cfg["model"]["fingerprint"],
                             "checkpoint_inventory_sha256": (raw_checkpoint_identity or {}).get("fingerprint"),
-                            "model": cfg["model"], "adapter": None,
+                            "model": cfg["model"], "adapter": (s.get("lora") or {}).get("identity_sha256"),
                             "serving_dtype": s.get("dtype", "float16"),
                             "generation_policy_sha256": hash_json(cfg.get("generation", {})),
                             "steering": cfg.get("steering"),

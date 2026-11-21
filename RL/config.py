@@ -1,12 +1,14 @@
 """Strict, independent LoRA configuration. No Torch imports in configuration/CLI."""
 
 from pathlib import Path
+import math
 from typing import Annotated, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.io import identifier
+from RL.grpo.advantage import CONSENSUS_ADVANTAGE_POLICIES
 
 PositiveInt = Annotated[int, Field(gt=0)]
 NonnegativeInt = Annotated[int, Field(ge=0)]
@@ -231,21 +233,92 @@ class Validation(Strict):
 
 
 class Algorithm(Strict):
-    name: Literal["offline_grpo_k3_v1"]
-    dataset_root: str
-    dataset_id: str
+    name: Literal["offline_grpo_k3_v1", "online_bootstrap_grpo_v1"]
+    dataset_root: str | None = None
+    dataset_id: str | None = None
     require_data_ready: Literal[True] = True
     group_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def check_binding(self):
-        identifier(self.dataset_id)
+        if self.name == "offline_grpo_k3_v1":
+            if self.dataset_id is None or self.dataset_root is None:
+                raise ValueError("offline GRPO requires dataset_root and dataset_id")
+            identifier(self.dataset_id)
+            if not self.dataset_root.strip():
+                raise ValueError("dataset_root must be nonempty")
+        elif self.dataset_root is not None or self.dataset_id is not None:
+            raise ValueError("online bootstrap does not use an offline dataset binding")
         if len(self.group_ids) != len(set(self.group_ids)):
             raise ValueError("Duplicate selected full-policy parent ID")
         for group_id in self.group_ids:
             identifier(group_id)
-        if not self.dataset_root.strip():
-            raise ValueError("dataset_root must be nonempty")
+        return self
+
+
+class OnlineDyconAdvantage(Strict):
+    advantage_policy: Literal["historical_topk_zero_sum_v1", "consensus_top_half_zero_sum_v1",
+                              "consensus_top_half_binary_v1"] = "consensus_top_half_binary_v1"
+    top_k: PositiveInt | None = None
+    top_k_fraction: Annotated[float, Field(gt=0, lt=1, allow_inf_nan=False)] | None = 0.5
+    score_scale_floor: PositiveFloat = 0.1
+    boundary_tie_sigma: NonnegativeFloat = 0.0
+
+
+class OnlineBootstrap(Strict):
+    """Online rollout/training controls kept separate from the offline contract."""
+    tasks: list[str]
+    initial_estimator: str
+    n: PositiveInt = 4
+    m: PositiveInt = 8
+    epochs: PositiveInt = 1
+    branch_count: Annotated[int, Field(ge=2, le=32)] = 2
+    dycon_advantage: OnlineDyconAdvantage = Field(default_factory=OnlineDyconAdvantage)
+    baseline_training_mode: Literal["agent_step", "prefix_trace"] = "agent_step"
+    max_trace_input_tokens: PositiveInt = 32768
+    baseline_failure_reward: Annotated[float, Field(lt=0, allow_inf_nan=False)] | None = None
+    verifier_error_retries: NonnegativeInt | None = None
+    dycon_weight: NonnegativeFloat = 0.5
+    baseline_weight: NonnegativeFloat = 0.5
+    shuffle_seed: Annotated[int, Field(ge=0, lt=2**32)] = 42
+    max_inflight: PositiveInt = 1
+    dycon_candidate_portion: PositiveInt = 1
+    startup_order: Literal["longest_estimated_first"] = "longest_estimated_first"
+    request_admission: Literal["round_robin_by_trajectory"] = "round_robin_by_trajectory"
+    feature_family: Annotated[str, Field(min_length=1)] = "same_base_cross_version_v1"
+    estimator_capacity: PositiveInt | None = None
+    estimator_tie_seed: Annotated[int, Field(ge=0, lt=2**32)] = 42
+    campaign_id: str | None = None
+    rollout_manifest: str | None = None
+    rollout_endpoint: str | None = None
+    rollout_timeout_seconds: PositiveFloat = 120.0
+    rollout_gpus: list[NonnegativeInt] | None = None
+    state_path: str | None = None
+    estimator_store: str | None = None
+    kl_beta: NonnegativeFloat = 0.02
+    clip_epsilon: PositiveFloat = 0.1
+    k3_cap: PositiveFloat | None = None
+
+    @model_validator(mode="after")
+    def check_online(self):
+        from RL.grpo.advantage import advantage_settings, compute_advantages
+        compute_advantages(list(range(self.branch_count)), retained=[True] * self.branch_count,
+                           **advantage_settings(self.dycon_advantage))
+        if not self.tasks or len(set(self.tasks)) != len(self.tasks):
+            raise ValueError("online_bootstrap.tasks must be non-empty and unique")
+        if not self.initial_estimator.strip():
+            raise ValueError("online_bootstrap.initial_estimator must be nonempty")
+        if self.dycon_weight == 0 and self.baseline_weight == 0:
+            raise ValueError("online bootstrap source weights cannot both be zero")
+        if self.estimator_capacity is not None and self.estimator_capacity < 1:
+            raise ValueError("estimator_capacity must be positive")
+        if self.rollout_manifest is not None and self.rollout_endpoint is not None:
+            raise ValueError("configure exactly one of rollout_manifest or rollout_endpoint")
+        if self.rollout_endpoint is not None and not self.rollout_endpoint.startswith(("http://", "https://")):
+            raise ValueError("rollout_endpoint must be an http(s) URL")
+        if self.rollout_gpus is not None:
+            if not self.rollout_gpus or len(set(self.rollout_gpus)) != len(self.rollout_gpus):
+                raise ValueError("rollout_gpus must be non-empty and unique")
         return self
 
 
@@ -307,7 +380,10 @@ class Grpo(Strict):
     token_diagnostics: TokenDiagnostics = Field(default_factory=TokenDiagnostics)
     ratio_guard: RatioGuard = Field(default_factory=RatioGuard)
     prefix_reuse: PrefixReuse = Field(default_factory=PrefixReuse)
-    advantage_policy: Literal["historical_topk_zero_sum_v1", "consensus_top_half_zero_sum_v1", "same_action_top_half_v1"] = "historical_topk_zero_sum_v1"
+    advantage_policy: Literal[
+        "historical_topk_zero_sum_v1", "consensus_top_half_zero_sum_v1",
+        "consensus_top_half_binary_v1", "same_action_top_half_v1",
+    ] = "historical_topk_zero_sum_v1"
     group_batch_size: PositiveInt = 4
     parallel_branch_chunk_size: Literal[16] | None = None
     parallel_branch_schedule: Literal["distinct_parent_two_pass_v1"] | None = None
@@ -332,7 +408,7 @@ class Grpo(Strict):
             raise ValueError("prefix_length_pool128_v1 requires group_batch_size <=128")
         if (self.top_k is None) == (self.top_k_fraction is None):
             raise ValueError("Exactly one of grpo.top_k and grpo.top_k_fraction is required")
-        if self.advantage_policy == "consensus_top_half_zero_sum_v1" and (
+        if self.advantage_policy in CONSENSUS_ADVANTAGE_POLICIES and (
                 self.top_k is not None or self.top_k_fraction != 0.5 or self.boundary_tie_sigma != 0):
             raise ValueError("Consensus top-half requires top_k=null, top_k_fraction=0.5 and boundary_tie_sigma=0")
         if self.advantage_policy == "same_action_top_half_v1":
@@ -380,12 +456,33 @@ class Config(Strict):
     validation: Validation
     algorithm: Algorithm | None = None
     grpo: Grpo | None = None
+    online_bootstrap: OnlineBootstrap | None = None
     preflight: Preflight = Field(default_factory=Preflight)
     prepared_data: PreparedBinding | None = None
 
     @model_validator(mode="after")
     def check_stop(self):
         full = self.tuning is not None and self.tuning.mode == "full"
+        online = self.algorithm is not None and self.algorithm.name == "online_bootstrap_grpo_v1"
+        if online:
+            if self.schema_version != 2 or self.tuning is None or self.tuning.mode != "lora" or self.lora is None:
+                raise ValueError("online bootstrap currently requires schema 2 LoRA")
+            if self.online_bootstrap is None:
+                raise ValueError("online_bootstrap configuration is required")
+            expected_updates = math.ceil(len(self.online_bootstrap.tasks) / self.online_bootstrap.n) * self.online_bootstrap.epochs
+            if self.training.max_updates != expected_updates:
+                raise ValueError("training.max_updates must equal online epochs * task batches")
+            if self.validation.stop_after_update is not None and self.validation.stop_after_update >= expected_updates:
+                raise ValueError("stop_after_update must precede the complete online schedule target")
+            if self.grpo is not None or self.prepared_data is not None:
+                raise ValueError("online bootstrap does not use offline grpo/prepared_data")
+            if self.runtime.gpus is not None and len(self.runtime.gpus) > 1:
+                raise ValueError("online bootstrap trainer currently uses one training GPU")
+            if self.online_bootstrap.rollout_gpus is not None and self.runtime.gpu in self.online_bootstrap.rollout_gpus:
+                raise ValueError("rollout_gpus must not overlap the online trainer GPU")
+            if self.training.gradient_accumulation_steps != 1 or self.training.supervision.mode != "labels":
+                raise ValueError("online bootstrap requires labels and gradient_accumulation_steps=1")
+            return self
         if self.run.start.optimizer_backend_migration is not None and (
                 not full or self.run.start.mode != "resume" or
                 self.training.memory.adam_moment_offload.mode != "memory_pressure"):
@@ -401,7 +498,7 @@ class Config(Strict):
         if self.run.start.config_migration is not None and (
                 full or self.run.start.mode != "resume" or self.algorithm is None):
             raise ValueError("Config migration requires complete-checkpoint LoRA GRPO resume")
-        if self.algorithm and self.algorithm.group_ids and not full:
+        if self.algorithm and self.algorithm.name == "offline_grpo_k3_v1" and self.algorithm.group_ids and not full:
             raise ValueError("Explicit algorithm.group_ids currently requires full-policy prepared training")
         if self.schema_version == 1:
             if self.lora is None or any(v is not None for v in (self.tuning, self.execution, self.optimizer)):
@@ -462,9 +559,9 @@ class Config(Strict):
             raise ValueError("selective_mlp requires mlp_chunk_tokens > 0")
         if memory.activation_offload != "none" and self.training.checkpoint_policy not in {"layer", "layer_group"}:
             raise ValueError("checkpoint_boundary offload requires layer checkpointing")
-        if self.algorithm is not None and self.grpo is None:
+        if self.algorithm is not None and self.algorithm.name == "offline_grpo_k3_v1" and self.grpo is None:
             raise ValueError("GRPO algorithm requires a grpo configuration")
-        if self.grpo is not None and self.algorithm is None:
+        if self.grpo is not None and (self.algorithm is None or self.algorithm.name != "offline_grpo_k3_v1"):
             raise ValueError("grpo configuration requires algorithm.name=offline_grpo_k3_v1")
         if self.grpo and (self.training.supervision.mode != "labels"
                           or self.training.gradient_accumulation_steps != 1):
@@ -577,13 +674,69 @@ def attempt_directory(config):
     return directory
 
 
+def online_training_defaults(raw, project_root):
+    """Apply accepted numerics only to new online campaigns, never legacy resumes."""
+    import copy
+    if not isinstance(raw, dict) or (raw.get("algorithm") or {}).get("name") != "online_bootstrap_grpo_v1":
+        return raw
+    options = raw.get("online_bootstrap")
+    if not isinstance(options, dict):
+        return raw
+    state = options.get("state_path")
+    if state:
+        state = absolute(project_root, state)
+        binding = state.with_name(state.name + ".campaign.json")
+        if binding.exists():
+            import json
+            frozen = json.loads(binding.read_text(encoding="utf-8"))["contract"]
+            value = copy.deepcopy(raw)
+            for key in ("baseline_training_mode", "max_trace_input_tokens", "baseline_failure_reward", "verifier_error_retries"):
+                if key in frozen["options"]:
+                    value["online_bootstrap"].setdefault(key, frozen["options"][key])
+            for key, setting in frozen.get("numerics", {}).items():
+                runtime = value.setdefault("runtime", {})
+                if key in runtime and runtime[key] != setting:
+                    raise ValueError("online campaign numerics differ from frozen configuration: " + key)
+                runtime.setdefault(key, setting)
+            return value
+        if state.exists():
+            return raw
+    if ((raw.get("run") or {}).get("start") or {}).get("mode") != "fresh":
+        return raw
+    # An existing attempt must be resumed with its frozen configuration.
+    attempt_id = (raw.get("run") or {}).get("attempt_id")
+    output = (raw.get("runtime") or {}).get("output_root")
+    if output and attempt_id and (absolute(project_root, output) / "RL/checkpoints" / attempt_id).exists():
+        return raw
+    value = copy.deepcopy(raw)
+    options = value["online_bootstrap"]
+    options.setdefault("baseline_failure_reward", -3.0)
+    options.setdefault("verifier_error_retries", 3)
+    options.setdefault("baseline_training_mode", "prefix_trace")
+    if options["baseline_training_mode"] == "prefix_trace":
+        runtime = value.setdefault("runtime", {})
+        runtime.setdefault("bf16_allow_reduced_precision_reduction", False)
+        runtime.setdefault("bf16_allow_split_k", False)
+    return value
+
+
 def load(path, project_root):
     source = absolute(project_root, str(path))
-    config = Config.model_validate(yaml.load(source.read_text(encoding="utf-8"), Loader=UniqueLoader))
+    raw = yaml.load(source.read_text(encoding="utf-8"), Loader=UniqueLoader)
+    raw = online_training_defaults(raw, project_root)
+    config = Config.model_validate(raw)
     config.model.path = str(absolute(project_root, config.model.path))
     config.runtime.output_root = str(absolute(project_root, config.runtime.output_root))
-    if config.algorithm is not None:
+    if config.algorithm is not None and config.algorithm.dataset_root is not None:
         config.algorithm.dataset_root = str(absolute(project_root, config.algorithm.dataset_root))
+    if config.online_bootstrap is not None:
+        online = config.online_bootstrap
+        if not Path(online.initial_estimator).is_absolute():
+            online.initial_estimator = str(absolute(project_root, online.initial_estimator))
+        for field_name in ("rollout_manifest", "state_path", "estimator_store"):
+            value = getattr(online, field_name)
+            if value is not None and not Path(value).is_absolute():
+                setattr(online, field_name, str(absolute(project_root, value)))
     if config.run.start.checkpoint is not None:
         checkpoint = absolute(project_root, config.run.start.checkpoint)
         if not checkpoint.is_dir():
@@ -615,7 +768,11 @@ def schedule_contract(config):
         if is_full(config):
             contract.update(execution=config.execution.model_dump(), optimizer=config.optimizer.model_dump())
     if config.algorithm:
-        contract.update(algorithm=config.algorithm.model_dump(), grpo=config.grpo.model_dump(exclude={"reference_cache", "token_diagnostics"}))
+        contract.update(algorithm=config.algorithm.model_dump(exclude_none=True))
+        if config.algorithm.name == "online_bootstrap_grpo_v1":
+            contract["online_bootstrap"] = config.online_bootstrap.model_dump()
+            return contract
+        contract["grpo"] = config.grpo.model_dump(exclude={"reference_cache", "token_diagnostics"})
         if config.grpo.parallel_branch_chunk_size is None:
             for key in ("parallel_branch_chunk_size", "parallel_branch_schedule", "branch_partition_seed"):
                 contract["grpo"].pop(key, None)

@@ -104,6 +104,30 @@ def prepare(cfg, run_id='retry', *, repetitions=1, tasks=('a',)):
     return run, load_plan(cfg['project_root'], run_id)
 
 
+@pytest.mark.parametrize('statuses,limit,expected', [
+    (['ParallelSelectionError', 'Submitted'], 3, 'Submitted'),
+    (['ParallelSelectionError'], 2, 'selection_retry_exhausted'),
+    (['ParallelSelectionError'], 0, 'selection_retry_exhausted'),
+])
+def test_selection_retry_real_scheduler_is_bounded_and_resumable(cfg, monkeypatch, statuses, limit, expected):
+    cfg = configure(cfg, workers=2, retry=False)
+    cfg['execution']['selection_retry'] = {'enabled': True, 'max_retries': limit}
+    run, _ = prepare(cfg, tasks=('a', 'b'))
+    factory, calls, _, _ = fake_runtime(monkeypatch, {'a': statuses, 'b': ['Submitted']})
+    results = run_manifest(cfg, run.name, resume=True, factory=factory)
+    a = next(row for row in results.values() if row['instance_id'] == 'a')
+    assert a['exit_status'] == expected
+    attempts = 2 if expected == 'Submitted' else limit + 1
+    assert [c[2] for c in calls if c[0] == 'a'] == list(range(42, 42 + attempts))
+    assert len([c for c in calls if c[0] == 'b']) == 1
+    if expected != 'Submitted':
+        assert a['disposition'] == 'failed'
+        assert a['selection_retry_count'] == limit
+    before = list(calls)
+    assert run_manifest(cfg, run.name, resume=True, factory=factory) == results
+    assert calls == before
+
+
 @pytest.mark.parametrize('statuses,counts', [
     (['LimitsExceeded', 'LimitsExceeded', 'Submitted'], (2, 0)),
     (['reasoning_loop', 'reasoning_loop', 'Submitted'], (0, 2)),

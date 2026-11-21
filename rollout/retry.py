@@ -28,11 +28,17 @@ def enabled(cfg):
     return False
 
 
+def resampling_enabled(cfg):
+    return enabled(cfg) or cfg.get('execution', {}).get('selection_retry', {}).get('enabled', False)
+
+
 def disposition(cfg, status):
     if status == 'Cancelled':
         return 'interrupted'
     if enabled(cfg) and status in RETRY_STATUSES:
         return 'retry_pending'
+    if status == 'ParallelSelectionError' and cfg.get('execution', {}).get('selection_retry', {}).get('enabled', False):
+        return 'selection_retry'
     if status in TERMINAL:
         return 'accepted'
     if status in INFRASTRUCTURE:
@@ -41,6 +47,10 @@ def disposition(cfg, status):
 
 
 def sample_accepted(cfg, result):
+    from RL.online_failures import baseline_failure_reward
+    if (result.get('exit_status') in RETRY_STATUSES
+            and baseline_failure_reward(cfg, result.get('online_source'), result) is not None):
+        return True
     return disposition(cfg, result.get('exit_status')) == 'accepted'
 
 

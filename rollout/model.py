@@ -154,7 +154,8 @@ def make_model(cfg, deadline, capture_context=None, runtime=None, sample=None):
             if capture is not None:
                 capture["api_attempt_id"] = uuid4().hex
             from rollout.progress import generation_phase
-            with generation_phase(runtime):
+            from rollout.online_admission import online_request_admission
+            with generation_phase(runtime), online_request_admission(cfg, runtime):
                 return super()._query(messages, **kwargs)
 
         def query(self, messages, **kwargs):

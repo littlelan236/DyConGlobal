@@ -163,7 +163,7 @@ def save_checkpoint(model, optimizer, scheduler, state, directory, contract, ada
     return directory
 
 
-def restore_checkpoint(directory, optimizer, scheduler, expected_contract, expected_adapter_contract, *, verify=True):
+def restore_checkpoint(directory, optimizer, scheduler, expected_contract, expected_adapter_contract, *, verify=True, online=False):
     import torch
 
     from RL.training import restore_rng
@@ -173,13 +173,27 @@ def restore_checkpoint(directory, optimizer, scheduler, expected_contract, expec
         verify_checkpoint(directory)
     metadata = read_json(directory / "state.json")
     # Historical project code hashes are provenance, not a resume gate.
-    if (not resume_contract_matches(metadata["contract"], expected_contract)
-            or metadata["adapter_contract"] != expected_adapter_contract):
+    if online:
+        saved = metadata["contract"]
+        # JSON persistence converts tuples (notably source-mass weights) to
+        # lists; compare the normalized JSON representation.
+        import json as _json
+        normalized_expected = _json.loads(_json.dumps(expected_contract, sort_keys=True))
+        required = ("schedule", "objective", "input", "adapter")
+        matches = all(saved.get(key) == normalized_expected.get(key) for key in required)
+        adapter_matches = metadata["adapter_contract"] == expected_adapter_contract
+    else:
+        matches = resume_contract_matches(metadata["contract"], expected_contract)
+        adapter_matches = metadata["adapter_contract"] == expected_adapter_contract
+    if not matches or not adapter_matches:
         raise ValueError("Resume schedule/input/base/targets/source contract mismatch")
     # Accept only verified local module output, and use the restricted Torch loader.
     payload = torch.load(directory / "training-state.pt", map_location="cpu", weights_only=True)
     if payload["metadata"] != metadata:
-        raise ValueError("Training state and checkpoint metadata disagree")
+        import json as _json
+        same_json = _json.loads(_json.dumps(payload["metadata"], sort_keys=True)) == _json.loads(_json.dumps(metadata, sort_keys=True))
+        if not (online and same_json):
+            raise ValueError("Training state and checkpoint metadata disagree")
     optimizer.load_state_dict(payload["optimizer"])
     scheduler.load_state_dict(payload["scheduler"])
     from RL.parallel import current

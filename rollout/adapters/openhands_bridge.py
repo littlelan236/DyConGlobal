@@ -470,7 +470,8 @@ class OpenHandsBridge:
                 self._event("upstream_started", state=http_state, api_attempt_id=api_id)
                 try:
                     from rollout.progress import generation_phase
-                    with generation_phase(self.runtime):
+                    from rollout.online_admission import online_request_admission
+                    with generation_phase(self.runtime), online_request_admission(self.cfg, self.runtime):
                         response = requests.post(self.cfg["serving"]["base_url"].rstrip("/") + "/chat/completions",
                         json=body, headers={"Authorization": "Bearer " + os.environ.get(
                             self.cfg["serving"]["api_key_env"], "EMPTY")},
@@ -558,8 +559,24 @@ class OpenHandsBridge:
                 self._check()
                 return result
 
-            if role == "agent_decision" and active(self.cfg, self.decisions):
-                coordinator = DecisionCoordinator(self.cfg, self.runtime.get("capture_controller"),
+            if role == "agent_decision" and active(self.cfg, self.decisions) and self.runtime.get("online_source") != "baseline":
+                # Online bootstrap may share one managed vLLM service while
+                # selecting the rollout profile per work item.  Baseline rows
+                # use one ordinary trajectory; DyCon rows explicitly select
+                # estimator-backed parallel consensus.  The immutable run
+                # config remains untouched and only this physical attempt gets
+                # the profile overlay.
+                coordinator_cfg = self.cfg
+                online_source = self.runtime.get("online_source")
+                if online_source in {"baseline", "dycon"}:
+                    coordinator_cfg = copy.deepcopy(self.cfg)
+                    parallel = dict(coordinator_cfg.get("parallel") or {})
+                    if online_source == "baseline":
+                        parallel.update(enabled=False, branch_count=1, mode="parallel_baseline")
+                    else:
+                        parallel.update(enabled=True, mode="parallel_consensus")
+                    coordinator_cfg["parallel"] = parallel
+                coordinator = DecisionCoordinator(coordinator_cfg, self.runtime.get("capture_controller"),
                     cancellation=self.runtime.get("cancellation"), loop_escape_history=self.history,
                     error_policy=OpenHandsPolicy())
                 message = coordinator.run(request["messages"], metadata, generate,

@@ -3,13 +3,13 @@
 from dataclasses import dataclass, field
 import math
 
-from .advantage import (ADVANTAGE_VERSION, CONSENSUS_ADVANTAGE_VERSION, SAME_ACTION_ADVANTAGE_VERSION,
+from .advantage import (ADVANTAGE_VERSION, CONSENSUS_ADVANTAGE_POLICIES, SAME_ACTION_ADVANTAGE_VERSION,
                         compute_advantages, validate_retained)
 from .grouping import lineage, same_action_group_id
 
 
 def advantages_for_members(members, **settings):
-    if settings.get("advantage_policy") == CONSENSUS_ADVANTAGE_VERSION:
+    if settings.get("advantage_policy") in CONSENSUS_ADVANTAGE_POLICIES:
         settings["retained"] = [row.get("retained") for row in members]
     return compute_advantages([row.get("historical_score") for row in members], **settings)
 
@@ -49,7 +49,7 @@ class GroupBatch:
                             or any(row.get("group_id") != inventory["source_group_id"]
                                    or row.get("action_hash") != inventory["action_hash"] for row in members)):
             raise ValueError("Same-action advantages require a derived training group")
-        if advantage_policy == CONSENSUS_ADVANTAGE_VERSION:
+        if advantage_policy in CONSENSUS_ADVANTAGE_POLICIES:
             validate_retained([row.get("retained") for row in members], len(members))
         if inventory.get("terminal_scoring_exclusion") or any(r.get("terminal_scoring_exclusion") for r in members):
             raise ValueError("terminal_evaluation_ineligible")

@@ -803,6 +803,13 @@ Policy/version, settings, retained membership, scores, frozen advantages and gro
 order are bound to the input/checkpoint contracts. Policy or membership changes
 reject exact resume. Omitted `advantage_policy` retains the legacy top-K behavior.
 
+Set `grpo.advantage_policy: consensus_top_half_binary_v1` with the same
+top-half settings to keep the native step groups, branch order, eligibility and
+positive membership above while mapping each positive advantage to `+1` and
+each negative advantage to `-1`. The group sum need not be zero. This policy
+uses the same source dataset and reference probabilities and freezes a new
+training plan under its own policy version.
+
 ##### 同 action 组内固定 top-half
 
 使用 [grpo-same-action-top-half.yaml](experiments/grpo-same-action-top-half.yaml) 或在训练 YAML 中设置下面的策略。

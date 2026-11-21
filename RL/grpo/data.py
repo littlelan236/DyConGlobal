@@ -6,7 +6,7 @@ import math
 from core.io import hash_json, read_json, sha256
 from RL.dataset.schema import MASK_POLICY
 from .groups import GroupBatch
-from .advantage import CONSENSUS_ADVANTAGE_VERSION, SAME_ACTION_ADVANTAGE_VERSION, advantage_settings, validate_retained
+from .advantage import CONSENSUS_ADVANTAGE_POLICIES, SAME_ACTION_ADVANTAGE_VERSION, advantage_settings, validate_retained
 from .grouping import exclusion_record, order_record, training_groups
 from .schedule import LEGACY_SHUFFLE, order_groups, shuffle_metadata
 
@@ -85,7 +85,7 @@ def freeze_group(value, config):
                     and not row.get("tokenizer_fingerprint")):
                 raise ValueError("Dataset group tokenizer identity mismatch")
     settings = advantage_settings(config.grpo)
-    if config.grpo.advantage_policy == CONSENSUS_ADVANTAGE_VERSION:
+    if config.grpo.advantage_policy in CONSENSUS_ADVANTAGE_POLICIES:
         validate_retained([r.get("retained") for r in value["members"]], len(value["members"]))
     try:
         prepared = GroupBatch.from_dataset_group(value, as_tensors=False, collate=False, **settings)

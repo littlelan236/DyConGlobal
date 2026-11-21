@@ -639,8 +639,21 @@ def main(argv=None):
     p.add_argument("evaluation_id")
     p.add_argument("--workflow-config", required=True)
     p.add_argument("--reuse-attempt-id")
-    p = sub.add_parser("difficulty-train", help="Train an estimator from a standalone training YAML")
+    p = sub.add_parser("difficulty-train", help="Train an estimator from a standalone training YAML or online active-pool snapshot")
     p.add_argument("--training-config", default="difficulty/training/config.yaml")
+    p.add_argument("--online-snapshot", type=Path, help="Fit the online active-pool JSONL snapshot")
+    p.add_argument("--online-output", type=Path, help="Output NumPy estimator checkpoint for --online-snapshot")
+    p.add_argument("--online-feature-family")
+    p.add_argument("--online-fit-spec", type=Path, help="JSON Ridge target/alpha/split/BLAS configuration")
+    p = sub.add_parser("online-estimator-prepare", help="Freeze a published estimator and its original point dataset for bootstrap")
+    p.add_argument("--predictor", type=Path, required=True)
+    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--feature-family", default="same_base_cross_version_v1")
+    p = sub.add_parser("online-rollout-serve", help="Serve the formal online rollout HTTP boundary")
+    p.add_argument("--backend", required=True, help="module:callable returning an online rollout backend")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, required=True)
+    p.add_argument("--receipt-root", type=Path, required=True)
     p = sub.add_parser("difficulty-tensorboard", help="Inspect or stop this project's managed TensorBoard")
     p.add_argument("attempt_id")
     p.add_argument("--action", choices=["status", "stop"], default="status")
@@ -1436,6 +1449,23 @@ def main(argv=None):
         return
     if a.command == "config-check":
         result = cfg
+    elif a.command == "online-estimator-prepare":
+        from RL.online_initial import prepare_initial
+        result = prepare_initial(cfg, a.predictor, a.output, feature_family=a.feature_family)
+    elif a.command == "online-rollout-serve":
+        import importlib
+        module_name, separator, callable_name = a.backend.partition(":")
+        if not separator or not module_name or not callable_name:
+            parser.error("--backend must be module:callable")
+        backend_factory = getattr(importlib.import_module(module_name), callable_name)
+        backend = backend_factory(cfg) if callable(backend_factory) else backend_factory
+        from RL.online_server import OnlineRolloutService, make_http_server
+        server = make_http_server(a.host, a.port, OnlineRolloutService(backend, a.receipt_root))
+        try:
+            server.serve_forever()
+        finally:
+            server.server_close()
+        result = {"status": "stopped", "host": a.host, "port": a.port}
     elif a.command == "predictor-publish":
         from runtime.serving.predictors import publish_predictor
 
@@ -1695,8 +1725,18 @@ def main(argv=None):
         from difficulty.evaluation.holdout import run
         result = run(cfg, a.evaluation_id, workflow_config=a.workflow_config, reuse_attempt_id=a.reuse_attempt_id)
     elif a.command == "difficulty-train":
-        from difficulty.training.entrypoint import run
-        result = run(cfg, a.training_config)
+        if a.online_snapshot is not None:
+            if a.online_output is None:
+                parser.error("--online-output is required with --online-snapshot")
+            from difficulty.training.online import fit_snapshot
+            result = fit_snapshot(cfg, a.online_snapshot, a.online_output,
+                                  expected_feature_family=a.online_feature_family,
+                                  fit_spec=read_json(a.online_fit_spec) if a.online_fit_spec else None)
+        else:
+            if a.online_output is not None or a.online_feature_family is not None or a.online_fit_spec is not None:
+                parser.error("online fitting options require --online-snapshot")
+            from difficulty.training.entrypoint import run
+            result = run(cfg, a.training_config)
     elif a.command == "difficulty-tensorboard":
         from difficulty.training.visualization import manage
         result = manage(cfg, a.attempt_id, action=a.action)

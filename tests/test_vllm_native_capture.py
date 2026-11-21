@@ -116,3 +116,57 @@ def test_shared_capture_boundary_limits_native_lookup_before_hybrid_restore():
     request.sampling_params.extra_args = {}
     KVCacheManager.get_computed_blocks(manager, request)
     assert seen[-1] == 128
+
+
+@pytest.mark.parametrize("with_lora", [False, True])
+def test_activation_graph_preserves_native_lora_cases_and_setup(monkeypatch, with_lora):
+    from contextlib import contextmanager
+    from vllm.config.compilation import CUDAGraphMode
+    from vllm.v1.worker.gpu import cudagraph_utils, lora_utils, model_hook_utils
+
+    events = []
+    cases = [0, 2] if with_lora else [0]
+    lora = object() if with_lora else None
+    hook = object() if with_lora else None
+
+    @contextmanager
+    def setup(config):
+        assert config is lora
+        events.append("setup")
+        try:
+            yield
+        finally:
+            events.append("restore")
+
+    @contextmanager
+    def record(model):
+        events.append("record")
+        yield
+
+    class Manager:
+        def __init__(self, *args, **kwargs):
+            assert kwargs["lora_capture_cases"] == cases
+        def capture(self, *args, **kwargs):
+            assert events == ["setup", "record"]
+            assert kwargs["has_lora"] is with_lora
+            assert kwargs["lora_capture_hook"] is hook
+            assert kwargs["use_aux_hidden_state_outputs"] is False
+            assert kwargs["skip_compiled"] is True
+            events.append("capture")
+
+    monkeypatch.setattr(cudagraph_utils, "ModelCudaGraphManager", Manager)
+    monkeypatch.setattr(lora_utils, "create_lora_capture_hook", lambda config, runner: hook)
+    monkeypatch.setattr(model_hook_utils.torch.accelerator, "memory_allocated", lambda device: 100)
+    monkeypatch.setattr(model_hook_utils, "current_platform", SimpleNamespace(graph_pool_handle=lambda: "separate-pool"))
+    runner = SimpleNamespace(
+        cudagraph_manager=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL, lora_capture_cases=cases),
+        vllm_config=object(), device="cuda", decode_query_len=1, lora_config=lora,
+        use_aux_hidden_state_outputs=False, maybe_setup_dummy_loras=setup,
+        model=object(), model_state=object(), input_buffers=object(),
+        intermediate_tensors=None, block_tables=object(), attn_groups=[], kv_cache_config=object(),
+    )
+    state = SimpleNamespace(record_outputs=record)
+    graph = model_hook_utils._initialize_capture_graph(runner, state)
+    assert graph.pool == "separate-pool"
+    assert events == ["setup", "record", "capture", "restore"]
+    assert state.allocation_bytes == 0

@@ -134,10 +134,12 @@ def run(root, run_id, eval_id, gold=False, incremental=False):
     current_wheelhouse = current_config["environment"].get("wheelhouse")
     same_backend = (current_config.get("benchmark", {}).get("backend", "swebench")
                     == cfg.get("benchmark", {}).get("backend", "swebench"))
-    if current_wheelhouse and same_backend:
+    if current_wheelhouse and same_backend and not loaded["plan"].get("online_contract"):
         from runtime.wheelhouse import verify
         verify(current_wheelhouse)
         cfg["environment"] = {**cfg.get("environment", {}), "wheelhouse": current_wheelhouse}
+    if not loaded["plan"].get("online_contract"):
+        cfg.get("execution", {}).pop("online_rl_failure_policy", None)
     cfg["selection"] = selection
     from benchmark_evaluation.harness import evaluate
 

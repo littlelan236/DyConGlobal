@@ -52,10 +52,22 @@ def test_policy_ratio_is_split_by_advantage_sign_and_published_to_tensorboard():
            'token_count': 4, 'positive_branches': 1, 'negative_branches': 1}
     assert row['positive_ratio_mean'] == pytest.approx(.5)
     assert row['negative_ratio_mean'] == pytest.approx(2.0)
-    values = scalar_values(row)
+    values = scalar_values(row, kl_beta=.02)
     assert values['train/policy_ratio_positive_advantage'] == pytest.approx(.5)
     assert values['train/policy_ratio_negative_advantage'] == pytest.approx(2.0)
-    assert 'train/k3_penalty_mean' not in scalar_values({**row, 'k3_penalty_mean': 1.0}, include_k3=False)
+    assert values['train/k3_loss'] == pytest.approx(.0)
+    assert 'train/k3_loss_fraction' not in values
+    weighted = scalar_values({**row, 'loss': .5, 'k3_penalty_mean': .25}, kl_beta=.02)
+    assert weighted['train/k3_loss'] == pytest.approx(.005)
+    assert weighted['train/k3_loss_fraction'] == pytest.approx(.01)
+    assert 'train/k3_loss_fraction' not in scalar_values(
+        {**row, 'loss': 0., 'k3_penalty_mean': 1.}, kl_beta=.02)
+    zero_beta = scalar_values({**row, 'loss': -.5, 'k3_penalty_mean': 1.0}, include_k3=False, kl_beta=0.)
+    assert zero_beta['train/k3_loss'] == zero_beta['train/k3_loss_fraction'] == 0.
+    assert 'train/k3_penalty_mean' not in zero_beta
+    assert zero_beta['drift/k3/objective_mean_after_guard'] == 1.
+    negative_loss = scalar_values({**row, 'loss': -.5, 'k3_penalty_mean': .25}, kl_beta=.02)
+    assert negative_loss['train/k3_loss_fraction'] == pytest.approx(-.01)
 
 
 def test_large_metrics_partial_append_dedup_and_unknown_arrays(tmp_path):
@@ -131,6 +143,30 @@ def test_source_root_identity_and_path_ownership(tmp_path):
     assert first[-1]!=second[-1]
     assert first[2]['storage_root']==str(root)
     with pytest.raises(ValueError): source(cfg,'../fixture',root)
+
+
+def test_online_resume_reports_campaign_checkpoint_and_separate_barrier(tmp_path):
+    cfg, root, folder = attempt(tmp_path, name='resumed')
+    metric(folder, 2)
+    checkpoint_root = folder.parent / 'original/checkpoints'
+    cp = checkpoint_root / 'step-000002'
+    cp.mkdir(parents=True)
+    contract = read_json(folder / 'grpo-contract.json')
+    write_json(cp / 'state.json', {'state': {'global_step': 2, 'group_cursor': 2}, 'contract': contract})
+    commit_receipt(cp, 'lora-checkpoint-v1')
+    state = tmp_path / 'pipeline.json'
+    write_json(state, {'campaign_id': 'campaign', 'committed_step': 1,
+        'policy_version': 'S1', 'estimator_version': 'E1', 'prefetched_step': 2})
+    record = read_json(folder / 'attempt.json')
+    record['online_artifacts'] = {'campaign_id': 'campaign', 'checkpoint_root': str(checkpoint_root),
+                                  'state_path': str(state)}
+    write_json(folder / 'attempt.json', record)
+    result = snapshot(cfg, 'resumed', root)
+    assert result['last_completed_update'] == result['recoverable_checkpoint_step'] == 2
+    assert result['checkpoint']['path'] == str(cp)
+    assert result['online_pipeline']['committed_step'] == 1
+    write_json(state, {'campaign_id': 'another'})
+    assert any('campaign differs' in warning for warning in snapshot(cfg, 'resumed', root)['warnings'])
 
 
 def test_active_discovers_registered_training_outside_configured_scan_roots(tmp_path):
@@ -245,10 +281,17 @@ def test_cli_formats_filters_and_no_torch_import(tmp_path):
 
 def test_tensorboard_managed_replay_stop_rebuild_and_sealed_bytes(tmp_path):
     pytest.importorskip('tensorboard')
+    from urllib.request import ProxyHandler, build_opener
     from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
     from RL.observability_tensorboard import manage
     cfg,root,folder=attempt(tmp_path,status='completed')
-    metric(folder,1);metric(folder,2)
+    attempt_file = folder / 'attempt.json'
+    metadata = read_json(attempt_file)
+    metadata['contract']['schedule'] = {'grpo': {'kl_beta': .02}}
+    write_json(attempt_file, metadata)
+    write_json(folder / 'grpo-contract.json', metadata['contract'])
+    for step in (1, 2):
+        metric(folder, step, gradient_norm=.4, positive_ratio_mean=1.1, negative_ratio_mean=.9)
     commit_receipt(folder,'lora-attempt-v1')
     receipt=verify_receipt(folder)
     with socket.socket() as sock:
@@ -260,6 +303,25 @@ def test_tensorboard_managed_replay_stop_rebuild_and_sealed_bytes(tmp_path):
         assert same['sync']==started['sync']
         accumulator=EventAccumulator(str(Path(started['logdir'])/'fixture'));accumulator.Reload()
         assert [p.step for p in accumulator.Scalars('train/loss')]==[1,2]
+        assert [p.value for p in accumulator.Scalars('train/k3_loss')] == pytest.approx([.006, .006])
+        assert [p.value for p in accumulator.Scalars('drift/k3/objective_mean_after_guard')] == pytest.approx([.3, .3])
+        assert [p.value for p in accumulator.Scalars('train/k3_loss_fraction')] == pytest.approx([.006, .012])
+        opener = build_opener(ProxyHandler({}))
+
+        def read_api(path):
+            with opener.open(started['url'] + path, timeout=5) as response:
+                return json.load(response)
+
+        plugins = read_api('/data/plugins_listing')
+        assert plugins['custom_scalars']['tab_name'] == 'Pinned'
+        assert plugins['custom_scalars']['enabled'] and plugins['scalars']['enabled']
+        categories = read_api('/data/plugin/custom_scalars/layout')['category']
+        assert [category['title'] for category in categories] == ['Pinned']
+        assert [chart['multiline']['tag'] for chart in categories[0]['chart']] == [
+            ['^train/gradient_norm$'], ['^train/loss$'], ['^drift/k3/objective_mean_after_guard$'],
+            ['^train/k3_loss_fraction$'], ['^train/policy_ratio_positive_advantage$'],
+            ['^train/policy_ratio_negative_advantage$'], ['^timing/step_seconds$'],
+        ]
         assert verify_receipt(folder)==receipt
         before=time.monotonic();metric(folder,3)
         for _ in range(50):
@@ -268,6 +330,12 @@ def test_tensorboard_managed_replay_stop_rebuild_and_sealed_bytes(tmp_path):
             time.sleep(.2)
         assert time.monotonic()-before<10
         assert [p.step for p in accumulator.Scalars('train/loss')]==[1,2,3]
+        # Recover a legacy receipt captured before the worker's exec completed.
+        _, _, _, cache = source(cfg, 'fixture', root)
+        service_path = cache / 'tensorboard/service.json'
+        legacy_record = read_json(service_path)
+        legacy_record['sync']['command'] = []
+        write_json(service_path, legacy_record)
         stopped=manage(cfg,'fixture',action='stop',storage_root=root,port=port)
         assert not stopped['sync_alive'] and not stopped['tensorboard_alive']
         again=manage(cfg,'fixture',action='start',storage_root=root,port=port)

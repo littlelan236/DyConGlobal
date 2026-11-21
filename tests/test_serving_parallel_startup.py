@@ -58,6 +58,7 @@ def test_real_parallel_processes_share_capture_and_rollback(cfg, tmp_path, monke
         def start(self): return self
         def close(self): closed.append(True)
 
+    monkeypatch.setattr(module, 'cuda_visible_devices', lambda devices: ','.join(map(str, devices)))
     monkeypatch.setattr(module, 'reserve_serving_devices', reserve)
     monkeypatch.setattr('hidden.backends.vllm.engine.serving_interpreter', lambda cfg: Path(sys.executable))
     monkeypatch.setattr(module, 'OnlineCaptureController', Controller)

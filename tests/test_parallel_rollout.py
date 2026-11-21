@@ -540,7 +540,8 @@ def test_real_parallel_config_hashes_and_preserves_full_arguments(cfg, tmp_path,
     raw["capture"].update(enabled=True, anchors=["think_close"], layers=[0, 1])
     raw["serving"]["management"] = "managed"
     raw["parallel"] = {"enabled": True, "branch_count": 2, "estimator_ref": opts["estimator_ref"],
-                       "save_sites": [0], "max_inflight_branches": 2}
+                       "save_sites": [0]}
+    raw["serving"]["max_num_seqs"] = 2
     if mode == "parallel_baseline":
         raw["parallel"].update(mode=mode, reasoning_loop={"enabled": True})
     path.write_text(yaml.safe_dump(raw))

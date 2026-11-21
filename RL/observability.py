@@ -258,7 +258,9 @@ def snapshot(cfg, attempt_id, storage_root=None, recent=10, reader=None, *, veri
             messages.append('Stage snapshot belongs to an exited/different process')
         live = {}
     checkpoint = None
-    checkpoint_paths = (directory / 'checkpoints').glob('step-*') if verify_checkpoints else ()
+    online = attempt.get('online_artifacts') or {}
+    checkpoint_root = Path(online.get('checkpoint_root') or directory / 'checkpoints')
+    checkpoint_paths = checkpoint_root.glob('step-*') if verify_checkpoints else ()
     for path in sorted(checkpoint_paths, reverse=True):
         if not (path / 'receipt.json').is_file():
             continue
@@ -315,6 +317,16 @@ def snapshot(cfg, attempt_id, storage_root=None, recent=10, reader=None, *, veri
         visualization.update(sync=sync, state=service.get('state'))
         if service.get('state') == 'running' and not all(visualization[k] for k in ('sync_alive', 'tensorboard_alive')):
             messages.append('An owned visualization process has exited')
+    pipeline = None
+    if online.get('state_path') and Path(online['state_path']).is_file():
+        try:
+            saved = read_json(online['state_path'])
+            if saved.get('campaign_id') != online.get('campaign_id'):
+                raise ValueError('Online pipeline campaign differs from attempt')
+            pipeline = {key: saved.get(key) for key in ('campaign_id', 'committed_step',
+                'policy_version', 'estimator_version', 'prefetched_step', 'checkpoint_path')}
+        except (OSError, ValueError, KeyError) as exc:
+            messages.append('Online pipeline status: ' + str(exc))
     return {'schema_version': 1, 'attempt_id': attempt_id, 'source': identity,
             'status': attempt.get('status'), 'created_at': attempt.get('created_at'), 'ended_at': attempt.get('ended_at'),
             'observed_at': now(), 'observed_liveness': liveness, 'process': pid,
@@ -331,6 +343,7 @@ def snapshot(cfg, attempt_id, storage_root=None, recent=10, reader=None, *, veri
             'stage': live.get('stage', 'unknown'), 'stage_age_seconds': age(live.get('last_stage_changed_at')),
             'live': live or None, 'latest_metric': latest or None, 'recent_updates': list(rows)[-recent:] if recent else [],
             'checkpoint': checkpoint, 'recoverable_checkpoint_step': (checkpoint.get('state') or {}).get('global_step') if checkpoint else None,
+            **({'online_pipeline': pipeline} if online else {}),
             'source_freshness': {'metrics_age_seconds': max(0, time.time()-metrics_path.stat().st_mtime) if metrics_path.exists() else None,
                                  'heartbeat_age_seconds': age(live.get('process_alive_at')),
                                  'historical_wall_time_estimated': bool(latest and not latest.get('observed_at'))},

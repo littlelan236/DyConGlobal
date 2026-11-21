@@ -60,11 +60,13 @@ def test_unknown_interrupted_attempt_uses_same_seed_and_infra_budget(cfg, monkey
 
 
 @pytest.mark.parametrize('crash_file', ['agent-outcome.json', 'attempt.json', 'retry-state.json'])
-@pytest.mark.parametrize('first_status', ['LimitsExceeded', 'reasoning_loop', 'Submitted'])
+@pytest.mark.parametrize('first_status', ['LimitsExceeded', 'reasoning_loop', 'Submitted', 'ParallelSelectionError'])
 def test_failure_at_persisted_boundary_recovers_without_replaying_agent(cfg, monkeypatch, crash_file, first_status):
     import rollout.retry as retry
     import rollout.runner as runner
     cfg = configure(cfg)
+    if first_status == 'ParallelSelectionError':
+        cfg['execution']['selection_retry'] = {'enabled': True, 'max_retries': 3}
     run, _ = prepare(cfg)
     factory, calls, closed, _ = fake_runtime(monkeypatch, [first_status, 'Submitted'])
     original = runner.write_json
@@ -89,7 +91,7 @@ def test_failure_at_persisted_boundary_recovers_without_replaying_agent(cfg, mon
     assert result['exit_status'] == 'Submitted'
     assert result['physical_attempts'] == expected
     summary = read_json(run / 'rollout/limits-exceeded-counts.json')
-    assert summary['resample_trigger_count'] == (first_status != 'Submitted')
+    assert summary['resample_trigger_count'] == (first_status in {'LimitsExceeded', 'reasoning_loop'})
     data = RunEvidence(cfg['project_root'], run.name)
     assert data.verify()['rollouts'] == expected
     assert data.select()['rollout_ids'] == [result['rollout_id']]
