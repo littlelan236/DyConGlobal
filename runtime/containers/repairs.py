@@ -182,4 +182,44 @@ def environment_overrides(cfg: dict, instance: dict) -> dict:
             overrides[key] = pins
         else:
             overrides[key] = value
+    legacy_iterable = overrides.get("variables", {}).get("DYCON_SWEBENCH_LEGACY_ITERABLE")
+    if legacy_iterable is not None and (
+        legacy_iterable != "1"
+        or instance["instance_id"] != "sympy__sympy-13865"
+        or instance["repo"] != "sympy/sympy"
+        or explicit.get("variables", {}).get("DYCON_SWEBENCH_LEGACY_ITERABLE") != "1"
+    ):
+        raise ValueError("Legacy Iterable compatibility requires explicit sympy-13865 configuration")
+    from runtime.containers.historical_runtime import validate
+    from runtime.containers.tools import validate as validate_tools
+
+    validate(instance, {**overrides, "variables": {**cfg["environment"].get("variables", {}), **overrides.get("variables", {})}})
+    validate_tools(instance, {**overrides, "variables": {**cfg["environment"].get("variables", {}), **overrides.get("variables", {})}})
     return overrides
+
+
+def legacy_iterable_bootstrap(variables: dict) -> str:
+    """Restore the Python 3.7 spelling of Iterable for a frozen legacy task."""
+    if variables.get("DYCON_SWEBENCH_LEGACY_ITERABLE") != "1":
+        return ""
+    import shlex
+
+    code = """import sys, sysconfig
+from pathlib import Path
+if sys.version_info[:2] != (3, 9):
+    raise RuntimeError('Expected Python 3.9 for Iterable compatibility')
+path = Path(sysconfig.get_path('purelib')) / 'dycon_legacy_iterable.pth'
+line = ("import collections, collections.abc, os; "
+        "os.environ.get('DYCON_SWEBENCH_LEGACY_ITERABLE') == '1' and "
+        "collections.__dict__.setdefault('Iterable', collections.abc.Iterable)\\n")
+try:
+    with path.open('x', encoding='ascii') as stream:
+        stream.write(line)
+except FileExistsError:
+    if path.is_symlink() or path.read_text(encoding='ascii') != line:
+        raise RuntimeError('Conflicting Iterable compatibility startup file')
+"""
+    verify = "import collections, collections.abc; assert collections.Iterable is collections.abc.Iterable"
+    return ("python -c " + shlex.quote(code)
+            + " && python -W error::DeprecationWarning -c " + shlex.quote(verify)
+            + " && echo DYCON_LEGACY_ITERABLE_READY")

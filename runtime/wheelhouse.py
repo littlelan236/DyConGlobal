@@ -121,6 +121,9 @@ def download_build_tools(destination):
 def build(cfg, publication_id, extra_sources=(), download=False, download_plan=None):
     root = Path(cfg['project_root'])
     publication_id = identifier(publication_id)
+    for source in extra_sources:
+        if not Path(source).is_dir():
+            raise FileNotFoundError(f'Explicit wheel source is not ready: {source}')
     destination = root / 'runtime/wheelhouse' / publication_id
     staging = root / 'temp/wheelhouse' / publication_id
     with file_lock(root / 'state/wheelhouse' / (publication_id + '.lock'), nonblocking=True):

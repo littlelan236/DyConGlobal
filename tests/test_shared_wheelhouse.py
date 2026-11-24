@@ -112,7 +112,7 @@ def test_build_downloads_must_match_published_sha256(cfg, tmp_path, monkeypatch)
     monkeypatch.setattr(wheelhouse, 'BUILD_TOOLS', (('demo', '1.0'),))
     responses = [io.BytesIO(json.dumps({'urls': [{'packagetype': 'bdist_wheel',
         'filename': 'demo-1.0-py3-none-any.whl', 'url': 'https://example.invalid/demo',
-        'digests': {'sha256': '0'*64}}]}).encode()), io.BytesIO(b'not a wheel')]
+        'size': len(b'not a wheel'), 'digests': {'sha256': '0'*64}}]}).encode()), io.BytesIO(b'not a wheel')]
     monkeypatch.setattr(wheelhouse.urllib.request, 'urlopen', lambda *a, **k: responses.pop(0))
     with pytest.raises(ValueError, match='SHA-256 mismatch'):
         build(cfg, 'bad-download', download=True)

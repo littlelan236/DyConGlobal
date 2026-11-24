@@ -15,6 +15,7 @@ SWE_TASK_BENCHMARKS = frozenset({
     "SWE-bench_Verified", "SWE-bench_NonVerified600", "SWE-bench_Lite", "SWE-bench",
     "legacy-tactRefractor-swebench",
     "swebench_dev", "swebench_nonverified",
+    "dev-gold-patch-failed", "verified-gold-patch-failed", "nonverified-gold-patch-failed",
     "fixture",  # Explicit synthetic family used by the repository's regression fixtures.
 })
 

@@ -85,6 +85,19 @@ def instrument(script, *, stack_seconds=280):
                   + ' "$__dycon_test_rc" > ' + folder + "/command.tmp\n"
                   + "mv " + folder + "/command.tmp " + folder + "/command.json\n"
                   + "# __DYCON_INSTRUMENTATION_END__\n")
+    elif details["runner"] == "sympy":
+        folder = "/tmp/dycon-sympy-" + uuid.uuid4().hex
+        startup = (
+            "import faulthandler, os, sys\n"
+            "if sys.argv and os.path.normpath(sys.argv[0]).endswith('bin/test'):\n"
+            f"    faulthandler.dump_traceback_later({max(1, int(stack_seconds))}, repeat=False)\n"
+        )
+        before = ("# __DYCON_INSTRUMENTATION_BEGIN__\n"
+                  + "mkdir -m 700 " + folder + "\n"
+                  + "cat > " + folder + "/sitecustomize.py <<'DYCON_STARTUP_EOF'\n"
+                  + startup + "DYCON_STARTUP_EOF\n"
+                  + "export PYTHONPATH=" + folder + '${PYTHONPATH:+:$PYTHONPATH}\n'
+                  + "# __DYCON_INSTRUMENTATION_END__\n")
     lines.insert(details["end_line"], after)
     if before:
         start = next(i for i, line in enumerate(lines) if line.strip() == START)

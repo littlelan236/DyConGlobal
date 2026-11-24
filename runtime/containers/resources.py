@@ -3,6 +3,8 @@ from pathlib import Path
 import json, shlex
 from core.io import sha256
 
+REQUESTS_CA = Path("/testbed/requests/cacert.pem")
+
 
 def assets(cfg):
     rows = json.loads(cfg["environment"].get("variables", {}).get("DYCON_SWEBENCH_RESOURCES", "[]"))
@@ -11,14 +13,18 @@ def assets(cfg):
     for row in rows:
         source = Path(row["source"]).resolve()
         target = Path(row["destination"])
+        transform = row.get("transform")
         if (not source.is_relative_to(root) or not source.is_file()
                 or sha256(source) != row["sha256"] or target in targets
                 or not target.is_relative_to("/testbed") or ".." in target.parts
-                or target.suffix not in {".txt", ".csv", ".dat", ".dcm", ".gz", ".zip", ".json", ".epw", ".h5", ".bz2", ".pkz"}):
+                or (target.suffix not in {".txt", ".csv", ".dat", ".dcm", ".gz", ".zip", ".json", ".epw", ".h5", ".bz2", ".pkz"}
+                    and not (target == REQUESTS_CA and transform == "requests-legacy-ca-v1"))):
             raise ValueError("Invalid immutable test resource")
-        if row.get('transform') not in (None, 'sklearn-california-v1'):
+        if transform not in (None, 'sklearn-california-v1', 'requests-legacy-ca-v1'):
             raise ValueError('Unsupported resource transformation')
-        if row.get('transform') and (target.name != 'cal_housing_py3.pkz'
+        if transform == 'requests-legacy-ca-v1' and target != REQUESTS_CA:
+            raise ValueError('Invalid Requests CA destination')
+        if transform == 'sklearn-california-v1' and (target.name != 'cal_housing_py3.pkz'
                 or row.get('sha256') != 'aaa5c9a6afe2225cc2aed2723682ae403280c4a3695a2ddda4ffb5d8215ea681'
                 or not row.get('loader_sha256')):
             raise ValueError('Invalid California housing source contract')
@@ -43,6 +49,17 @@ for row in rows:
     if hashlib.sha256(data).hexdigest()!=row['sha256']:raise ValueError('Mounted resource digest mismatch')
     target=row['destination']
     if os.path.islink(target) or not os.path.realpath(target).startswith('/testbed/'):raise ValueError('Resource target escapes testbed')
+    if row.get('transform')=='requests-legacy-ca-v1':
+        import ssl,subprocess
+        original=subprocess.check_output(['git','-c','safe.directory=/testbed','-C','/testbed',
+                                          'show','HEAD:requests/cacert.pem'])
+        with open(target,'rb') as stream:current=stream.read()
+        if current not in (original,data):raise ValueError('Conflicting original Requests CA bundle')
+        if not ssl.create_default_context(cafile=source).get_ca_certs():raise ValueError('Empty Requests CA bundle')
+        if current!=data:
+            with open(target,'wb') as stream:stream.write(data)
+        print('DYCON_REQUESTS_CA_READY',target,row['sha256'])
+        continue
     if row.get('transform')=='sklearn-california-v1':
         import tarfile,numpy as np
         from sklearn.datasets import california_housing as loader

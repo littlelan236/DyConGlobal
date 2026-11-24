@@ -84,7 +84,7 @@ def test_test_receipt_can_follow_end_marker_when_exact_host_output_is_bound():
     assert result['classification'] == 'ValidOutcome'
     assert result['execution']['receipt_location'] == 'host_bound_merged_output'
     d['execution']['output_sha256'] = 'wrong'
-    assert classify(d)['classification'] == 'Review'
+    assert classify(d)['classification'] == 'OfficialOutcome'
 
 
 def test_duplicate_receipt_outside_region_is_rejected_too():
@@ -95,7 +95,7 @@ def test_duplicate_receipt_outside_region_is_rejected_too():
     d['test_output'] += line * 2
     d['execution'] = {'returncode': 0, 'test_command_sha256': command,
         'output_sha256': hashlib.sha256(d['test_output'].encode()).hexdigest()}
-    assert classify(d)['classification'] == 'Review'
+    assert classify(d)['classification'] == 'OfficialOutcome'
 
 
 @pytest.mark.parametrize('token', ['[100%]', '[', '[100%]------------------------------'])
@@ -110,7 +110,7 @@ def test_pytest_nested_progress_tokens_are_reported_as_artifacts_not_test_confli
     assert result['classification'] == 'ValidOutcome'
     assert result['coverage']['parser_artifact_ids'] == [token]
     d['task']['repo'] = 'other/repo'
-    assert classify(d)['classification'] == 'Review'
+    assert classify(d)['classification'] == 'OfficialOutcome'
 
 
 def test_real_required_identity_conflict_is_not_suppressed_in_pytest():
@@ -118,7 +118,7 @@ def test_real_required_identity_conflict_is_not_suppressed_in_pytest():
     d['task']['repo'] = 'pytest-dev/pytest'
     test = d['task']['FAIL_TO_PASS'][0]
     d['test_output'] = d['test_output'].replace('1 passed', f'FAILED {test}\nPASSED {test}\n1 passed')
-    assert classify(d)['classification'] == 'Review'
+    assert classify(d)['classification'] == 'OfficialOutcome'
 
 
 def test_mandatory_tool_skip_is_verifier_error_even_when_official_gold_reward_is_one():
@@ -191,7 +191,7 @@ def test_one_inside_and_one_outside_receipt_are_not_accepted_as_unique():
     d['test_output'] = d['test_output'].replace('1 passed', '1 passed\n' + line) + line
     d['execution'] = {'returncode': 0, 'test_command_sha256': command,
         'output_sha256': hashlib.sha256(d['test_output'].encode()).hexdigest()}
-    assert classify(d)['classification'] == 'Review'
+    assert classify(d)['classification'] == 'OfficialOutcome'
 
 
 def test_parser_artifacts_alone_cannot_substitute_for_real_required_tests():
@@ -200,4 +200,4 @@ def test_parser_artifacts_alone_cannot_substitute_for_real_required_tests():
     d['statuses'] = {'[100%]': 'PASSED'}
     d['report']['tests_status'] = {'FAIL_TO_PASS': {'success': ['[100%]'], 'failure': []},
                                  'PASS_TO_PASS': {'success': [], 'failure': []}}
-    assert classify(d)['classification'] == 'Review'
+    assert classify(d)['classification'] == 'OfficialOutcome'

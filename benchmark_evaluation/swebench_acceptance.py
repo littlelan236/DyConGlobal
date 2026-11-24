@@ -3,6 +3,7 @@ from collections import Counter
 from pathlib import Path
 
 from application.execution.run_plan import load_plan
+from benchmark_evaluation.swebench_settlement import review_policy
 from core.io import hash_json, identifier, now, read_json, sha256, write_json
 
 
@@ -35,6 +36,8 @@ def collect(root, run_id, output, *, audit_dir=None):
                 audit = read_json(path)
         else:
             errors.append('Physical attempt audit missing')
+        if summary.get('gold') is False:
+            audit = review_policy(audit, gold=False)
         coverage = audit.get('coverage', {})
         required = coverage.get('required', 0)
         valid = bool(not errors and audit.get('classification') == 'ValidOutcome'
@@ -64,7 +67,7 @@ def collect(root, run_id, output, *, audit_dir=None):
                   'resources': policy.get('environment', {}).get('variables', {}).get('DYCON_SWEBENCH_RESOURCES')}
         row = {'instance_id': iid, 'rollout_id': rid, 'execution_finished': bool(out),
                'physical_attempt_count': len(attempts), 'gold_valid': valid,
-               'classification': audit.get('classification', 'Review'),
+               'classification': audit.get('classification', 'Review' if summary.get('gold') is True else 'Unscored'),
                'reason_code': audit.get('reason_code', 'execution_evidence_incomplete'),
                'reward': int(audit['effective_resolved']) if not errors and audit.get('classification') == 'ValidOutcome' and isinstance(audit.get('effective_resolved'), bool) else None,
                'official_result': audit.get('official_result', {}), 'coverage': coverage,

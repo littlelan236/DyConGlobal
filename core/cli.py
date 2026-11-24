@@ -194,7 +194,7 @@ def main(argv=None):
     sw.add_argument("--output", type=Path, required=True)
     sw.add_argument("--apply", action="store_true")
     sw = sw_sub.add_parser("catalog-list", help="Summarize or export SWE catalog tasks by official group")
-    sw.add_argument("--group", choices=["verified", "dev", "nonverified"])
+    sw.add_argument("--group", choices=["verified", "dev", "nonverified", "dev-gold-patch-failed", "verified-gold-patch-failed", "nonverified-gold-patch-failed"])
     sw.add_argument("--output", type=Path)
 
     sw = sw_sub.add_parser("images-repair", help="Publish frozen SWE task ownership or system-package image repairs")

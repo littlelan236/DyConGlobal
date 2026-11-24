@@ -43,7 +43,14 @@ class EnvironmentPolicy:
         return list(normalized.values())
 
     def variables(self) -> dict[str, str]:
+        from runtime.containers.historical_runtime import ENVS, KEY
+        from runtime.containers.tools import variables as tool_variables
+
         env = dict(self.environment["variables"])
+        env.update(tool_variables(env))
+        if KEY in env:
+            # The pre-bootstrap activation uses the image's testbed until the historical one exists.
+            env["CONDA_ENVS_DIRS"] = ENVS + ":/opt/miniconda3/envs"
         env.update(
             {"PAGER": "cat", "MANPAGER": "cat", "LESS": "-R", "PIP_PROGRESS_BAR": "off", "TQDM_DISABLE": "1"}
         )
@@ -64,7 +71,11 @@ class EnvironmentPolicy:
 
     def bootstrap(self, repo: str) -> str:
         specs = self.specs(repo)
+        from runtime.containers.historical_runtime import prepare, verify
+        from runtime.containers.tools import prepare as prepare_tools
+        from runtime.containers.repairs import legacy_iterable_bootstrap
         from runtime.containers.resources import preparation
+        compatibility = legacy_iterable_bootstrap(self.environment["variables"])
         text = shlex.quote("\n".join(specs) + "\n")
         install = "python -m pip install --no-input --no-index --find-links " + WHEELS_PATH
         install += " " + " ".join(map(shlex.quote, specs))
@@ -75,12 +86,16 @@ class EnvironmentPolicy:
             "\n".join(
                 [
                     "set -euo pipefail",
+                    *prepare(self.environment["variables"]),
                     "source /opt/miniconda3/bin/activate",
                     "conda activate testbed",
+                    *verify(self.environment["variables"]),
                     f"printf '%s' {text} > {CONSTRAINT_FILE}",
                     *(f"export {k}={shlex.quote(v)}" for k, v in self.variables().items()),
+                    *prepare_tools(self.environment["variables"]),
                     "echo DYCON_BOOTSTRAP_BEGIN",
                     install if specs else "true",
+                    *([compatibility] if compatibility else []),
                     preparation(self.cfg) or "true",
                     "echo DYCON_BOOTSTRAP_OK",
                 ]
@@ -111,23 +126,29 @@ class EnvironmentPolicy:
         wrapped = head + separator + prefix + rest if head.startswith("#!") else prefix + script
         from benchmark_evaluation.swebench_receipts import instrument
 
-        return instrument(wrapped, stack_seconds=max(1, self.cfg["timeouts"]["evaluation_seconds"] - 20))[0]
+        result = instrument(wrapped, stack_seconds=max(1, self.cfg["timeouts"]["evaluation_seconds"] - 20))[0]
+        if self.environment["variables"].get("DYCON_SWEBENCH_IMAGE_DIAGNOSTICS") == "1":
+            source = Path("benchmark_evaluation/swebench_image_diagnostics.py").read_text()
+            result += "\npython -c " + shlex.quote(source) + "\n"
+        return result
 
 
 PROBE_CODE = """import json,sys,subprocess,importlib,os,re
 try:
     from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
 except ImportError:
     from pip._vendor.packaging.requirements import Requirement
+    from pip._vendor.packaging.utils import canonicalize_name
 constraints=open('/tmp/dycon-constraints.txt').read().splitlines()
 packages=json.loads(subprocess.check_output([sys.executable,'-m','pip','list','--format=json']).decode('utf-8'))
-versions={p['name'].lower().replace('_','-'):p['version'] for p in packages}
+versions={canonicalize_name(p['name']):p['version'] for p in packages}
 checks=[]
 for text in constraints:
     if not text.strip():continue
     requirement=Requirement(text)
     name=requirement.name
-    actual=versions.get(name.lower().replace('_','-'))
+    actual=versions.get(canonicalize_name(name))
     checks.append({'spec':text,'package':name,'actual':actual,'satisfied':actual is not None and actual in requirement.specifier})
 data={'python':sys.version,'executable':sys.executable,'conda':os.environ.get('CONDA_DEFAULT_ENV'),
       'constraints':checks,'packages':packages,

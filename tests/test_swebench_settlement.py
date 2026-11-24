@@ -26,7 +26,7 @@ def test_score_projection_preserves_raw_and_never_coerces_unknown(classification
     raw = {'status': 'completed', 'resolved': True}
     audit = {'classification': classification, 'effective_resolved': resolved,
              'official_result': {'completed': True, 'resolved': resolved if type(resolved) is bool else True}}
-    result = project(raw, audit)
+    result = project(raw, audit, gold=classification == 'Review')
     validate(result)
     assert result['status'] == status and result['reward'] == reward
     assert result['resolved'] is resolved and label(result) is resolved
@@ -38,7 +38,7 @@ def test_invalid_validoutcome_payload_does_not_create_zero_or_one():
     result = project(raw, {'classification': 'ValidOutcome', 'effective_resolved': True,
                           'official_result': {'completed': True, 'resolved': False}})
     validate(result)
-    assert result['status'] == 'Review' and result['reward'] is None
+    assert result['status'] == 'completed_unknown' and result['reward'] is None
 
 
 @pytest.mark.parametrize('kind', ['VerifierError', 'Review', 'missing_effective', 'mismatch'])
@@ -101,7 +101,8 @@ def install_fake_runner(cfg, monkeypatch, *, resolved=True, broken=False, depend
 
 @pytest.mark.parametrize('gold,broken,resolved,expected', [
     (False,False,True,'completed'),(False,False,False,'completed'),
-    (False,True,False,'Review'),(True,True,False,'VerifierError'),
+    (False,True,False,'completed'),(False,True,True,'completed'),
+    (True,True,False,'VerifierError'),(True,True,True,'Review'),
 ])
 def test_actual_harness_settlement_and_training_eligibility(cfg,monkeypatch,gold,broken,resolved,expected):
     rid,run,factory,calls=install_fake_runner(cfg,monkeypatch,resolved=resolved,broken=broken)
@@ -110,6 +111,9 @@ def test_actual_harness_settlement_and_training_eligibility(cfg,monkeypatch,gold
     assert out['status']==expected
     assert out['reward']==(int(resolved) if expected=='completed' else None)
     assert out['official_result']=={'completed':True,'resolved':resolved}
+    if broken and not gold:
+        assert out['verifier_audit']['classification'] == 'OfficialOutcome'
+        assert out['verifier_audit']['cause_confirmed'] is False
     assert out['raw_outcome']['resolved'] is resolved
     assert summary['verifier_audit_mode']=='settlement' and summary['scoring_policy']==POLICY
     if not gold:
@@ -125,11 +129,35 @@ def test_actual_harness_settlement_and_training_eligibility(cfg,monkeypatch,gold
     assert audit['classification']==out['verifier_audit']['classification']
 
 
-def test_retry_success_discards_previous_review_settlement(cfg,monkeypatch):
+@pytest.mark.parametrize('completed,resolved,execution_status,expected_class', [
+    (True, True, 'completed', 'OfficialOutcome'),
+    (True, False, 'completed', 'OfficialOutcome'),
+    (False, False, 'ConnectionError', 'Unscored'),
+])
+def test_carry_forward_uses_persisted_official_grade_without_editing_old_review(
+        completed, resolved, execution_status, expected_class):
+    official = {'completed': completed, 'resolved': resolved}
+    legacy = project({'status': execution_status, 'resolved': resolved}, {
+        'classification': 'Review', 'reason_code': 'execution_evidence_incomplete',
+        'official_result': official}, gold=True)
+    legacy['verifier_audit'].update(path='old-audit.json', sha256='hash')
+    previous = copy.deepcopy(legacy)
+    result = harness._carry_forward_outcome(legacy, gold=False)
+    validate(result)
+    assert result['verifier_audit']['classification'] == expected_class
+    assert result['verifier_audit']['source_audit'] == {'path': 'old-audit.json', 'sha256': 'hash'}
+    assert result['status'] == execution_status
+    assert result['resolved'] is (resolved if completed else None)
+    assert result['reward'] == (int(resolved) if completed else None)
+    assert result['official_result'] == official
+    assert legacy == previous
+
+
+def test_retry_success_discards_previous_unscored_settlement(cfg,monkeypatch):
     rid,run,factory,calls=install_fake_runner(cfg,monkeypatch,raise_first=True)
     out=harness.evaluate(cfg,run,'retry',factory=factory)['outcomes'][rid]
     assert len(calls)==2 and out['status']=='completed' and out['reward']==1
-    assert out['attempts'][0]['status']=='Review' and out['attempts'][0]['reward'] is None
+    assert out['attempts'][0]['status']=='ConnectionError' and out['attempts'][0]['reward'] is None
     assert out['verifier_audit']['classification']=='ValidOutcome' and 'error' not in out
 
 
@@ -182,7 +210,7 @@ def test_timeout_suffix_does_not_misclassify_valid_host_digest(tmp_path,monkeypa
     assert 'Execution output digest mismatch' not in doc['collection_errors']
 
 
-def test_malformed_bound_submission_is_valid_zero_but_hunk_failure_needs_review(cfg,monkeypatch):
+def test_malformed_bound_submission_is_valid_zero_but_hunk_failure_is_unscored(cfg,monkeypatch):
     from benchmark_evaluation import swebench_audit
     rid,run,factory,_=install_fake_runner(cfg,monkeypatch)
     selected=cfg['selection'];task=selected['tasks'][selected['rollouts'][rid]['task_key']]['instance']
@@ -197,7 +225,7 @@ def test_malformed_bound_submission_is_valid_zero_but_hunk_failure_needs_review(
     out=project(outcome,result);validate(out)
     assert out['reward']==0
     (logs/'run_instance.log').write_text('>>>>> Patch Apply Failed:\nerror: patch failed: module.py:20\n')
-    assert classify(collect(run/'harness',eid,rid,task,outcome))['classification']=='Review'
+    assert classify(collect(run/'harness',eid,rid,task,outcome))['classification']=='Unscored'
     (logs/'patch.diff').write_text('other bytes')
     assert classify(collect(run/'harness',eid,rid,task,outcome))['reason_code']=='evidence_integrity_error'
 

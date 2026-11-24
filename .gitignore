@@ -267,3 +267,13 @@ desktop.ini
 /migration/releases/
 /runtime/backend-snapshots/
 /runtime/resource-cache-runtime/
+
+# Downloaded SWE-bench task runtime assets; container policy code stays visible
+/runtime/resources/swebench-ghostscript-*/
+/runtime/resources/swebench-historical-python/
+/runtime/resources/swebench-requests-ca-*/
+/runtime/resources/swebench-sphinx-*-archive/
+
+# Machine-local rollout launch configurations
+/run-launch-*.yaml
+/run-launch-*.yml

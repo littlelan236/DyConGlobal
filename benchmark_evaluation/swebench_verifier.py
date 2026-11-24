@@ -11,7 +11,9 @@ import json
 import re
 from collections import Counter
 
-POLICY_VERSION = "swebench_verifier_audit_v4"
+from benchmark_evaluation.swebench_settlement import SCORED_CLASSIFICATIONS, review_policy
+
+POLICY_VERSION = "swebench_verifier_audit_v5"
 GROUPS = ("FAIL_TO_PASS", "PASS_TO_PASS")
 STATES = {"PASSED", "FAILED", "ERROR", "SKIPPED", "XFAIL", "XPASS"}
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -203,8 +205,8 @@ def classify(document):
 
     VerifierError is an operational eligibility decision. A gold-control failure
     proves the control failed, not that a candidate environment cause is proven.
-    Unverified gold identity/integrity remains Review; ordinary model assertions
-    retain their original semantics.
+    Review is reserved for gold. When other evidence is inconclusive on a
+    formal run, retain the official score if available.
     """
     official = dict(document.get("official_result", {}))
     result = {
@@ -518,12 +520,13 @@ def classify(document):
         "required_pass_nonrequired_failure" if x.startswith("Nonzero test command exit conflicts") else
         "required_collection_incomplete" if x.startswith("Required test missing") else
         "evidence_conflict_or_missing" for x in unknown})
-    return result
+    return review_policy(result, gold=document.get("gold") is True)
 
 
 def summarize(audits):
     counts = Counter(x["classification"] for x in audits)
     valid = [x for x in audits if x["classification"] == "ValidOutcome"]
+    scored = [x for x in audits if x["classification"] in SCORED_CLASSIFICATIONS]
     passed = sum(x["effective_resolved"] is True for x in valid)
     return {"policy_version": POLICY_VERSION, "requested": len(audits), "classification_counts": dict(counts),
             "reason_counts": dict(Counter(x["reason_code"] for x in audits)),
@@ -533,4 +536,5 @@ def summarize(audits):
             "gold_patch_defects": sum(x.get("gold_patch_issue_confirmed", False) for x in audits),
             "audit_coverage": len(valid) / len(audits) if audits else None,
             "valid_resolved": passed, "valid_resolve_rate": passed / len(valid) if valid else None,
+            "scored": len(scored), "scored_resolved": sum(x["effective_resolved"] is True for x in scored),
             "official_resolved": sum(x["official_result"].get("resolved") is True for x in audits)}

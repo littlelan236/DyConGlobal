@@ -6,7 +6,9 @@
 
 - `ValidOutcome`：评分证据有效，`effective_resolved` 为官方布尔值。
 - `VerifierError`：该次评测不能提供可信训练标签，`effective_resolved=null`。`cause_confirmed=true` 才表示具体根因已经证实。
-- `Review`：输入身份、文件完整性、证据归属或普通模型提交责任仍未核实；不生成有效零分。
+- `Review` 仅用于 Gold Patch 评测，表示输入身份、文件完整性或证据归属仍待核实，分数留空。
+- `OfficialOutcome` 表示正式评测的审计证据不足，但官方 harness 已完成评分。正式 run 沿用官方的 resolved/unresolved。
+- `Unscored` 表示正式评测没有已完成的官方评分。评测保留执行失败状态，分数留空。
 
 ## Gold 控制策略
 
@@ -34,12 +36,12 @@ Docker 的 stdout/stderr 分块合并可能把有效测试回执附到结束标�
 
 ## 正式评分结算与训练消费
 
-新 SWE-bench harness 默认使用 `swebench_validity_settlement_v1`；`verifier_audit_mode=settlement`，不再只是旁路。ValidOutcome 产生 completed、布尔 resolved、reward=0/1；VerifierError/Review 使用同名 status，resolved/effective_resolved/reward 均为 null，scoring_eligible=false。原执行字段保存在 raw_outcome，原官方结果保存在 official_result，官方 report.json/test_output.txt 不改写。审计文件引用包含 SHA256。
+SWE-bench harness 使用 `swebench_validity_settlement_v1`。ValidOutcome 和 OfficialOutcome 都产生 completed、布尔 resolved 和 reward=0/1。VerifierError 和 Gold Patch 的 Review 使用同名 status，分数留空。raw_outcome 保存原始执行状态，official_result 保存官方评分，审计文件引用包含 SHA256。
 
-`RunEvidence.record_evaluation` 将有效投影登记到唯一 evidence，并验证 null 与状态约束。在线成功剩余量标签、difficulty resolved 选择、steering/RL source selection 通过同一 training_label 消费所选 evaluation；不会把旧 sidecar 的无效结果当作成功。旧 SWE-bench 无审计结果可读取，但不为新成功标签提供有效 bool。增量评测继承的未结算旧结果变为 legacy_unsettled_evaluation 的 Review，历史文件不重写。
+`RunEvidence.record_evaluation` 登记评测结果并检查状态与分数。在线成功标签、difficulty 选择和 steering/RL 数据通过同一个 training_label 读取所选评测。正式增量评测继承的旧 Review 或未结算结果沿用原始评测中已完成的官方评分，其他结果继续留空。历史文件保留原始记录。
 
 新 RL 数据构建将明确 VerifierError/Review/基础设施错误轨迹的整个分组标为不可训练，保留分支、原 historical_score、native token 和 terminal_scoring_exclusion；general audit.enabled=false 也执行此评分限制。GroupBatch 还有消费端阻止绕过的校验。尚未评测的旧共识数据保持可表达；共识 historical_score 与终局 reward 是不同字段，不把其中任意一个代替另一个。已有 sealed 数据集、prepared/checkpoint、运行中训练和其冻结优势不追溯改写。
 
-普通提交空 patch 可确认是有效零分；有精确 patch hash、官方 git syntax rejection 且尚未执行测试的损坏 diff 也可归有效零分。泛化 hunk mismatch 不能据此认定模型责任，保留 Review。重试决策读取 raw 执行事实，后续成功不会继承前次 VerifierError/Review。
+普通提交空 patch 可以计为零分。有精确 patch hash 和官方 git 语法错误证据的损坏 diff，即使未执行测试，也可以计为零分。只有泛化 hunk mismatch 且官方没有完成评分的情况保留空分数。重试读取原始执行状态，成功后使用本次执行结果。
 
 已部署代码的 CPU 集成测试覆盖真实 collector/parser、harness、evidence、训练选择和 RL dataset/group 边界；模型/GPU训练质量与环境修复的验收另行记录。

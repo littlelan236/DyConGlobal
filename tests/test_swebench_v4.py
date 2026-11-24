@@ -44,7 +44,7 @@ def finding(d):
 
 def test_did_not_warn_is_a_precise_pytest_expectation_failure():
     assert classify(failed_document(error='Failed: DID NOT WARN. No warnings of type UserWarning were emitted.'))['effective_resolved'] is False
-    assert classify(failed_document(error='Failed: unknown failure'))['effective_resolved'] is None
+    assert classify(failed_document(error='Failed: unknown failure'))['classification'] == 'OfficialOutcome'
 
 
 def test_reviewed_subject_exception_needs_matching_live_call_and_sources():
@@ -76,14 +76,16 @@ def test_subject_attribution_cannot_bypass_safeguards(mutation):
         d['test_output']=prefix+'__DYCON_PYTEST_SESSION__ '+json.dumps(row)+'\n'
         if mutation=='nested':d['test_output']+='__DYCON_PYTEST_SESSION__ '+json.dumps(row)+'\n'
         d['execution']['output_sha256']=hashlib.sha256(d['test_output'].encode()).hexdigest();finding(d)
-    assert classify(d)['effective_resolved'] is None
+    result = classify(d)
+    assert result['classification'] == ('Review' if mutation == 'gold' else 'OfficialOutcome')
+    assert not result['cause_confirmed']
 
 
 def test_tox_receipt_requires_unique_complete_inner_session():
     d=failed_document();session(d,runner='tox')
-    assert classify(d)['effective_resolved'] is False
+    assert classify(d)['classification'] == 'ValidOutcome'
     d['execution']['pytest_binding']['token']='wrong'
-    assert classify(d)['effective_resolved'] is None
+    assert classify(d)['classification'] == 'OfficialOutcome'
 
 
 def test_real_pytest_plugin_and_unchanged_command(tmp_path):
@@ -122,11 +124,13 @@ def test_resources_reject_hash_mismatch_and_target_escape(tmp_path):
     with pytest.raises(ValueError):assets(cfg)
 
 
-def test_fixture_error_collection_failure_and_missing_data_cannot_become_subject_zero():
+def test_fixture_errors_do_not_establish_audited_subject_failure():
     for error in ['FileNotFoundError: /testbed/missing.txt','ImportError: missing dependency',
                   'TypeError: unexpected fixture error','ValueError: bad value']:
         d=failed_document(error=error,state='ERROR');session(d)
-        assert classify(d)['effective_resolved'] is None
+        result = classify(d)
+        assert result['classification'] == 'OfficialOutcome'
+        assert result['attribution'] == 'unknown'
 
 
 def test_verified_gold_nonrequired_failure_keeps_real_command_exit_guard():

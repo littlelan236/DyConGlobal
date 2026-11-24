@@ -36,14 +36,15 @@ def test_valid_pass_is_supported_outcome():
     assert result["effective_resolved"] is True
 
 
-def test_missing_required_evidence_is_review():
+def test_missing_required_evidence_uses_formal_official_result():
     t = task()
     report = {"resolved": False, "patch_successfully_applied": True,
               "tests_status": {"FAIL_TO_PASS": {"success": [], "failure": t["FAIL_TO_PASS"]},
                                 "PASS_TO_PASS": {"success": [], "failure": t["PASS_TO_PASS"]}}}
     result = classify(base(statuses={}, report=report, output="bad output"))
-    assert result["classification"] == "Review"
-    assert result["effective_resolved"] is None
+    assert result["classification"] == "OfficialOutcome"
+    assert result["effective_resolved"] is False
+    assert result["missing_evidence"] and not result["cause_confirmed"]
 
 
 def test_confirmed_dependency_receipt_is_verifier_error():
@@ -52,8 +53,9 @@ def test_confirmed_dependency_receipt_is_verifier_error():
                                       "recovered": False, "required_tests": [], "evidence": [],
                                       "evidence_digest": "bad"}],
                            execution={"returncode": 1}))
-    # Unbound findings do not get to override evidence.
-    assert result["classification"] == "Review"
+    # Unbound findings cannot establish verifier fault.
+    assert result["classification"] == "OfficialOutcome"
+    assert not result["cause_confirmed"]
 
 
 def test_instrumentation_has_single_scoped_receipt():
@@ -104,7 +106,8 @@ def test_gold_does_not_prove_environment_cause():
 ])
 def test_terminal_errors_are_candidates_until_causally_attributed(error, reason):
     result = classify(failed_document(error=error))
-    assert result["classification"] == "Review"
+    assert result["classification"] == "OfficialOutcome"
+    assert result["effective_resolved"] is False and not result["cause_confirmed"]
     assert reason in result["candidate_reason_codes"]
 
 
@@ -161,10 +164,10 @@ def test_identity_or_collection_corruption_prevents_confirmed_attribution():
 
 
 @pytest.mark.parametrize("state", ["SKIPPED", "XPASS", "MISSING", "arbitrary"])
-def test_nonpass_states_are_not_fabricated_as_pass(state):
+def test_nonpass_states_do_not_establish_audited_pass(state):
     d = base()
     d["statuses"][d["task"]["FAIL_TO_PASS"][0]] = state
-    assert classify(d)["classification"] == "Review"
+    assert classify(d)["classification"] == "OfficialOutcome"
 
 
 def test_xfail_preserves_official_pass_semantics():
@@ -177,13 +180,13 @@ def test_report_omits_a_skipped_required_id():
     d = base()
     d["statuses"][d["task"]["FAIL_TO_PASS"][0]] = "SKIPPED"
     d["report"]["tests_status"]["FAIL_TO_PASS"]["success"] = []
-    assert classify(d)["classification"] == "Review"
+    assert classify(d)["classification"] == "OfficialOutcome"
 
 
 def test_report_false_with_all_successes_is_a_conflict():
     d = base()
     d["report"]["resolved"] = d["official_result"]["resolved"] = False
-    assert classify(d)["classification"] == "Review"
+    assert classify(d)["classification"] == "OfficialOutcome"
 
 
 @pytest.mark.parametrize("rc", [2, 3, 4, 5, 137, 139])
@@ -193,7 +196,7 @@ def test_abnormal_test_exit_cannot_be_hidden_by_successful_cleanup(rc):
     row = {"command_sha256": command_hash, "returncode": rc, "runner": "pytest", "scope": "command"}
     d["execution"] = {"returncode": 0, "test_command_sha256": command_hash}
     d["test_output"] = d["test_output"].replace("1 passed", "1 passed\n__DYCON_TEST_RESULT__ " + json.dumps(row))
-    assert classify(d)["classification"] == "Review"
+    assert classify(d)["classification"] == "OfficialOutcome"
 
 
 def test_tox_exit_one_is_not_assumed_to_be_pytest_test_failure():
@@ -202,7 +205,7 @@ def test_tox_exit_one_is_not_assumed_to_be_pytest_test_failure():
     row = {"command_sha256": command_hash, "returncode": 1, "runner": "tox", "scope": "command"}
     d["execution"] = {"returncode": 0, "test_command_sha256": command_hash}
     d["test_output"] = d["test_output"].replace("+ : '>>>>> End", "__DYCON_TEST_RESULT__ " + json.dumps(row) + "\n+ : '>>>>> End")
-    assert classify(d)["classification"] == "Review"
+    assert classify(d)["classification"] == "OfficialOutcome"
 
 
 def test_duplicate_receipts_are_rejected():
@@ -210,7 +213,7 @@ def test_duplicate_receipts_are_rejected():
     row = {"command_sha256": "a" * 64, "returncode": 0, "runner": "pytest", "scope": "command"}
     d["execution"] = {"returncode": 0, "test_command_sha256": "a" * 64}
     d["test_output"] = d["test_output"].replace("1 passed", ("__DYCON_TEST_RESULT__ " + json.dumps(row) + "\n") * 2)
-    assert classify(d)["classification"] == "Review"
+    assert classify(d)["classification"] == "OfficialOutcome"
 
 
 def test_real_shell_retains_test_failure_after_cleanup_success(tmp_path):

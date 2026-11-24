@@ -1,32 +1,63 @@
 """SWE-bench score projection, shared by execution and training consumers.
 
-Official evidence is immutable. Only supported ValidOutcome results provide a
-boolean success label or numeric terminal reward. Legacy data remains readable;
-an existing sidecar must never be ignored when deriving a training label.
+Official evidence is immutable. Fully audited scores and formal-run scores
+backed by a completed official result can provide a terminal reward. Legacy
+data remains readable.
 """
 from __future__ import annotations
 
 POLICY = "swebench_validity_settlement_v1"
+SCORED_CLASSIFICATIONS = {"ValidOutcome", "OfficialOutcome"}
+UNSCORED_STATUSES = {"infra_error", "ConnectionError", "completed_unknown"}
 
 
-def project(outcome, audit):
+def official_result(outcome):
+    if "official_result" in outcome:
+        return dict(outcome["official_result"])
+    raw = outcome.get("raw_outcome", outcome)
+    return {"completed": raw.get("status") == "completed", "resolved": raw.get("resolved")}
+
+
+def review_policy(audit, *, gold):
+    """Use the official score for ambiguous formal evaluations."""
+    if gold or audit.get("classification") != "Review":
+        return audit
+    official = audit.get("official_result", {})
+    value = official.get("resolved")
+    if official.get("completed") is True and type(value) is bool:
+        return {**audit, "classification": "OfficialOutcome", "effective_resolved": value}
+    return {**audit, "classification": "Unscored", "effective_resolved": None}
+
+
+def project(outcome, audit, *, gold=False):
     """Produce a settled outcome without mutating raw input or audit evidence."""
-    raw = {k: outcome[k] for k in ("status", "resolved", "failure_type", "failure_detail", "error")
-           if k in outcome}
+    source = outcome.get("raw_outcome", outcome)
+    raw = {k: source[k] for k in ("status", "resolved", "failure_type", "failure_detail", "error")
+           if k in source}
     official = dict(audit.get("official_result", {}))
-    audit = dict(audit)
+    audit = dict(review_policy(audit, gold=gold))
     classification = audit.get("classification")
-    valid = classification == "ValidOutcome" and type(audit.get("effective_resolved")) is bool
-    if valid and audit["effective_resolved"] is not official.get("resolved"):
+    valid = classification in SCORED_CLASSIFICATIONS and type(audit.get("effective_resolved")) is bool
+    if classification == "OfficialOutcome":
+        valid = (not gold and valid and official.get("completed") is True
+                 and audit["effective_resolved"] is official.get("resolved"))
+    if classification == "ValidOutcome" and valid and audit["effective_resolved"] is not official.get("resolved"):
         # An invalid submission can be a supported zero without an official
         # test report. No other projection is allowed to override raw scoring.
         valid = audit.get("reason_code") in {"missing_patch", "invalid_patch"} and audit["effective_resolved"] is False
-    if classification == "ValidOutcome" and not valid:
-        classification = "Review"
+    if classification not in {"VerifierError", "Review", "Unscored"} and not valid:
+        classification = "Review" if gold else "Unscored"
         audit.update(classification=classification, effective_resolved=None,
                      reason_code="invalid_score_projection")
     value = audit["effective_resolved"] if valid else None
-    status = "completed" if valid else "VerifierError" if classification == "VerifierError" else "Review"
+    if valid:
+        status = "completed"
+    elif classification == "Unscored":
+        status = raw.get("status", "completed_unknown")
+        if status not in UNSCORED_STATUSES:
+            status = "completed_unknown"
+    else:
+        status = classification
     return {**outcome, "raw_outcome": raw, "official_result": official,
             "status": status, "resolved": value, "effective_resolved": value,
             "reward": int(value) if type(value) is bool else None,
@@ -40,7 +71,7 @@ def label(outcome):
     """Read a terminal label, including legacy sidecars; never coerce null."""
     audit = outcome.get("verifier_audit")
     if audit is not None:
-        if not isinstance(audit, dict) or audit.get("classification") != "ValidOutcome":
+        if not isinstance(audit, dict) or audit.get("classification") not in SCORED_CLASSIFICATIONS:
             return None
         value = audit.get("effective_resolved")
         if type(value) is not bool or value is not outcome.get("resolved"):
@@ -100,11 +131,16 @@ def validate(outcome):
         raise ValueError("Unsupported SWE-bench scoring policy")
     classification = outcome.get("verifier_audit", {}).get("classification")
     value = label(outcome)
-    if classification == "ValidOutcome":
+    if classification in SCORED_CLASSIFICATIONS:
         if type(value) is not bool or outcome.get("effective_resolved") is not value:
             raise ValueError("SWE-bench valid settlement requires a supported boolean reward")
-    elif classification in {"VerifierError", "Review"}:
-        if (outcome.get("status") != classification or outcome.get("resolved") is not None
+        official = outcome.get("official_result", {})
+        if classification == "OfficialOutcome" and (official.get("completed") is not True
+                or official.get("resolved") is not value):
+            raise ValueError("SWE-bench official settlement requires a completed matching result")
+    elif classification in {"VerifierError", "Review", "Unscored"}:
+        allowed = UNSCORED_STATUSES if classification == "Unscored" else {classification}
+        if (outcome.get("status") not in allowed or outcome.get("resolved") is not None
                 or outcome.get("effective_resolved") is not None or outcome.get("reward") is not None
                 or outcome.get("scoring_eligible") is not False):
             raise ValueError("SWE-bench invalid evaluation cannot carry a training reward")

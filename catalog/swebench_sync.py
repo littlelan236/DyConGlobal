@@ -11,7 +11,9 @@ from core.backends import benchmark_family
 from core.io import hash_json, now, read_json, sha256, write_json
 from runtime.images.nas import NasImageStore
 
-GROUPS = {name: 'swebench_' + name for name in ('verified', 'dev', 'nonverified')}
+OFFICIAL_GROUPS = {name: 'swebench_' + name for name in ('verified', 'dev', 'nonverified')}
+FAILED_GROUPS = {name: name + '-gold-patch-failed' for name in OFFICIAL_GROUPS}
+GROUPS = {**OFFICIAL_GROUPS, **{name: name for name in FAILED_GROUPS.values()}}
 SOURCES = {
     'verified': ('SWE-bench/SWE-bench_Verified', '78f471bf655a3137b2e8a75af1501690ec009ec3', 'test',
                  500, 'a6b0fd7c8c2969a0eef892e032250adcfa6d32362d395c246930e61b575ac9b9'),
@@ -135,7 +137,11 @@ def build_tasks(cfg, before, source, sets, rows, references):
             task = {'benchmark': GROUPS[group], 'revision': 'hf-' + source['sources'][group]['revision'],
                     'instance_id': iid, 'repo': row['repo'], 'base_commit': row['base_commit'],
                     'partition': 'train', 'exclusion_reason': None, 'instance': row}
-        task['benchmark'] = GROUPS[group]
+        # Keep explicit Gold Patch failure groups when refreshing official sources.
+        if task['benchmark'] not in FAILED_GROUPS.values():
+            task['benchmark'] = OFFICIAL_GROUPS[group]
+        elif task['benchmark'] != FAILED_GROUPS[group]:
+            raise ValueError('Gold Patch failure group disagrees with official source: ' + iid)
         task = Task.model_validate(task).model_dump()
         key = hash_json({field: task[field] for field in ('benchmark', 'revision', 'instance_id')})
         if key in tasks:
@@ -144,7 +150,8 @@ def build_tasks(cfg, before, source, sets, rows, references):
         mappings.append({'instance_id': iid, 'group': group, 'old_key': old_key, 'new_key': key})
     counts = collections.Counter(t['benchmark'] for t in tasks.values())
     missing = {group: sorted(sets[group] - {t['instance_id'] for t in tasks.values()
-                                         if t['benchmark'] == GROUPS[group]}) for group in ('verified', 'dev')}
+                                         if t['benchmark'] in {OFFICIAL_GROUPS[group], FAILED_GROUPS[group]}})
+               for group in ('verified', 'dev')}
     return tasks, mappings, dict(counts), missing
 
 

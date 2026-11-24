@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from benchmark_evaluation.swebench_settlement import official_result
 from benchmark_evaluation.swebench_verifier import classify, digest, summarize
 from core.io import identifier, read_json, sha256, write_json
 
@@ -18,8 +19,7 @@ def collect(output, evaluation_task_id, rollout_id, task, outcome, *, gold=False
         return _collect(output, evaluation_task_id, rollout_id, task, outcome, gold=gold)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return {"task": task, "identity": {"instance_id": task.get("instance_id")},
-                "official_result": {"completed": outcome.get("status") == "completed",
-                                    "resolved": outcome.get("resolved")},
+                "official_result": official_result(outcome),
                 "gold": gold, "collection_errors": [f"Cannot read attempt evidence: {type(exc).__name__}: {exc}"]}
 
 
@@ -41,13 +41,10 @@ def _collect(output, evaluation_task_id, rollout_id, task, outcome, *, gold=Fals
                      "harness_version": "swebench==" + version("swebench")},
         "task": task, "gold": gold,
         "eval_type": "fail_only" if task["repo"] in FAIL_ONLY_REPOS else "pass_and_fail",
-        "official_result": {"completed": outcome.get("status") == "completed",
-                            "resolved": outcome.get("resolved")},
+        "official_result": official_result(outcome),
         "report": {}, "statuses": {}, "parser_found": False, "test_output": "",
         "sources": [], "collection_errors": [], "environment": {},
     }
-    if outcome.get("official_result"):
-        document["official_result"] = dict(outcome["official_result"])
     captured = []
     raw_sources = {}
     if version("swebench") != "4.1.0":
@@ -259,8 +256,7 @@ def audit_run(root, run_id, output, *, rollout_ids=(), scope="all", labels=None)
         result = None
         if not attempts:
             document = {"task": task, "identity": {"instance_id": task["instance_id"]},
-                        "official_result": {"completed": outcome.get("status") == "completed",
-                                            "resolved": outcome.get("resolved")},
+                        "official_result": official_result(outcome),
                         "collection_errors": ["No physical evaluation attempt"], "gold": summary.get("gold", False)}
             if outcome.get("scoring_policy"):
                 # Empty submissions intentionally have no container attempt.
@@ -285,7 +281,7 @@ def audit_run(root, run_id, output, *, rollout_ids=(), scope="all", labels=None)
                     if not empty or observed.get("reason_code") != reason:
                         raise ValueError("Submission audit does not bind an empty input")
                     from benchmark_evaluation.swebench_settlement import project, validate
-                    replay = project(outcome.get("raw_outcome", {}), observed)
+                    replay = project(outcome.get("raw_outcome", {}), observed, gold=summary.get("gold") is True)
                     validate(replay)
                     if (replay["resolved"], replay["status"]) != (outcome["resolved"], outcome["status"]):
                         raise ValueError("Submission settlement and audit disagree")

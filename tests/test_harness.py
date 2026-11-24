@@ -49,7 +49,9 @@ def test_harness_failure_has_null_success(cfg, monkeypatch):
     )
     result = harness.evaluate(cfg, Path(cfg["project_root"]) / "runs/run", "bad", factory=factory)
     assert result["outcomes"][rid]["resolved"] is None
-    assert RunEvidence(cfg["project_root"], "run").read()["rollouts"][rid]["evaluation_status"] == "Review"
+    assert result["outcomes"][rid]["status"] == "infra_error"
+    assert result["outcomes"][rid]["verifier_audit"]["classification"] == "Unscored"
+    assert RunEvidence(cfg["project_root"], "run").read()["rollouts"][rid]["evaluation_status"] == "infra_error"
 
 
 def test_harness_retries_network_error_and_records_attempts(cfg, monkeypatch):
@@ -75,7 +77,7 @@ def test_harness_retries_network_error_and_records_attempts(cfg, monkeypatch):
     assert len(outcome["attempts"]) == 3
 
 
-def test_harness_marks_garbage_patch_as_failed_resolution(cfg, monkeypatch):
+def test_harness_leaves_unverified_patch_failure_unscored(cfg, monkeypatch):
     rid = import_fixture(cfg)
     cfg["selection"] = RunEvidence(cfg["project_root"], "source").select()
     official = SimpleNamespace(
@@ -88,9 +90,9 @@ def test_harness_marks_garbage_patch_as_failed_resolution(cfg, monkeypatch):
     factory = SimpleNamespace(lock_images=lambda x: None, client=None, deadline=Deadline(), cleanup_owned=lambda x: None)
     result = harness.evaluate(cfg, Path(cfg["project_root"]) / "runs/run", "garbage", factory=factory)
     outcome = result["outcomes"][rid]
-    assert outcome["status"] == "Review" and outcome["resolved"] is None
+    assert outcome["status"] == "completed_unknown" and outcome["resolved"] is None
     assert outcome["failure_type"] == "invalid_patch"
-    assert RunEvidence(cfg["project_root"], "run").read()["rollouts"][rid]["evaluation_status"] == "Review"
+    assert RunEvidence(cfg["project_root"], "run").read()["rollouts"][rid]["evaluation_status"] == "completed_unknown"
 
 
 def test_harness_exhausted_network_error_uses_connection_error_status(cfg, monkeypatch):
@@ -106,10 +108,11 @@ def test_harness_exhausted_network_error_uses_connection_error_status(cfg, monke
     factory = SimpleNamespace(lock_images=lambda x: None, client=None, deadline=Deadline(), cleanup_owned=lambda x: None)
     result = harness.evaluate(cfg, Path(cfg["project_root"]) / "runs/run", "exhausted", factory=factory)
     outcome = result["outcomes"][rid]
-    assert outcome["status"] == "Review" and outcome["resolved"] is None
+    assert outcome["status"] == "ConnectionError" and outcome["resolved"] is None
     assert outcome["failure_type"] == "network_error"
+    assert all(attempt["status"] == "ConnectionError" for attempt in outcome["attempts"])
     assert len(outcome["attempts"]) == 3
-    assert RunEvidence(cfg["project_root"], "run").read()["rollouts"][rid]["evaluation_status"] == "Review"
+    assert RunEvidence(cfg["project_root"], "run").read()["rollouts"][rid]["evaluation_status"] == "ConnectionError"
 
 @pytest.fixture(autouse=True)
 def unit_attempt_evidence(monkeypatch):

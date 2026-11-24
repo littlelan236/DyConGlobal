@@ -11,7 +11,8 @@ from core.io import hash_json, now, read_json, update_status, write_json
 from core.locking import exclusive_evaluation
 from runtime.containers.factory import ContainerFactory, TaskContext
 from runtime.containers.dependencies import classify_dependency_failure, from_exception, record_dependency_failure
-from benchmark_evaluation.swebench_settlement import POLICY as SCORING_POLICY, project
+from benchmark_evaluation.swebench_settlement import POLICY as SCORING_POLICY
+from benchmark_evaluation.swebench_settlement import official_result, project
 
 
 FAILURE_TYPES = ("invalid_patch", "network_error", "timeout", "dependency_error", "other_error")
@@ -242,6 +243,19 @@ def install_harness_adapter(cfg: dict, factory: ContainerFactory, rows: list[dic
     return official
 
 
+def _carry_forward_outcome(outcome, *, gold):
+    audit = outcome.get("verifier_audit", {})
+    settled = outcome.get("scoring_policy") == SCORING_POLICY
+    if settled and (gold or audit.get("classification") != "Review"):
+        return outcome
+    if not settled:
+        audit = {"classification": "Review", "reason_code": "legacy_unsettled_evaluation"}
+    updated = project(outcome, {**audit, "official_result": official_result(outcome)}, gold=gold)
+    if audit.get("path") and audit.get("sha256"):
+        updated["verifier_audit"]["source_audit"] = {k: audit[k] for k in ("path", "sha256")}
+    return updated
+
+
 @exclusive_evaluation
 def evaluate(cfg, run, eval_id, gold=False, factory=None, incremental=False):
     from core.io import owned_path, sha256
@@ -311,7 +325,7 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None, incremental=False):
                     "cause_confirmed": True, "diagnostic_status": "confirmed"}
                 audit_path = output / "verifier" / "submission" / f"{rid}.json"
                 write_json(audit_path, audit)
-                empty = project(empty, audit)
+                empty = project(empty, audit, gold=gold)
                 empty["verifier_audit"].update(path=str(audit_path), sha256=sha256(audit_path))
                 return rid, empty
             prediction = {"instance_id": iid, "model_name_or_path": rid, "model_patch": patch}
@@ -375,7 +389,7 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None, incremental=False):
                 audit = classify(audit_input)
                 audit_path = output / "verifier" / evaluation_task_id / f"{rid}.json"
                 write_json(audit_path, audit)
-                attempt_result = project(attempt_result, audit)
+                attempt_result = project(attempt_result, audit, gold=gold)
                 attempt_result["verifier_audit"].update(path=str(audit_path), sha256=sha256(audit_path))
                 attempts.append({
                     "attempt": attempt + 1, "evaluation_task_id": evaluation_task_id,
@@ -411,6 +425,8 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None, incremental=False):
                     continue
                 try:
                     prior = read_json(summary_path)
+                    if (prior.get("gold") is True) != gold:
+                        continue
                     cumulative_outcomes = {**prior.get("outcomes", {}), **cumulative_outcomes}
                     resolved_cfg = summary_path.parent / "resolved-config.json"
                     if resolved_cfg.exists():
@@ -419,16 +435,14 @@ def evaluate(cfg, run, eval_id, gold=False, factory=None, incremental=False):
                         historical_rows.update(prior_sel.get("rollouts", {}))
                 except (OSError, ValueError, TypeError):
                     continue
-        for rid, row in list(cumulative_outcomes.items()):
-            if row.get("scoring_policy") != SCORING_POLICY:
-                # Carrying an old unprojected score into a new incremental
-                # evaluation must not bypass current settlement. Re-evaluation
-                # can replace it; historical artifacts remain unchanged.
-                cumulative_outcomes[rid] = project(row, {
-                    "classification": "Review", "reason_code": "legacy_unsettled_evaluation",
-                    "effective_resolved": None, "policy_version": None,
-                    "official_result": {"completed": row.get("status") == "completed",
-                                        "resolved": row.get("resolved")}})
+        for rid in cumulative_outcomes.keys() - outcomes.keys():
+            row = cumulative_outcomes[rid]
+            updated = _carry_forward_outcome(row, gold=gold)
+            if not gold and row.get("attempts"):
+                updated = {**updated, "attempts": [
+                    _carry_forward_outcome(attempt, gold=False) if attempt.get("scoring_policy") == SCORING_POLICY
+                    else attempt for attempt in row["attempts"]]}
+            cumulative_outcomes[rid] = updated
         resolved = sum(row["resolved"] is True for row in cumulative_outcomes.values())
         summary = {
             "evaluation_id": eval_id,

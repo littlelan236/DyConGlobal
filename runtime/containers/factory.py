@@ -216,8 +216,12 @@ class ContainerFactory:
         self.lock_images([instance])
         volumes = ({e["wheelhouse"]: {"bind": "/opt/dycon-wheels", "mode": "ro"}}
                    if e["wheelhouse"] else {})
+        from runtime.containers.historical_runtime import mounts as runtime_mounts
+        from runtime.containers.tools import mounts as tool_mounts
         from runtime.containers.resources import mounts
         volumes.update(mounts(policy.cfg))
+        volumes.update(runtime_mounts(policy.cfg))
+        volumes.update(tool_mounts(policy.cfg))
         profile = self.cfg.get("execution_context", {}).get("profile", {})
         dependency_snapshot = profile.get("dependency_snapshot")
         if dependency_snapshot:
