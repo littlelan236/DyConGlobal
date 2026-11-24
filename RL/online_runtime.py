@@ -313,18 +313,37 @@ def validate_trajectory_coverage(batch: OnlineRolloutBatch, request: Mapping[str
                 or not group.get("group_id")):
             raise ValueError("invalid excluded online decision evidence")
         excluded_ids.add(trajectory)
+    from rollout.retry import ONLINE_SAMPLING_EXHAUSTED
     discarded_ids = set()
     policy = (request.get('deployment') or {}).get('failure_policy') or {}
     for item in batch.discarded_trajectories:
         tid = item.get('trajectory_id')
         retry_limit = item.get('retry_limit')
+        reason = item.get('reason')
+        verifier_failure = (reason == 'verifier_error_retries_exhausted'
+            and bool(item.get('evaluation_id')) and retry_limit == policy.get('verifier_error_retries'))
+        correlation_ids = item.get('correlation_ids')
+        capture_failure = (reason == 'capture_stop_retries_exhausted'
+            and item.get('step') == batch.step and bool(item.get('session_id'))
+            and item.get('missing_file') == 'receipt.json' and retry_limit == 1
+            and isinstance(correlation_ids, list) and len(correlation_ids) == 2
+            and all(isinstance(cid, str) and cid for cid in correlation_ids))
+        count = item.get('attempt_count')
+        bound_result = (item.get('step') == batch.step and bool(item.get('result_path'))
+                        and bool(item.get('result_sha256')) and type(count) is int
+                        and count > 0 and item.get('retry_count') == count - 1)
+        sampling_failure = (bound_result and reason == 'sampling_retries_exhausted'
+            and item.get('stage') == 'sampling' and item.get('failure_code') in ONLINE_SAMPLING_EXHAUSTED)
+        native_failure = (bound_result and reason == 'native_evidence_retries_exhausted'
+            and item.get('stage') == 'evidence' and retry_limit == 1
+            and isinstance(item.get('failure_codes'), list) and len(item['failure_codes']) == count
+            and all(isinstance(code, str) and code for code in item['failure_codes']))
+        proof_failure = ((verifier_failure or capture_failure or native_failure)
+            and bool(item.get('rollout_id')) and type(retry_limit) is int and retry_limit >= 0
+            and count == retry_limit + 1)
         if (tid in discarded_ids or tid in observed or tid in excluded_ids
                 or expected.get(tid) != (item.get('task_id'), item.get('source'))
-                or item.get('reason') != 'verifier_error_retries_exhausted'
-                or not item.get('evaluation_id') or not item.get('rollout_id')
-                or type(retry_limit) is not int or retry_limit < 0
-                or retry_limit != policy.get('verifier_error_retries')
-                or item.get('attempt_count') != retry_limit + 1):
+                or not (sampling_failure or proof_failure)):
             raise ValueError('invalid discarded online trajectory evidence')
         discarded_ids.add(tid)
     if observed | excluded_ids | discarded_ids != set(expected):
@@ -458,10 +477,12 @@ def online_torch_objective(logp_current: torch.Tensor, rollout_logp: torch.Tenso
     ratio = torch.exp((theta - denominator).clamp(-80, 80))
     clipped = ratio.clamp(1 - clip_epsilon, 1 + clip_epsilon)
     surrogate = torch.minimum(ratio * adv[:, None], clipped * adv[:, None])
-    delta = (kl_reference.float().detach() - theta) if kl_reference is not None else torch.zeros_like(theta)
-    raw_k3 = torch.expm1(delta.clamp(-80, 80)) - delta
-    if k3_cap is not None:
-        raw_k3 = raw_k3.clamp_max(float(k3_cap))
+    raw_k3 = None
+    if kl_beta:
+        delta = kl_reference.float().detach() - theta
+        raw_k3 = torch.expm1(delta.clamp(-80, 80)) - delta
+        if k3_cap is not None:
+            raw_k3 = raw_k3.clamp_max(float(k3_cap))
     alpha, beta = source_mass.normalized()
     source_losses = {}
     source_k3 = {}
@@ -487,10 +508,11 @@ def online_torch_objective(logp_current: torch.Tensor, rollout_logp: torch.Tenso
                 group_values.append((branch * weights).sum() / weights.sum())
             else:
                 group_values.append(branch.mean())
-            k3_values = raw_k3[idx].masked_fill(~mask[idx], 0).sum(dim=1) / counts
-            group_k3.append((k3_values * weights).sum() / weights.sum() if source == "baseline" else k3_values.mean())
+            if raw_k3 is not None:
+                k3_values = raw_k3[idx].masked_fill(~mask[idx], 0).sum(dim=1) / counts
+                group_k3.append((k3_values * weights).sum() / weights.sum() if source == "baseline" else k3_values.mean())
         policy = -torch.stack(group_values).mean()
-        penalty = torch.stack(group_k3).mean()
+        penalty = torch.stack(group_k3).mean() if group_k3 else policy.new_zeros(())
         source_losses[source] = float(policy.detach())
         source_k3[source] = float(penalty.detach())
         kl_total = kl_total + float(weight) * float(kl_beta) * penalty
@@ -565,24 +587,32 @@ def online_selected_logprobs(model, tensors, block_size=16):
 
 
 class TorchOnlineUpdater:
-    """Single-GPU LoRA updater for one prefetched online batch."""
+    """Whole-training-unit LoRA updater with optional SUM data parallelism."""
     def __init__(self, model, settings, *, source_mass: SourceMass, kl_beta: float = 0.0,
                  clip_epsilon: float = 0.1, k3_cap: float | None = None, reference_scorer=None,
-                 on_stage=None, baseline_training_mode="agent_step", max_trace_input_tokens=32768):
+                 on_stage=None, baseline_training_mode="agent_step", max_trace_input_tokens=32768,
+                 optimizer_pair=None, activation_offloader=None, max_trace_completion_tokens=None,
+                 kl_reference_mode="legacy"):
         from RL.training import optimizer_and_scheduler
         self.model = model
         self.settings = settings
-        self.optimizer, self.scheduler = optimizer_and_scheduler(model, settings)
+        self.optimizer, self.scheduler = (optimizer_pair if optimizer_pair is not None
+                                          else optimizer_and_scheduler(model, settings))
         self.source_mass = source_mass
         self.kl_beta = kl_beta
         self.clip_epsilon = clip_epsilon
         self.k3_cap = k3_cap
         self.reference_scorer = reference_scorer
+        if kl_reference_mode not in {"legacy", "recompute"}:
+            raise ValueError("Invalid KL reference computation")
+        self.kl_reference_mode = kl_reference_mode
         self.on_stage = on_stage
+        self.activation_offloader = activation_offloader
         if baseline_training_mode not in {"agent_step", "prefix_trace"}:
             raise ValueError("invalid baseline training mode")
         self.baseline_training_mode = baseline_training_mode
         self.max_trace_input_tokens = max_trace_input_tokens
+        self.max_trace_completion_tokens = max_trace_completion_tokens
 
     def _stage(self, name, **fields):
         if self.on_stage is not None:
@@ -599,6 +629,8 @@ class TorchOnlineUpdater:
         import torch
         import time
         started = time.monotonic()
+        from RL.parallel import current as parallel_context
+        parallel = parallel_context()
         from RL.grpo.objective import selected_logprobs
         self.model.train()
         device = next(self.model.parameters()).device
@@ -616,71 +648,14 @@ class TorchOnlineUpdater:
                     'policy_version': policy_version, 'estimator_version': estimator_version,
                     'rollout_policy_version': batch.policy_version,
                     'rollout_estimator_version': batch.estimator_version}
-        original_rows = rows
-        trace_receipt = None
-        build_started = time.monotonic()
-        if self.baseline_training_mode == "prefix_trace":
-            from RL.online_trace import build_training_traces
-            rows, masses, trace_receipt = build_training_traces(
-                rows, masses, max_input_tokens=self.max_trace_input_tokens)
-            for module in self.model.modules():
-                if isinstance(module, torch.nn.Dropout) and module.p:
-                    raise ValueError("prefix_trace requires disabled training dropout")
-        build_seconds = time.monotonic() - build_started
-        self.optimizer.zero_grad(set_to_none=True)
-        alpha, beta = source_mass.normalized()
-        metrics = {"loss": 0.0, "source_losses": {}, "source_k3": {},
-                   "token_count": 0, "row_count": len(rows),
-                   "dycon_rows": sum(r.source == "dycon" for r in rows),
-                   "baseline_rows": sum(r.source == "baseline" for r in rows),
-                   "source_mass": {"dycon": alpha, "baseline": beta},
-                   "forward_rows_max": 1}
-        if trace_receipt is not None:
-            metrics["trace_training"] = trace_receipt
-        metrics["discarded_trajectories"] = list(batch.discarded_trajectories)
-        metrics["trace_build_seconds"] = build_seconds
-        metrics["original_row_count"] = len(original_rows)
-        metrics["source_compute_seconds"] = {}
-        ratio_sum = 0.0
         from RL.gradient_attribution import GradientAttribution
         attribution = GradientAttribution([p for p in self.model.parameters() if p.requires_grad])
-        for ordinal, (row, coefficient) in enumerate(zip(rows, masses)):
-            if not coefficient:
-                continue
-            if device.type == "cuda":
-                torch.cuda.synchronize(device)
-            row_started = time.monotonic()
-            tensors = collate_rows([row], device=device)
-            self._stage("online_row_forward", inflight_update=step + 1,
-                        online_row=ordinal, online_rows_total=len(rows),
-                        online_source=row.source, input_tokens=len(row.input_token_ids))
-            if self.kl_beta and tensors["kl_reference_logprobs"] is None and self.reference_scorer is not None:
-                tensors["kl_reference_logprobs"] = self.reference_scorer(tensors)
-            # Full historical context stays in the autograd graph. Each row is
-            # an agent-step completion, never an independently detached suffix.
-            current, mask = online_selected_logprobs(self.model, tensors,
-                block_size=getattr(getattr(self.settings, "memory", None), "loss_chunk_tokens", 16))
-            unit_mass = SourceMass(1.0, 0.0) if row.source == "dycon" else SourceMass(0.0, 1.0)
-            terms = {}
-            loss, local = online_torch_objective(
-                current, tensors["rollout_logprobs"], tensors["kl_reference_logprobs"],
-                torch.tensor([row.advantage], device=device), mask, [row.source],
-                {row.source: [[0]]}, source_mass=unit_mass,
-                clip_epsilon=self.clip_epsilon, kl_beta=self.kl_beta, k3_cap=self.k3_cap,
-                differentiable_terms=terms)
-            self._stage("online_row_backward", online_row=ordinal)
-            attribution.backward(loss * coefficient, row.source,
-                                 terms["weighted_kl"] * coefficient if self.kl_beta else None)
-            if device.type == "cuda":
-                torch.cuda.synchronize(device)
-            metrics["source_compute_seconds"][row.source] = metrics["source_compute_seconds"].get(row.source, 0.) + time.monotonic() - row_started
-            metrics["loss"] += coefficient * local["loss"]
-            mass = alpha if row.source == "dycon" else beta
-            for field in ("source_losses", "source_k3"):
-                metrics[field][row.source] = metrics[field].get(row.source, 0.0) + coefficient / mass * local[field][row.source]
-            ratio_sum += local["ratio_mean"] * local["token_count"]
-            metrics["token_count"] += local["token_count"]
-            del current, mask, tensors, loss, terms
+        self.optimizer.zero_grad(set_to_none=True)
+        rows, metrics, ratio_sum = self.accumulate(
+            batch, masses, source_mass, step, attribution=attribution, parallel=parallel)
+        if parallel:
+            from RL.online_parallel import finish_contributions
+            ratio_sum = finish_contributions(parallel, self.model, attribution, metrics, ratio_sum)
         metrics["ratio_mean"] = ratio_sum / max(metrics["token_count"], 1)
         params = [p for p in self.model.parameters() if p.requires_grad]
         self._stage("optimizer_update", online_row=len(rows), online_rows_total=len(rows))
@@ -702,6 +677,107 @@ class TorchOnlineUpdater:
                         "excluded_groups": len(batch.excluded_groups),
                         "update_seconds": time.monotonic() - started})
         return metrics
+
+
+    def accumulate(self, batch, masses, source_mass, step, *, attribution, parallel=None):
+        """Accumulate local trajectory gradients without reducing or committing them."""
+        import torch
+        import time
+
+        rows = batch.rows
+        device = next(self.model.parameters()).device
+        original_rows = rows
+        trace_receipt = None
+        build_started = time.monotonic()
+        self._stage("trace_build", agent_step_rows=len(rows))
+        if self.baseline_training_mode == "prefix_trace":
+            from RL.online_trace import build_training_traces
+            rows, masses, trace_receipt = build_training_traces(
+                rows, masses, max_input_tokens=self.max_trace_input_tokens,
+                max_completion_tokens=self.max_trace_completion_tokens)
+            for module in self.model.modules():
+                if isinstance(module, torch.nn.Dropout) and module.p:
+                    raise ValueError("prefix_trace requires disabled training dropout")
+        build_seconds = time.monotonic() - build_started
+        self._stage("trace_build_done", training_units=len(rows))
+        alpha, beta = source_mass.normalized()
+        metrics = {"loss": 0.0, "source_losses": {}, "source_k3": {},
+                   "token_count": 0, "row_count": len(rows),
+                   "dycon_rows": sum(r.source == "dycon" for r in rows),
+                   "baseline_rows": sum(r.source == "baseline" for r in rows),
+                   "source_mass": {"dycon": alpha, "baseline": beta},
+                   "forward_rows_max": 1}
+        if trace_receipt is not None:
+            metrics["trace_training"] = trace_receipt
+        metrics["discarded_trajectories"] = list(batch.discarded_trajectories)
+        metrics["trace_build_seconds"] = build_seconds
+        metrics["original_row_count"] = len(original_rows)
+        metrics["source_compute_seconds"] = {}
+        ratio_sum = 0.0
+        for ordinal, (row, coefficient) in enumerate(zip(rows, masses)):
+            if not coefficient or (parallel and ordinal % parallel.world_size != parallel.rank):
+                continue
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            row_started = time.monotonic()
+            self._stage("online_row_start", inflight_update=step + 1,
+                        online_row=ordinal, online_rows_total=len(rows),
+                        online_source=row.source, input_tokens=len(row.input_token_ids),
+                        task_id=row.task_id, trajectory_id=row.trajectory_id,
+                        completion_tokens=len(row.completion_token_ids))
+            from contextlib import nullcontext
+
+            offloader = self.activation_offloader
+            scope = (offloader.trace_scope(len(row.input_token_ids), self._stage)
+                     if offloader is not None and offloader.trace_admission is not None else nullcontext())
+            with scope:
+                tensors = collate_rows([row], device=device)
+                needs_reference = self.kl_beta and (self.kl_reference_mode == "recompute"
+                                                   or tensors["kl_reference_logprobs"] is None)
+                if needs_reference and self.reference_scorer is None:
+                    raise ValueError("Frozen KL reference scorer is required")
+                if needs_reference:
+                    self._stage("online_reference_forward")
+                    with torch.no_grad():
+                        reference = self.reference_scorer(tensors)
+                    if reference.requires_grad:
+                        raise RuntimeError("KL reference must not require gradients")
+                    tensors["kl_reference_logprobs"] = reference.detach()
+                # Full historical context stays in the autograd graph. Each row is
+                # an agent-step completion, never an independently detached suffix.
+                self._stage("online_policy_forward")
+                with offloader.context() if offloader is not None and offloader.enabled else nullcontext():
+                    current, mask = online_selected_logprobs(
+                        self.model, tensors, block_size=self.settings.memory.loss_chunk_tokens
+                        if hasattr(self.settings, "memory") else 16)
+                unit_mass = SourceMass(1.0, 0.0) if row.source == "dycon" else SourceMass(0.0, 1.0)
+                terms = {}
+                loss, local = online_torch_objective(
+                    current, tensors["rollout_logprobs"], tensors["kl_reference_logprobs"],
+                    torch.tensor([row.advantage], device=device), mask, [row.source],
+                    {row.source: [[0]]}, source_mass=unit_mass,
+                    clip_epsilon=self.clip_epsilon, kl_beta=self.kl_beta, k3_cap=self.k3_cap,
+                    differentiable_terms=terms)
+                self._stage("online_row_backward", online_row=ordinal)
+                if attribution is None:
+                    (loss * coefficient).backward()
+                else:
+                    attribution.backward(loss * coefficient, row.source,
+                                         terms["weighted_kl"] * coefficient if self.kl_beta else None)
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                self._stage("online_row_done", online_row=ordinal)
+                metrics["source_compute_seconds"][row.source] = metrics["source_compute_seconds"].get(row.source, 0.) + time.monotonic() - row_started
+                metrics["loss"] += coefficient * local["loss"]
+                mass = alpha if row.source == "dycon" else beta
+                for field in ("source_losses", "source_k3"):
+                    metrics[field][row.source] = metrics[field].get(row.source, 0.0) + coefficient / mass * local[field][row.source]
+                ratio_sum += local["ratio_mean"] * local["token_count"]
+                metrics["token_count"] += local["token_count"]
+                del current, mask, tensors, loss, terms
+                if offloader is not None and offloader.enabled:
+                    offloader.reclaim_completed()
+        return rows, metrics, ratio_sum
 
 
 def manifest_sha256(path: str | Path) -> str:

@@ -274,3 +274,9 @@ events.out.tfevents.*
 /migration/releases/
 /runtime/backend-snapshots/
 /runtime/resource-cache-runtime/
+
+# Online training state and machine-bound bootstrap/experiment invocations
+/runtime/online-training/
+/config.bootstrap-*.yaml
+/experiment-configs/*-gpu[0-9]*.yaml
+/experiment-configs/*-train[0-9]*-rollout[0-9]*.yaml

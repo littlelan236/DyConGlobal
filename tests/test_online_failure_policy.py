@@ -275,3 +275,19 @@ def test_agent_limit_fact_does_not_accept_capture_or_other_failures():
     for status in ['CaptureError','APIError','ContainerCorrupted','Cancelled']:
         assert not sample_accepted(config(), {'online_source':'baseline',
             'exit_status':status,'agent_exit_status':'LimitsExceeded','disposition':'blocked'})
+
+
+def test_capture_discard_keeps_valid_rows_and_accepts_empty_batch():
+    failure = {'reason': 'capture_stop_retries_exhausted', 'step': 0,
+               'task_id': 'task', 'source': 'dycon', 'trajectory_id': 'd',
+               'rollout_id': 'roll', 'session_id': 'session', 'missing_file': 'receipt.json',
+               'retry_limit': 1, 'attempt_count': 2, 'correlation_ids': ['try1', 'try2']}
+    batch = OnlineRolloutBatch(0, ('task',), 'S0', 'E0', (row(),), request_sha256='sha',
+                               discarded_trajectories=(failure,))
+    validate_trajectory_coverage(batch, request())
+    assert online_row_masses(batch.rows, effective_source_mass(batch, SourceMass())) == [1.0]
+    empty = replace(batch, rows=(), discarded_trajectories=(failure, discard('baseline', 'b')))
+    validate_trajectory_coverage(OnlineRolloutBatch.from_dict(empty.as_dict()), request())
+    for bad in ({**failure, 'attempt_count': 1}, {**failure, 'missing_file': 'session.json'}):
+        with pytest.raises(ValueError, match='invalid discarded'):
+            validate_trajectory_coverage(replace(batch, discarded_trajectories=(bad,)), request())

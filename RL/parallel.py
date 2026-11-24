@@ -22,6 +22,10 @@ def execution_contract(config):
     if is_full(config):
         return {"version": "fsdp2_branch_rounds_v1", "world_size": count,
                 "gradient_reduction": "fsdp2_mean", "loss_scaling": "world_over_parents_over_branches"}
+    if (config.algorithm is not None and config.algorithm.name in {"online_bootstrap_grpo_v1", "offline_baseline_grpo_v1", "key_step_grpo_v1"}
+            and count > 1):
+        return {"version": "online_training_unit_sum_v1", "world_size": count,
+                "assignment": "training_unit_ordinal_mod_world_size", "gradient_reduction": "sum_fp32"}
     from RL.grpo.execution import enabled, SCHEDULE, PARTITION, WEIGHT
     if enabled(config):
         return {"version": SCHEDULE, "world_size": count,
@@ -282,6 +286,8 @@ def _worker(rank, config, root, directory, base, parent, attempt, store, result_
 def follower(config, root, directory, parent, model, targets, *, optimizer_settings, mlps=(), offloader=None,
              memory_controller=None):
     """Attach read-only prepared/reference artifacts published once by rank zero."""
+    from RL.offline_baseline import build_updater as baseline_updater
+    from RL.policy_reference import dycon_scorer
     context = current()
     shared = context.broadcast()
     contract, state, stop = shared["contract"], shared["state"], shared["stop"]
@@ -297,7 +303,8 @@ def follower(config, root, directory, parent, model, targets, *, optimizer_setti
         from RL.memory import attention_context
         from RL.profiling import UpdateTelemetry
         objective = GroupObjective(groups.reference, config.grpo, config.training.memory.loss_chunk_tokens,
-                                   offloader=offloader)
+                                   offloader=offloader,
+                                   reference_scorer=dycon_scorer(config, model, shared["directory"]))
         optimizer, scheduler = optimizer_and_scheduler(model, optimizer_settings)
         telemetry = UpdateTelemetry(model, objective, mlps, offloader, directory,
                                     config.training.memory.profile_first_update,
@@ -315,7 +322,9 @@ def follower(config, root, directory, parent, model, targets, *, optimizer_setti
                     grad_clip=config.training.grad_clip,
                     on_update=lambda *_: telemetry.finish(), parallel=context,
                     on_window_start=telemetry.start, memory_controller=memory_controller,
-                    on_attempt_abort=telemetry.abort)
+                    on_attempt_abort=telemetry.abort,
+                    baseline=baseline_updater(config, model, shared["directory"], contract, optimizer, scheduler,
+                                              memory_controller=memory_controller))
         finally:
             telemetry.close()
             groups.close()
@@ -338,7 +347,8 @@ def follower(config, root, directory, parent, model, targets, *, optimizer_setti
         groups = PreparedGroups(prepared_reader)
     reference = validate_reference_files(Path(shared["directory"]), contract)
     objective = GroupObjective(reference, config.grpo, config.training.memory.loss_chunk_tokens,
-                               offloader=offloader)
+                               offloader=offloader,
+                               reference_scorer=dycon_scorer(config, model, shared["directory"]))
     optimizer, scheduler = optimizer_and_scheduler(model, optimizer_settings)
     if parent and config.run.start.mode in {"resume", "append_resume"}:
         from core.io import read_json
@@ -355,7 +365,9 @@ def follower(config, root, directory, parent, model, targets, *, optimizer_setti
                 max_updates=stop, group_batch_size=config.grpo.group_batch_size,
                 grad_clip=config.training.grad_clip, on_window_start=telemetry.start,
                 on_update=lambda *_: telemetry.finish(), parallel=context,
-                memory_controller=memory_controller, on_attempt_abort=telemetry.abort)
+                memory_controller=memory_controller, on_attempt_abort=telemetry.abort,
+                    baseline=baseline_updater(config, model, shared["directory"], contract, optimizer, scheduler,
+                                              memory_controller=memory_controller))
     finally:
         telemetry.close()
     states = context.gather(result)

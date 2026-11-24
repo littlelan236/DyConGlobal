@@ -24,4 +24,15 @@ def verifier_error(outcome):
 
 def verifier_discard(outcome):
     marker = (outcome or {}).get('online_rl_discard') or {}
-    return marker.get('reason') == 'verifier_error_retries_exhausted' and verifier_error(outcome)
+    return marker.get('reason') == 'verifier_error_retries_exhausted' and verifier_needs_retry(outcome)
+
+
+def verifier_needs_retry(outcome):
+    if verifier_error(outcome):
+        return True
+    official = outcome.get('official_result') if isinstance(outcome, dict) else None
+    audit = (outcome.get('verifier_audit') or {}) if isinstance(outcome, dict) else {}
+    return (isinstance(official, dict) and type(official.get('resolved')) is not bool
+            and not (audit.get('classification') == 'ValidOutcome'
+                     and audit.get('reason_code') == 'missing_patch'
+                     and outcome.get('resolved') is False))

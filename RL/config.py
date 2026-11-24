@@ -30,6 +30,7 @@ class Start(Strict):
     mode: Literal["fresh", "resume", "warm_start", "append_resume"]
     checkpoint: str | None
     extension_manifest: str | None = None
+    extend_baseline_epochs: bool = False
     config_migration: ConfigMigration | None = None
     optimizer_backend_migration: ConfigMigration | None = None
 
@@ -37,6 +38,8 @@ class Start(Strict):
     def check_start(self):
         if (self.mode == "fresh") != (self.checkpoint is None):
             raise ValueError("fresh requires null checkpoint; resume/warm_start require a concrete directory")
+        if self.extend_baseline_epochs and self.mode != "resume":
+            raise ValueError("extend_baseline_epochs requires resume")
         if (self.mode == "append_resume") != (self.extension_manifest is not None):
             raise ValueError("append_resume requires an explicit extension_manifest; other modes forbid it")
         return self
@@ -154,7 +157,9 @@ class Memory(Strict):
     exact_length: bool = False
     attention_policy: Literal["auto", "flash_only"] = "auto"
     activation_offload: Literal["none", "checkpoint_boundary", "auto", "memory_pressure"] = "none"
-    host_budget_gib: PositiveFloat = 64.0
+    host_budget_gib: PositiveFloat | None = 64.0
+    shared_trace_host_budget_gib: PositiveFloat | None = None
+    offload_host_reserve_gib: NonnegativeFloat = 0.0
     profile_first_update: bool = False
     auto_offload: "AutoOffload" = Field(default_factory=lambda: AutoOffload())
     oom_retry: "OOMRetry" = Field(default_factory=lambda: OOMRetry())
@@ -165,6 +170,16 @@ class Memory(Strict):
 
     @model_validator(mode="after")
     def check_pressure(self):
+        shared = self.shared_trace_host_budget_gib
+        if shared is None and self.host_budget_gib is None:
+            raise ValueError("host_budget_gib=null requires a shared trace host budget")
+        if shared is not None and (
+                self.host_budget_gib is not None or self.activation_offload != "checkpoint_boundary"
+                or not self.offload_host_reserve_gib or not self.host_offload.enabled
+                or self.host_offload.reclaim_policy != "after_use"
+                or self.host_offload.allocator_budget_gib != shared):
+            raise ValueError("Shared trace budget requires host_budget_gib=null, checkpoint_boundary, "
+                             "a host reserve and managed after_use reclamation with the same budget")
         adam = self.adam_moment_offload
         if adam.mode != "disabled":
             if not self.host_offload.enabled:
@@ -204,7 +219,7 @@ class MemoryTelemetry(Strict):
 
 
 class Training(Strict):
-    max_updates: PositiveInt
+    max_updates: PositiveInt | None = None
     gradient_accumulation_steps: PositiveInt
     learning_rate: PositiveFloat
     weight_decay: NonnegativeFloat
@@ -219,7 +234,7 @@ class Training(Strict):
 
     @model_validator(mode="after")
     def check_warmup(self):
-        if self.warmup_updates > self.max_updates:
+        if self.max_updates is not None and self.warmup_updates > self.max_updates:
             raise ValueError("training.warmup_updates cannot exceed max_updates")
         return self
 
@@ -233,7 +248,7 @@ class Validation(Strict):
 
 
 class Algorithm(Strict):
-    name: Literal["offline_grpo_k3_v1", "online_bootstrap_grpo_v1"]
+    name: Literal["offline_grpo_k3_v1", "online_bootstrap_grpo_v1", "offline_baseline_grpo_v1", "key_step_grpo_v1"]
     dataset_root: str | None = None
     dataset_id: str | None = None
     require_data_ready: Literal[True] = True
@@ -278,6 +293,10 @@ class OnlineBootstrap(Strict):
     max_trace_input_tokens: PositiveInt = 32768
     baseline_failure_reward: Annotated[float, Field(lt=0, allow_inf_nan=False)] | None = None
     verifier_error_retries: NonnegativeInt | None = None
+    attribution_every: int = Field(default=0, ge=0)
+    coverage_window: PositiveInt = 10
+    limits_exceeded_target: int = Field(default=0, ge=0)
+    reasoning_loop_target: int = Field(default=0, ge=0)
     dycon_weight: NonnegativeFloat = 0.5
     baseline_weight: NonnegativeFloat = 0.5
     shuffle_seed: Annotated[int, Field(ge=0, lt=2**32)] = 42
@@ -443,6 +462,103 @@ class PreparedBinding(Strict):
         return self
 
 
+class OfflineBaseline(Strict):
+    epochs: PositiveInt = 1
+    dataset: str
+    advantage_mode: Literal["direct", "task_grpo"] = "direct"
+    seed: int = 0
+    tasks_per_update: PositiveInt = 4
+    trajectories_per_task: PositiveInt = 8
+    attribution_every: int = Field(default=0, ge=0)
+    coverage_window: PositiveInt = 10
+    limits_exceeded_target: int = Field(default=0, ge=0)
+    reasoning_loop_target: int = Field(default=0, ge=0)
+    dycon_weight: NonnegativeFloat = 0.5
+    baseline_weight: NonnegativeFloat = 0.5
+    kl_beta: NonnegativeFloat = 0.02
+    clip_epsilon: Annotated[float, Field(gt=0, lt=1)] = 0.1
+    k3_cap: PositiveFloat | None = None
+    max_trace_input_tokens: PositiveInt | None = 32768
+    max_trace_completion_tokens: PositiveInt | None = None
+
+
+class KeySteps(Strict):
+    dataset: str
+    epochs: PositiveInt = 1
+    groups_per_update: PositiveInt = 1
+    seed: int = 0
+    kl_beta: NonnegativeFloat = 0.02
+    clip_epsilon: Annotated[float, Field(gt=0, lt=1)] = 0.1
+    k3_cap: PositiveFloat | None = None
+    max_trace_input_tokens: PositiveInt | None = 32768
+    max_trace_completion_tokens: PositiveInt | None = None
+
+
+class KLObjective(Strict):
+    computation: Literal["legacy", "recompute"] = "legacy"
+    beta: NonnegativeFloat = 0.02
+    k3_cap: Annotated[float, Field(gt=0, le=3.4028234663852886e38, allow_inf_nan=False)] | None = None
+
+
+class PPOObjective(Strict):
+    clip_epsilon: Annotated[float, Field(gt=0, lt=1)] = 0.1
+
+
+class PolicyObjective(Strict):
+    kl: KLObjective = Field(default_factory=KLObjective)
+    ppo: PPOObjective = Field(default_factory=PPOObjective)
+
+
+def _resolve_policy_objective(raw):
+    """Project shared settings into the historical execution contracts."""
+    if not isinstance(raw, dict):
+        return raw
+    raw = dict(raw)
+    algorithm = (raw.get("algorithm") or {}).get("name")
+    objective = raw.get("objective")
+    active = {
+        "offline_grpo_k3_v1": ("grpo", "offline_baseline"),
+        "offline_baseline_grpo_v1": ("offline_baseline",),
+        "key_step_grpo_v1": ("key_steps",),
+        "online_bootstrap_grpo_v1": ("online_bootstrap",),
+    }.get(algorithm, ())
+    blocks = {key: dict(raw[key]) for key in active if isinstance(raw.get(key), dict)}
+    if not blocks:
+        if objective is not None:
+            raise ValueError("objective requires an RL algorithm configuration")
+        return raw
+    common = PolicyObjective.model_validate(objective if objective is not None else {})
+    effective = {"kl": {"computation": common.kl.computation}, "ppo": {}}
+    for section, field, legacy in (("kl", "beta", "kl_beta"), ("kl", "k3_cap", "k3_cap"),
+                                   ("ppo", "clip_epsilon", "clip_epsilon")):
+        settings = getattr(common, section)
+        candidates = {key: block[legacy] for key, block in blocks.items() if legacy in block}
+        if field in settings.model_fields_set:
+            resolved = getattr(settings, field)
+            candidates["objective." + section] = resolved
+        else:
+            if objective is None:
+                # An omitted legacy field had its own default in every mode.
+                candidates = {key: block.get(legacy, getattr(settings, field)) for key, block in blocks.items()}
+            resolved = next(iter(candidates.values()), getattr(settings, field))
+        for value in candidates.values():
+            type(settings).model_validate({field: value})
+        if any(value != resolved for value in candidates.values()):
+            raise ValueError(f"Conflicting {legacy} settings: {candidates}")
+        effective[section][field] = resolved
+        for block in blocks.values():
+            block[legacy] = resolved
+    if algorithm == "offline_baseline_grpo_v1" and "offline_baseline" in blocks:
+        blocks["offline_baseline"].setdefault("dycon_weight", 0.0)
+    if "online_bootstrap" in blocks:
+        for field, default in (("coverage_window", 10), ("limits_exceeded_target", 0), ("reasoning_loop_target", 0)):
+            if field in blocks["online_bootstrap"] and blocks["online_bootstrap"][field] != default:
+                raise ValueError(f"online_bootstrap.{field} is only supported by offline baseline sampling")
+    raw.update(blocks)
+    raw["objective"] = effective
+    return raw
+
+
 class Config(Strict):
     schema_version: Literal[1, 2]
     run: Run
@@ -459,26 +575,67 @@ class Config(Strict):
     online_bootstrap: OnlineBootstrap | None = None
     preflight: Preflight = Field(default_factory=Preflight)
     prepared_data: PreparedBinding | None = None
+    offline_baseline: OfflineBaseline | None = None
+    objective: PolicyObjective | None = None
+    key_steps: KeySteps | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_policy_objective(cls, raw):
+        return _resolve_policy_objective(raw)
 
     @model_validator(mode="after")
     def check_stop(self):
         full = self.tuning is not None and self.tuning.mode == "full"
+        if full and self.objective is not None and self.objective.kl.computation == "recompute":
+            raise ValueError("Frozen KL recomputation currently requires LoRA; full-policy needs a separate frozen model")
         online = self.algorithm is not None and self.algorithm.name == "online_bootstrap_grpo_v1"
+        baseline = self.algorithm is not None and self.algorithm.name == "offline_baseline_grpo_v1"
+        key_step = self.algorithm is not None and self.algorithm.name == "key_step_grpo_v1"
+        if key_step != (self.key_steps is not None):
+            raise ValueError("key_step_grpo_v1 requires only its explicit key_steps block")
+        if key_step:
+            if (full or self.lora is None or self.grpo is not None or self.offline_baseline is not None
+                    or self.prepared_data is not None or self.run.start.mode not in {"fresh","resume","warm_start"}
+                    or self.runtime.topology_policy != "exact" or self.algorithm.group_ids
+                    or self.run.start.config_migration is not None
+                    or self.training.gradient_accumulation_steps != 1 or self.training.supervision.mode != "labels"):
+                raise ValueError("Key-step groups require LoRA, exact topology, labels, accumulation=1 and fresh/resume/warm_start")
+        if self.run.start.extend_baseline_epochs and not baseline:
+            raise ValueError("extend_baseline_epochs requires baseline-only training")
+        if not online and self.online_bootstrap is not None:
+            raise ValueError("online_bootstrap requires algorithm.name=online_bootstrap_grpo_v1")
+        mixed = (self.grpo is not None and self.offline_baseline is not None and not full and not online)
+        if self.training.memory.shared_trace_host_budget_gib is not None and not (baseline or key_step or mixed):
+            raise ValueError("Shared trace host admission requires baseline, key-step or mixed offline LoRA training")
+        if baseline and (self.offline_baseline is None or self.offline_baseline.dycon_weight != 0 or self.offline_baseline.baseline_weight <= 0):
+            raise ValueError("baseline-only algorithm requires dycon_weight=0 and baseline_weight>0")
+        if baseline and (self.grpo is not None or self.prepared_data is not None
+                         or self.run.start.mode not in {"fresh", "resume", "warm_start"}):
+            raise ValueError("baseline-only uses no DyCon grpo/prepared_data and supports fresh/resume/warm_start")
+        if self.offline_baseline is not None:
+            mixed = self.offline_baseline
+            if full or online or (self.grpo is None and not baseline) or self.run.start.mode == "append_resume":
+                raise ValueError("offline_baseline requires offline LoRA GRPO without append_resume")
+            if not math.isfinite(mixed.dycon_weight + mixed.baseline_weight) or not (mixed.dycon_weight + mixed.baseline_weight):
+                raise ValueError("offline baseline source weights must be finite with positive sum")
         if online:
             if self.schema_version != 2 or self.tuning is None or self.tuning.mode != "lora" or self.lora is None:
                 raise ValueError("online bootstrap currently requires schema 2 LoRA")
             if self.online_bootstrap is None:
                 raise ValueError("online_bootstrap configuration is required")
             expected_updates = math.ceil(len(self.online_bootstrap.tasks) / self.online_bootstrap.n) * self.online_bootstrap.epochs
+            if self.training.max_updates is None:
+                self.training.max_updates = expected_updates
+            if self.training.warmup_updates > expected_updates:
+                raise ValueError("training.warmup_updates cannot exceed the online schedule")
             if self.training.max_updates != expected_updates:
                 raise ValueError("training.max_updates must equal online epochs * task batches")
             if self.validation.stop_after_update is not None and self.validation.stop_after_update >= expected_updates:
                 raise ValueError("stop_after_update must precede the complete online schedule target")
             if self.grpo is not None or self.prepared_data is not None:
                 raise ValueError("online bootstrap does not use offline grpo/prepared_data")
-            if self.runtime.gpus is not None and len(self.runtime.gpus) > 1:
-                raise ValueError("online bootstrap trainer currently uses one training GPU")
-            if self.online_bootstrap.rollout_gpus is not None and self.runtime.gpu in self.online_bootstrap.rollout_gpus:
+            if self.online_bootstrap.rollout_gpus is not None and set(self.runtime.gpus or [self.runtime.gpu]) & set(self.online_bootstrap.rollout_gpus):
                 raise ValueError("rollout_gpus must not overlap the online trainer GPU")
             if self.training.gradient_accumulation_steps != 1 or self.training.supervision.mode != "labels":
                 raise ValueError("online bootstrap requires labels and gradient_accumulation_steps=1")
@@ -543,6 +700,16 @@ class Config(Strict):
             raise ValueError("append_resume requires offline GRPO")
         if self.prepared_data is not None and self.algorithm is None:
             raise ValueError("prepared_data requires offline GRPO")
+        if self.training.max_updates is None:
+            if not (baseline or key_step):
+                raise ValueError("training.max_updates is required for this training mode")
+            if key_step:
+                from RL.key_steps import schedule
+            else:
+                from RL.offline_baseline import schedule
+            self.training.max_updates = schedule(self)["max_updates"]
+            if self.training.warmup_updates > self.training.max_updates:
+                raise ValueError("training.warmup_updates cannot exceed the baseline schedule")
         stop = self.validation.stop_after_update
         if stop is not None and stop >= self.training.max_updates:
             raise ValueError("stop_after_update must precede the complete schedule target")
@@ -724,6 +891,12 @@ def load(path, project_root):
     source = absolute(project_root, str(path))
     raw = yaml.load(source.read_text(encoding="utf-8"), Loader=UniqueLoader)
     raw = online_training_defaults(raw, project_root)
+    if isinstance(raw, dict) and (raw.get("algorithm") or {}).get("name") == "offline_baseline_grpo_v1":
+        baseline = raw.get("offline_baseline")
+        if isinstance(baseline, dict) and isinstance(baseline.get("dataset"), str):
+            baseline["dataset"] = str(absolute(project_root, baseline["dataset"]))
+    if isinstance(raw,dict) and isinstance(raw.get("key_steps"),dict) and isinstance(raw["key_steps"].get("dataset"),str):
+        raw["key_steps"]["dataset"]=str(absolute(project_root,raw["key_steps"]["dataset"]))
     config = Config.model_validate(raw)
     config.model.path = str(absolute(project_root, config.model.path))
     config.runtime.output_root = str(absolute(project_root, config.runtime.output_root))
@@ -746,6 +919,8 @@ def load(path, project_root):
         config.run.start.extension_manifest = str(absolute(project_root, config.run.start.extension_manifest))
     if config.prepared_data is not None:
         config.prepared_data.root = str(absolute(project_root, config.prepared_data.root))
+    if config.offline_baseline is not None:
+        config.offline_baseline.dataset = str(absolute(project_root, config.offline_baseline.dataset))
     attempt_directory(config)
     return config, source
 
@@ -761,6 +936,8 @@ def schedule_contract(config):
         "training": {**config.training.model_dump(), "memory": memory_contract(config.training.memory)},
         "validation": config.validation.model_dump(exclude={"stop_after_update", "skip_checkpoint_export", "capacity_microsteps"}),
     }
+    if config.objective is not None and config.objective.kl.computation != "legacy":
+        contract["kl_reference"] = {"policy": "initial_policy", "computation": config.objective.kl.computation}
     if config.training.warmup_updates == 0:
         contract["training"].pop("warmup_updates", None)
     if config.schema_version == 2:
@@ -771,6 +948,9 @@ def schedule_contract(config):
         contract.update(algorithm=config.algorithm.model_dump(exclude_none=True))
         if config.algorithm.name == "online_bootstrap_grpo_v1":
             contract["online_bootstrap"] = config.online_bootstrap.model_dump()
+            return contract
+        if config.algorithm.name == "key_step_grpo_v1":
+            contract["key_steps"] = config.key_steps.model_dump()
             return contract
         contract["grpo"] = config.grpo.model_dump(exclude={"reference_cache", "token_diagnostics"})
         if config.grpo.parallel_branch_chunk_size is None:
@@ -808,6 +988,10 @@ def memory_contract(memory):
     for name in ("auto_offload", "oom_retry", "memory_telemetry", "host_offload", "memory_pressure", "adam_moment_offload"):
         if getattr(memory, name) == getattr(defaults, name):
             result.pop(name, None)
+    if memory.shared_trace_host_budget_gib is None:
+        result.pop("shared_trace_host_budget_gib")
+    if not memory.offload_host_reserve_gib:
+        result.pop("offload_host_reserve_gib")
     if memory.host_offload.enabled or memory.activation_offload == "memory_pressure":
         from RL.allocator import HOST_POLICY_VERSION, HOST_NATIVE_CACHE_MB
         result["offload_policy_version"] = HOST_POLICY_VERSION

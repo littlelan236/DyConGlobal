@@ -27,21 +27,24 @@ def export_adapter(model, directory, contract):
     verify_adapter(directory, contract, verify_owner=False)
 
 
-def verify_adapter(directory, expected_contract=None, *, verify_owner=True):
+def verify_adapter(directory, expected_contract=None, *, verify_owner=True, verify_hashes=True):
     directory = Path(directory).resolve()
     if directory.name != "adapter":
         raise ValueError("Only this module's named adapter exports are accepted")
     owner = directory.parent
     if verify_owner:
-        receipt = verify_receipt(owner)
+        receipt = verify_receipt(owner, verify_hashes=verify_hashes)
         if receipt.get("kind") not in {"lora-attempt-v1", "lora-checkpoint-v1"}:
             raise ValueError("Adapter has no supported LoRA owner")
     identity = read_json(directory / "identity.json")
     if identity.get("schema_version") != 1:
         raise ValueError("Invalid adapter identity schema")
-    files = inventory(directory)
+    files = inventory(directory, verify_hashes=verify_hashes)
     files.pop("identity.json", None)
-    if files != identity.get("files"):
+    expected_files = identity.get("files", {})
+    if not verify_hashes:
+        expected_files = {name: {"bytes": entry["bytes"]} for name, entry in expected_files.items()}
+    if files != expected_files:
         raise ValueError("Adapter content/hash mismatch")
     contract = identity["contract"]
     if expected_contract is not None and contract != expected_contract:
@@ -57,11 +60,11 @@ def verify_adapter(directory, expected_contract=None, *, verify_owner=True):
     return identity
 
 
-def verify_checkpoint(directory):
+def verify_checkpoint(directory, *, verify_hashes=True):
     directory = Path(directory).resolve()
     if not (directory / "training-state.pt").is_file():
         raise ValueError("resume requires a complete training checkpoint; use warm_start for adapter-only exports")
-    receipt = verify_receipt(directory, "lora-checkpoint-v1")
+    receipt = verify_receipt(directory, "lora-checkpoint-v1", verify_hashes=verify_hashes)
     required = {"training-state.pt", "state.json", "adapter/identity.json", "adapter/adapter_config.json",
                 "adapter/adapter_model.safetensors"}
     if not required.issubset(receipt["files"]):
@@ -78,7 +81,8 @@ def verify_checkpoint(directory):
             or directory.name != f"step-{state['global_step']:06d}"
             or receipt.get("global_step") != state["global_step"]):
         raise ValueError("Checkpoint step identity mismatch")
-    verify_adapter(directory / "adapter", metadata["adapter_contract"], verify_owner=False)
+    verify_adapter(directory / "adapter", metadata["adapter_contract"],
+                   verify_owner=False, verify_hashes=verify_hashes)
     if ("grpo" in metadata["contract"] and metadata["contract"].get("streaming") is None
             and metadata["contract"]["grpo"].get("cache_schema_version") != 3
             and "grpo/reference-logprobs.pt" not in receipt["files"]):

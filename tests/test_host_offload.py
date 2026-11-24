@@ -256,3 +256,116 @@ def test_empty_pool_with_native_deferred_release_still_synchronizes_boundary(mon
     monkeypatch.setattr(torch.cuda, 'synchronize', lambda: calls.append('sync'))
     offload.safe_boundary()
     assert calls == ['sync'] and not current.native_release_pending
+
+
+def test_trace_leases_share_capacity_and_reuse_on_release(tmp_path, monkeypatch):
+    from RL.host_admission import TraceAdmission
+    a = TraceAdmission(tmp_path, budget=100, reserve=1, attempt="baseline", rank=0)
+    b = TraceAdmission(tmp_path, budget=100, reserve=1, attempt="baseline", rank=1)
+    host = {"MemAvailable": 500, "cgroup_remaining_bytes": 78}
+    monkeypatch.setattr("RL.host_admission.host_memory", lambda: host)
+    token, _ = a.try_acquire(65)
+    assert token
+    assert b.try_acquire(20)[0] is None
+    host["cgroup_remaining_bytes"] = 200
+    assert b.try_acquire(36)[0] is None
+    a.account_overrun(token, 75)
+    assert b.try_acquire(26)[0] is None
+    next_token, status = b.try_acquire(25)
+    assert next_token is not None and status["shared_reserved_bytes"] == 100
+    b.release(next_token)
+    a.account_overrun(token, 105)
+    rejected, status = b.try_acquire(1)
+    assert rejected is None and status["shared_reserved_bytes"] == 105
+    a.release(token)
+    token, _ = b.try_acquire(90)
+    assert token  # One rank can borrow more than half the shared budget.
+    b.release(token)
+    assert not a.tokens and not b.tokens
+
+
+def test_trace_admission_reuses_resident_capacity_without_ignoring_pending_bytes(tmp_path, monkeypatch):
+    from RL.host_admission import TraceAdmission
+    gib = 2**30
+    a = TraceAdmission(tmp_path, budget=460*gib, reserve=gib, attempt="baseline", rank=0)
+    b = TraceAdmission(tmp_path, budget=460*gib, reserve=gib, attempt="baseline", rank=1)
+    host = {"MemAvailable": 503*gib, "cgroup_path": "/training"}
+    monkeypatch.setattr("RL.host_admission.host_memory", lambda: host)
+    token, _ = a.try_acquire(304*gib)
+    a.account_residency(token, 238*gib)
+    host.update(MemAvailable=227*gib, cgroup_remaining_bytes=147*gib)
+    next_token, status = b.try_acquire(80*gib)
+    assert next_token and status["shared_reserved_bytes"] == 384*gib
+    assert status["trace_pending_bytes"] == 146*gib
+    b.release(next_token)
+    assert b.try_acquire(81*gib)[0] is None
+    host["cgroup_path"] = "/another-group"
+    assert b.try_acquire(80*gib)[0] is None
+    host.pop("cgroup_remaining_bytes")
+    a.account_overrun(token, 390*gib)
+    assert b.try_acquire(71*gib)[0] is None
+    a.account_residency(token, -238*gib)
+    assert b.try_acquire(60*gib)[0] is None
+    a.release(token)
+
+
+def test_complete_trace_reclaims_before_releasing_reservation(monkeypatch):
+    from RL.memory import BoundaryOffload
+    offload = BoundaryOffload(torch.nn.Linear(2, 2), None)
+    offload.pool, native = pool(pages=2**18, cache_pages=0)
+    offload.trace_bytes_per_token = 100
+    stages, overruns = [], []
+    def acquire(size, _wait):
+        assert size == 1000 + 512 * 2**20
+        return "trace", {"shared_reserved_bytes": size}, 0.
+    def release(token):
+        assert token == "trace"
+        assert not offload.pool.blocks and native.allocated == 0
+        assert not offload.pool.native_release_pending
+    residency = []
+
+    def account_residency(token, delta):
+        assert native.allocated == abs(delta)
+        residency.append((token, delta))
+
+    offload.trace_admission = SimpleNamespace(acquire=acquire, release=release,
+                                             account_overrun=lambda *args: overruns.append(args),
+                                             account_residency=account_residency)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    actual = 512 * 2**20 + PAGE
+    with offload.trace_scope(10, lambda phase, **_: stages.append(phase)):
+        block = offload.pool.acquire(actual)
+        offload.pool.release(block)
+        assert native.allocated == actual
+    assert overruns == [("trace", actual + PAGE)]
+    assert residency == [("trace", actual), ("trace", -actual)]
+    assert stages == ["trace_host_admitted", "trace_host_released"]
+    assert offload.pool.budget == 2**18 * PAGE
+
+
+def test_failed_trace_releases_only_after_pool_drain(monkeypatch):
+    from RL.memory import BoundaryOffload
+    offload = BoundaryOffload(torch.nn.Linear(2, 2), None)
+    offload.pool, native = pool(pages=2**18, cache_pages=2)
+    offload.trace_bytes_per_token = 100
+    released = []
+
+    def release(token):
+        assert not offload.pool.blocks and native.allocated == 0
+        released.append(token)
+
+    resident = []
+    offload.trace_admission = SimpleNamespace(
+        acquire=lambda *_: ("trace", {}, 0.), release=release, account_overrun=lambda *_: None,
+        account_residency=lambda _, delta: resident.append(delta))
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        with offload.trace_scope(10, lambda *_a, **_kw: None):
+            block = offload.pool.acquire(PAGE)
+            offload.pool.release(block)
+            offload._boundary_clean = False
+            raise torch.cuda.OutOfMemoryError("injected")
+    assert not released and offload.failed_trace == "trace"
+    offload.release_failed_trace()
+    assert released == ["trace"] and offload.failed_trace is None
+    assert resident == [PAGE, -PAGE]

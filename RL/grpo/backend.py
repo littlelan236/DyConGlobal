@@ -4,7 +4,7 @@ from .objective import grpo_objective
 
 
 class GroupObjective:
-    def __init__(self, reference_values, settings, block_size, offloader=None):
+    def __init__(self, reference_values, settings, block_size, offloader=None, reference_scorer=None):
         self.reference_values = reference_values
         self.settings = settings
         self.block_size = block_size
@@ -12,6 +12,9 @@ class GroupObjective:
         self.prefix = None
         self.group_metadata = {}
         self.active_reference = None
+        self.reference_scorer = reference_scorer
+        self.kl_reference = None
+        self.host_scope = None
         self.reset()
 
     def reset(self):
@@ -34,11 +37,27 @@ class GroupObjective:
         self.active_reference = (self.reference_values.for_group(group)
                                  if hasattr(self.reference_values, "for_group") else None)
         mode = getattr(getattr(self.settings, "prefix_reuse", None), "mode", "disabled")
+        if self.reference_scorer is not None and self.settings.kl_beta:
+            import time
+            started = time.perf_counter()
+            self.kl_reference = self.reference_scorer.score_group(
+                group, block_size=self.block_size, reuse_prefix=mode == "boundary_grad")
+            self.group_metadata["kl_reference_forward_seconds"] = time.perf_counter() - started
+            self.group_metadata["kl_reference_forward_branches"] = group.group_size
+        if self.offloader is not None and getattr(self.offloader, "trace_admission", None) is not None:
+            # Keep the reservation for the prefix, all branches and final VJP.
+            tokens = max(len(p) + len(c) for p, c in zip(group.prompt_token_ids, group.completion_token_ids))
+            scope = self.offloader.trace_scope(tokens, self._host_stage)
+            scope.__enter__()
+            self.host_scope = scope
         if mode == "boundary_grad":
             from .prefix import PrefixContext
             if any(p != group.prompt_token_ids[0] for p in group.prompt_token_ids):
                 raise ValueError("GRPO group prompt tokens are not identical")
             self.prefix = PrefixContext(model, group.prompt_token_ids[0], offloader=self.offloader)
+
+    def _host_stage(self, name, **fields):
+        self.group_metadata.setdefault("host_admission_events", []).append({"phase": name, **fields})
 
     def after_branch_backward(self):
         if self.prefix is not None:
@@ -63,7 +82,12 @@ class GroupObjective:
                 self.prefix_metrics[-1]["allocated_after_group_bytes"] = torch.cuda.memory_allocated(self.prefix.device)
             self.prefix = None
         self.active_reference = None
+        self.kl_reference = None
         self.group_metadata = {}
+        if self.host_scope is not None:
+            import sys
+            scope, self.host_scope = self.host_scope, None
+            scope.__exit__(*sys.exc_info())
 
     def iter_results(self, model, group):
         if (getattr(getattr(self.settings, "prefix_reuse", None), "mode", "disabled") == "boundary_grad"
@@ -98,7 +122,9 @@ class GroupObjective:
             clip_epsilon=self.settings.clip_epsilon, kl_beta=self.settings.kl_beta,
             ratio_guard_enabled=self.settings.ratio_guard.enabled,
             ratio_guard_threshold=self.settings.ratio_guard.threshold,
-            k3_cap=self.settings.k3_cap)
+            k3_cap=self.settings.k3_cap,
+            kl_logp_reference=(self.kl_reference[branch_id].to(device)[None]
+                               if self.kl_reference is not None else None))
         if diagnostics is not None:
             from .token_diagnostics import compare_branch_scores
             compare_branch_scores(model, group, index, current, reference, diagnostics,

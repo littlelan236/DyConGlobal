@@ -81,3 +81,35 @@ def test_grpo_defaults_to_frozen_prefix_length_pool_shuffle(values):
     assert "shuffle_algorithm" not in schedule_contract(config)["grpo"]
     config.grpo.shuffle_algorithm="stable_random_v1"
     assert schedule_contract(config)["grpo"].get("shuffle_algorithm") is None
+
+
+def test_shared_objective_preserves_offline_schedule():
+    root = Path(__file__).parents[1]
+    raw = yaml.safe_load((root / "RL/experiments/grpo-offline-k3-smoke.yaml").read_text())
+    raw.setdefault("grpo", {})["kl_beta"] = 0.0
+    legacy = Config.model_validate(raw)
+    del raw["grpo"]["kl_beta"]
+    raw["objective"] = {"kl": {"beta": 0.0}}
+    migrated = Config.model_validate(raw)
+    assert schedule_contract(legacy) == schedule_contract(migrated)
+    assert migrated.objective.kl.beta == 0.0
+    assert Config.model_validate(migrated.model_dump()) == migrated
+
+    raw["offline_baseline"] = {"dataset": "/unused", "kl_beta": 0.02}
+    with pytest.raises(ValueError, match="Conflicting kl_beta"):
+        Config.model_validate(raw)
+    del raw["offline_baseline"]["kl_beta"]
+    mixed = Config.model_validate(raw)
+    assert mixed.grpo.kl_beta == mixed.offline_baseline.kl_beta == 0.0
+
+
+def test_baseline_epoch_schedule_without_explicit_updates(values, tmp_path):
+    (tmp_path / "manifest.json").write_text('{"entries":[{"task":"a"},{"task":"b"},{"task":"c"}]}')
+    values["algorithm"] = {"name": "offline_baseline_grpo_v1"}
+    values["offline_baseline"] = {"dataset": str(tmp_path), "epochs": 3, "tasks_per_update": 2}
+    values["objective"] = {"kl": {"beta": 0.0}, "ppo": {"clip_epsilon": 0.2}}
+    values["training"].pop("max_updates")
+    cfg = Config.model_validate(values)
+    assert cfg.training.max_updates == 6
+    assert cfg.offline_baseline.dycon_weight == 0
+    assert cfg.offline_baseline.clip_epsilon == 0.2

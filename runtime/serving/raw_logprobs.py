@@ -28,25 +28,30 @@ def validate_descriptor(descriptor):
         raise ValueError("Raw probability sidecar is not sealed")
 
 
-def read_values(root, descriptor, *, output_ids=None, record=None):
+def read_values(root, descriptor, *, output_ids=None, record=None, verify_hashes=True):
     validate_descriptor(descriptor)
     path = owned_path(root, descriptor["locator"])
     count = descriptor["count"]
     if (type(count) is not int or count < 0 or descriptor["bytes"] != count * 4 or
-            path.stat().st_size != count * 4 or sha256(path) != descriptor["sha256"]):
+            (verify_hashes and sha256(path) != descriptor["sha256"])):
         raise ValueError("Raw probability shard length/checksum mismatch")
     if output_ids is not None and (len(output_ids) != count or
-            hash_json(output_ids) != descriptor["output_token_ids_sha256"]):
+            (verify_hashes and hash_json(output_ids) != descriptor["output_token_ids_sha256"])):
         raise ValueError("Raw probability output token alignment mismatch")
     if record is not None:
         for key in ("request_id", "run_id", "session_id", "decision_id", "branch_id", "step_id", "api_attempt_id"):
             if descriptor["identity"].get(key) != record.get(key):
                 raise ValueError("Raw probability request identity mismatch: " + key)
-        if descriptor["prompt_token_ids_sha256"] != hash_json(record["prompt_token_ids"]):
+        if verify_hashes and descriptor["prompt_token_ids_sha256"] != hash_json(record["prompt_token_ids"]):
             raise ValueError("Raw probability prompt alignment mismatch")
         if descriptor["tokenizer_fingerprint"] != record.get("tokenizer_fingerprint"):
             raise ValueError("Raw probability tokenizer identity mismatch")
-    values = np.fromfile(path, dtype="<f4")
+    with path.open("rb") as stream:
+        if os.fstat(stream.fileno()).st_size != count * 4:
+            raise ValueError("Raw probability shard length mismatch")
+        values = np.fromfile(stream, dtype="<f4")
+    if len(values) != count:
+        raise ValueError("Raw probability shard truncated")
     if np.isnan(values).any() or np.isposinf(values).any() or (values > 0).any():
         raise ValueError("Raw probability values contain NaN or +inf")
     if int(np.isneginf(values).sum()) != descriptor["negative_infinity_count"]:

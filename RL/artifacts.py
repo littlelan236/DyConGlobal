@@ -8,14 +8,17 @@ from pathlib import Path
 from core.io import artifact_roots, hash_json, identifier, now, owned_path, read_json, sha256, write_json
 
 
-def inventory(directory):
+def inventory(directory, *, verify_hashes=True):
     directory = Path(directory).resolve()
     files = {}
     for path in sorted(directory.rglob("*")):
         if path.is_symlink():
             raise ValueError(f"Symlinks are not permitted inside LoRA artifacts: {path.name}")
         if path.is_file() and path != directory / "receipt.json":
-            files[path.relative_to(directory).as_posix()] = {"bytes": path.stat().st_size, "sha256": sha256(path)}
+            entry = {"bytes": path.stat().st_size}
+            if verify_hashes:
+                entry["sha256"] = sha256(path)
+            files[path.relative_to(directory).as_posix()] = entry
     return files
 
 
@@ -51,9 +54,12 @@ def read_receipt(directory, kind=None):
     return receipt
 
 
-def verify_receipt(directory, kind=None):
+def verify_receipt(directory, kind=None, *, verify_hashes=True):
     receipt = read_receipt(directory, kind)
-    if receipt["files"] != inventory(directory):
+    files = receipt["files"]
+    if not verify_hashes:
+        files = {name: {"bytes": entry["bytes"]} for name, entry in files.items()}
+    if files != inventory(directory, verify_hashes=verify_hashes):
         raise ValueError("LoRA receipt file inventory/hash mismatch")
     return receipt
 
@@ -112,6 +118,19 @@ def resume_contract_matches(expected, actual):
     actual = dict(actual)
     expected.pop("source_fingerprint", None)
     actual.pop("source_fingerprint", None)
+    # The shared trace limit and the matching pinned allocator limit are
+    # resource controls. Allow this pair to change on baseline-only resume.
+    if all((c.get("objective") or {}).get("kind") == "offline_baseline_prefix_trace_v1"
+           and c["training"]["memory"].get("shared_trace_host_budget_gib") is not None
+           for c in (expected, actual)):
+        for contract in (expected, actual):
+            training = dict(contract["training"])
+            memory = dict(training["memory"])
+            host_offload = dict(memory["host_offload"])
+            memory.pop("shared_trace_host_budget_gib")
+            host_offload.pop("allocator_budget_gib")
+            memory["host_offload"] = host_offload
+            contract["training"] = {**training, "memory": memory}
     # Only an explicitly selected reference path may ignore unused optional
     # kernels. Core package versions and every other contract field stay strict.
     def reference(contract):
@@ -177,6 +196,9 @@ def verify(cfg_or_root, scope, artifact_id, *, storage_root=None, dataset_id=Non
     from RL.config import Config, schedule_contract
 
     config = Config.model_validate(read_json(directory / "resolved-config.json"))
+    if config.key_steps is not None:
+        from RL.key_steps import verify_attempt
+        return verify_attempt(directory,receipt,config)
     contract = attempt["contract"]
     base = read_json(directory / "model-identity.json")
     manifest = read_json(directory / "trainable-parameters.json")

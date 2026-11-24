@@ -4,6 +4,7 @@ Reuse native decoder/rotary/mask/convolution/GDN operators. Each checkpoint
 receives its layer's state as explicit inputs and builds a fresh cache facade;
 no mutable cache survives into recomputation. No model parameters are replaced.
 """
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import torch
@@ -76,6 +77,52 @@ def validate_model(model, expected_backend=None):
     if expected_backend is not None and binding.execution_contract() != expected_backend:
         raise ValueError("Model boundary GDN backend differs from the execution contract")
     return text
+
+
+def chunked_causal_sdpa(query, key, value, *, scale, query_tokens):
+    """Keep each query block's complete causal key/value prefix in the graph."""
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    from torch.nn.attention.bias import causal_lower_right
+
+    outputs = []
+    with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        for start in range(0, query.shape[-2], query_tokens):
+            end = min(start + query_tokens, query.shape[-2])
+            outputs.append(F.scaled_dot_product_attention(
+                query[..., start:end, :], key[..., :end, :], value[..., :end, :],
+                attn_mask=causal_lower_right(end - start, end), scale=scale,
+                enable_gqa=query.shape[1] != key.shape[1]))
+    return torch.cat(outputs, dim=-2)
+
+
+@contextmanager
+def retry_chunked_attention(query_tokens=32768):
+    """Reduce the deterministic Flash backward workspace on a replay."""
+    from transformers.models.qwen3_5 import modeling_qwen3_5 as qwen
+
+    # Install a Qwen-only registry for the replay, leaving the shared
+    # Transformers registry and unrelated attention interfaces untouched.
+    original = qwen.ALL_ATTENTION_FUNCTIONS
+    retry = type(original)()
+    retry.update(original)
+    sdpa = original["sdpa"]
+
+    def attention(module, query, key, value, attention_mask, dropout=0.0, scaling=None, **kwargs):
+        if (query.is_cuda and attention_mask is None and not dropout
+                and kwargs.get("is_causal", getattr(module, "is_causal", True))
+                and kwargs.get("position_bias") is None
+                and query.shape[-2] == key.shape[-2] > query_tokens):
+            output = chunked_causal_sdpa(query, key, value, scale=scaling, query_tokens=query_tokens)
+            return output.transpose(1, 2).contiguous(), None
+        return sdpa(module, query, key, value, attention_mask,
+                    dropout=dropout, scaling=scaling, **kwargs)
+
+    retry["sdpa"] = attention
+    qwen.ALL_ATTENTION_FUNCTIONS = retry
+    try:
+        yield
+    finally:
+        qwen.ALL_ATTENTION_FUNCTIONS = original
 
 
 def segment(model, input_ids, states=(), prefix_length=0, metrics=None, offloader=None):

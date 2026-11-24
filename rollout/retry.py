@@ -13,6 +13,9 @@ TERMINAL = frozenset({'Submitted', 'reasoning_loop', 'LimitsExceeded',
 INFRASTRUCTURE = frozenset({'ContainerCorrupted', 'EnvironmentSetupFailed', 'APIError',
     'Timeout', 'ReadTimeout', 'ConnectError', 'APIConnectionError', 'DockerException',
     'NotFound', 'ConnectionError', 'Interrupted'})
+ONLINE_LIMIT_RESAMPLE_RETRIES = 3
+ONLINE_SAMPLING_EXHAUSTED = frozenset({'infrastructure_exhausted', 'selection_retry_exhausted',
+                                       'limits_retry_exhausted', 'SeedSpaceExhausted'})
 COUNT_FIELDS = ('limits_exceeded_count', 'reasoning_loop_count', 'resample_trigger_count')
 
 
@@ -52,6 +55,18 @@ def sample_accepted(cfg, result):
             and baseline_failure_reward(cfg, result.get('online_source'), result) is not None):
         return True
     return disposition(cfg, result.get('exit_status')) == 'accepted'
+
+
+def online_sampling_discard(result):
+    """Only settled, exhausted physical attempts can stand in for a trajectory."""
+    status = result.get('exit_status')
+    attempts = result.get('physical_attempts')
+    if (result.get('disposition') == 'failed'
+            and status in ONLINE_SAMPLING_EXHAUSTED
+            and type(attempts) is int and attempts > 0):
+        return {'stage': 'sampling', 'reason': 'sampling_retries_exhausted',
+                'failure_code': status, 'attempt_count': attempts, 'retry_count': attempts - 1}
+    return None
 
 
 def sample_settled(cfg, result):
@@ -200,7 +215,7 @@ def rebuild_counts(run, manifest):
     return value
 
 
-def verify_final(root, run_id, item, result, evidence):
+def verify_final(root, run_id, item, result, evidence, *, verify_files=True):
     rid = result.get('rollout_id')
     if not rid or rid not in evidence['rollouts']:
         raise ValueError('Accepted sample has no canonical rollout')
@@ -215,6 +230,8 @@ def verify_final(root, run_id, item, result, evidence):
             raise ValueError('Accepted canonical execution provenance changed')
     if row.get('termination_reason') != result.get('agent_exit_status', result.get('exit_status')):
         raise ValueError('Accepted canonical terminal status changed')
+    if not verify_files:
+        return rid
     from core.io import owned_path, sha256
     from application.execution.subject import artifact_kinds, verify_subject
     verify_subject(root, row)
@@ -224,21 +241,22 @@ def verify_final(root, run_id, item, result, evidence):
     return rid
 
 
-def default_final_ids(root, run_id, data):
+def default_final_ids(root, run_id, data, *, plan=None, verify_files=True):
     """Return None for legacy semantics; new runs require settled producer inputs."""
     from application.execution.run_plan import load_plan
     from core.config import load_snapshot
     run = Path(root) / 'runs' / run_id
     if not (run / 'resolved-config.json').exists():
         return None
-    cfg = load_snapshot(root, run_id)
-    if not enabled(cfg):
+    cfg = load_snapshot(root, run_id) if plan is None else plan['config']
+    items = (load_plan(root, run_id) if plan is None else plan)['work_items']['items']
+    if not enabled(cfg) and not any(item.get('online_source') for item in items):
         return None
     stage = read_json(run / 'status.json').get('stage')
     if stage not in {'complete', 'failed', 'cancelled'}:
         raise ValueError('Source rollout run is not finished; use explicit rollout IDs for partial analysis')
     ids = []
-    for item in load_plan(root, run_id)['work_items']['items']:
+    for item in items:
         path = run / 'rollout/tasks' / item['instance_id'] / 'repetitions' / item['repetition_id'] / 'result.json'
         if not path.exists():
             if stage == 'complete':
@@ -246,8 +264,8 @@ def default_final_ids(root, run_id, data):
             continue
         result = read_json(path)
         if sample_accepted(cfg, result):
-            ids.append(verify_final(root, run_id, item, result, data))
-        elif stage == 'complete':
+            ids.append(verify_final(root, run_id, item, result, data, verify_files=verify_files))
+        elif stage == 'complete' and not (item.get('online_source') and online_sampling_discard(result)):
             raise ValueError('Complete source run contains an unaccepted sample')
     if len(ids) != len(set(ids)):
         raise ValueError('Multiple samples point to the same canonical rollout')

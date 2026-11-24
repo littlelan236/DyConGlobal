@@ -30,29 +30,5 @@ def restore_policy_checkpoint(model, path, optimizer, scheduler, contract, adapt
     return state
 
 
-class InitialPolicyScorer:
-    """Score S0 on exact inputs without another base-model allocation.
-
-    Each call occurs before the row's autograd forward. Adapter tensors are
-    restored in finally; no training graph remains alive across a swap.
-    """
-    def __init__(self, model, adapter):
-        from peft.utils.save_and_load import load_peft_weights
-        self.model = model
-        self.reference = load_peft_weights(str(adapter), device="cpu")
-
-    def __call__(self, tensors):
-        import torch
-        from peft.utils.save_and_load import get_peft_model_state_dict, set_peft_model_state_dict
-        from RL.online_runtime import online_selected_logprobs
-        current = {k: v.detach().clone() for k, v in get_peft_model_state_dict(self.model).items()}
-        training = self.model.training
-        try:
-            set_peft_model_state_dict(self.model, self.reference)
-            self.model.eval()
-            with torch.no_grad():
-                values, _ = online_selected_logprobs(self.model, tensors)
-                return values.detach()
-        finally:
-            set_peft_model_state_dict(self.model, current)
-            self.model.train(training)
+# Historical import path retained for existing callers.
+from RL.policy_reference import InitialPolicyScorer

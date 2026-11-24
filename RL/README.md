@@ -2,6 +2,20 @@
 
 `.venvs/rl/bin/dycon rl-train --training-config YAML` 通过同一服务运行 LoRA 或全参 FSDP2。现有 LoRA 配置也可使用 `lora-train`。使用 `.venvs/runner/bin/dycon` 预检和查询，实际训练使用 RL 环境。
 
+RL 的 KL 和 PPO 裁剪参数统一在顶层配置：
+
+```yaml
+objective:
+  kl:
+    computation: recompute  # legacy retains historical behavior
+    beta: 0.02
+    k3_cap: 1.0
+  ppo:
+    clip_epsilon: 0.1
+```
+
+`beta: 0.0` 关闭 KL；各训练模式的 PPO 概率分母保持原有定义。旧配置仍可读取，重复填写时参数必须一致。普通离线 DyCon 当前只接受 `clip_epsilon: 0.1`。在线 bootstrap 和离线 baseline-only 可以省略 `training.max_updates`，由 epoch 和任务数推导。baseline-only 可省略两路来源权重。
+
 | 任务 | 入口 |
 | --- | --- |
 | 构建原生 token 数据和 raw T=1 概率 | [数据与概率手册](dataset/README.md) |
@@ -1106,6 +1120,30 @@ not bypass a changed objective or source binding. Project source fingerprint
 changes alone are not a resume gate. Use an explicitly configured new training attempt
 (for example a supported adapter warm-start) for the changed objective.
 No running training is restarted by this change.
+
+### Offline baseline task reward normalization
+
+Offline baseline-only and mixed DyCon + baseline training default to
+`offline_baseline.advantage_mode: direct`. To enable `task_grpo`, prepare the
+specific dataset once, then set `offline_baseline.advantage_mode: task_grpo`
+and point `offline_baseline.dataset` to that directory.
+
+```bash
+.venvs/runner/bin/dycon rl-prepare-baseline-stats --dataset PATH
+```
+
+The command writes `task-reward-stats.json` beside the dataset manifest. For
+each task, every trajectory in that dataset contributes its reward once,
+independently of its run, length, or whether it is sampled in an update.
+The policy advantage is `(reward - task_mean) / (task_population_std + 1e-8)`.
+Tasks whose dataset rewards are all identical are excluded from baseline
+sampling and KL. For baseline-only training, set `training.max_updates` to
+`epochs * ceil(nonzero_variance_tasks / tasks_per_update)`. Mixed training
+retains the DyCon schedule.
+
+New imports store the raw reward in their manifests. Existing data needs a
+one-time shard scan. Exact resume binds the dataset snapshot and statistics;
+use a new attempt or an adapter warm start when changing mode or dataset.
 
 ## 训练恢复
 
@@ -2330,3 +2368,9 @@ using the original complete checkpoint, not the merged serving directory.
 ## 验证范围
 
 既有工程验证包括 LoRA 的短 native/synthetic 单卡与双卡 fresh/resume、同 dtype 外部 anchor，以及历史 v10 只读核验。真实训练仍应核对目标 checkpoint 的 dataset、token、optimizer、RNG 和 anchor 身份。源模型训练、下游 benchmark 质量和真实 FP16→BF16 概率偏差分别验证。
+
+### Baseline epoch extension
+
+For a constant-scheduler baseline-only checkpoint, set run.start.mode=resume and run.start.extend_baseline_epochs=true. Increase offline_baseline.epochs to the cumulative target and training.max_updates accordingly (or omit it). Only epoch/update targets may change; dataset, objective, optimizer settings and topology remain unchanged. Optimizer, scheduler, RNG, global step and baseline sampling cursor are restored. A completed 3-epoch/168-step run extended to 5 epochs resumes at step 168 and stops at 280.
+
+Frozen initial-policy KL can be recomputed during LoRA training independently of grouping; see [implementation and compatibility](../docs/unsorted/frozen-kl-recompute.md). The PPO denominator remains separately configured by each algorithm.

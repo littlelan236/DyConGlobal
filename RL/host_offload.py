@@ -88,6 +88,7 @@ class ManagedHostPool:
         self.settings = settings
         self.allocator = allocator if allocator is not None else TorchHostAllocator()
         self.capacity = capacity if capacity is not None else check_host_capacity
+        self.on_residency_change = None
         self.budget = int(settings.allocator_budget_gib * 2**30)
         self.reclaim_policy = settings.reclaim_policy
         self.cache_limit = (0 if self.reclaim_policy == "after_use" else int(settings.cache_limit_gib * 2**30))
@@ -151,6 +152,14 @@ class ManagedHostPool:
         block = {"tensor": tensor, "size": charge, "leased": True, "events": [],
                  "admission": admission, "reservation": token}
         self.blocks.append(block)
+        if self.on_residency_change is not None:
+            try:
+                # Credit only a successfully allocated pinned block.
+                self.on_residency_change(charge)
+                block["trace_accounted"] = True
+            except BaseException:
+                self.release(block)
+                raise
         after = self.allocator.stats()["host_allocated_bytes"]
         self.peak = max(self.peak, after)
         self.last_allocation = {"logical_bytes": size, "charged_bytes": charge,
@@ -187,6 +196,10 @@ class ManagedHostPool:
             if cached <= limit: break
             cached -= block["size"]
             released += block["size"]
+            if self.on_residency_change is not None and block.get("trace_accounted"):
+                # Stop crediting residency before pages can return to the OS.
+                self.on_residency_change(-block["size"])
+                block["trace_accounted"] = False
             self.allocator.release(block)
             if block.get("reservation"):
                 self.pending_admission_releases.append((block["admission"], block["reservation"]))

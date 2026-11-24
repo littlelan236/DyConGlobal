@@ -4,6 +4,16 @@
 def register(subparsers):
     parser = subparsers.add_parser("rl-train", help="RL training through the common service (LoRA or full FSDP2)")
     parser.add_argument("--training-config", required=True)
+    parser = subparsers.add_parser("rl-prepare-key-steps", help="Seal eight-child terminal reward GRPO groups")
+    parser.add_argument("--groups", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--method", choices=["adaptive","random","entropy"], required=True)
+    parser = subparsers.add_parser("rl-prepare-baseline", help="Seal historical baseline rollout evidence")
+    parser.add_argument("--run-id", action="append", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--failure-reward", type=float, default=-3.0)
+    parser = subparsers.add_parser("rl-prepare-baseline-stats", help="Prepare offline baseline task reward statistics")
+    parser.add_argument("--dataset", required=True)
     parser = subparsers.add_parser("rl-gradient-compare", help="Compare all full-policy reference/FLA gradients without updates")
     parser.add_argument("--comparison-config", required=True)
     parser.add_argument("--dry-run", action="store_true")
@@ -43,6 +53,31 @@ def register(subparsers):
 
 
 def execute(args, root_config):
+    if args.command == "rl-prepare-key-steps":
+        from pathlib import Path
+        from RL.key_steps import prepare
+        root = Path(root_config["project_root"])
+        return prepare(root / args.groups, root / args.output, args.method)
+    if args.command == "rl-prepare-baseline":
+        from math import isfinite
+        from RL.offline_baseline import prepare
+
+        if not isfinite(args.failure_reward) or args.failure_reward >= 0:
+            raise ValueError("failure reward must be finite and negative")
+        manifest = prepare(root_config["project_root"], args.run_id, args.output, args.failure_reward)
+        return {"output": args.output, "trajectories": len(manifest["entries"]), "runs": manifest["runs"]}
+    if args.command == "rl-prepare-baseline-stats":
+        from pathlib import Path
+        from RL.offline_baseline import TASK_REWARD_STATS_FILE, prepare_task_reward_stats
+
+        dataset = (Path(root_config["project_root"]) / args.dataset).resolve()
+        stats = prepare_task_reward_stats(dataset)
+        tasks = stats["tasks"].values()
+        return {"output": str(dataset / TASK_REWARD_STATS_FILE), "version": stats["version"],
+                "manifest_sha256": stats["manifest_sha256"], "tasks": len(tasks),
+                "trajectories": sum(task["count"] for task in tasks),
+                "singleton_tasks": sum(task["count"] == 1 for task in tasks),
+                "equal_reward_tasks": sum(task["count"] > 1 and task["std"] == 0.0 for task in tasks)}
     if args.command == "rl-gradient-compare":
         if not args.dry_run:
             _rl_environment(root_config)

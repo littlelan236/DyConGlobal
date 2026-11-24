@@ -91,6 +91,15 @@ class PrefixContext:
             labels = torch.cat((tokens.new_full((1, 1), -100), tokens), dim=1)
             return hidden_target_logprobs(model, hidden, labels, block_size)
 
+    def branch_reference_logprobs(self, model, completion, block_size):
+        """No-grad counterpart that releases branch leaves without a backward."""
+        if torch.is_grad_enabled():
+            raise RuntimeError("Reference prefix scoring requires no_grad")
+        try:
+            return self.branch_logprobs(model, completion, block_size)
+        finally:
+            self.leaves = ()
+
     def after_branch_backward(self):
         if not self.leaves:
             raise RuntimeError("No active branch")

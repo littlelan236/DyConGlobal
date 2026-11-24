@@ -60,15 +60,20 @@ def read_repaired_session(root, repair_id, session_id, *, verify_dependencies=Tr
     return {'points': index['points'], 'coverage': read_json(base/'coverage.json'), 'receipt': receipt}
 
 
-def read_request(root, evidence):
+def read_request(root, evidence, *, offline_export=False, inventories=None):
     if evidence.get("ledger_ref"):
         path = owned_path(root, evidence["ledger_ref"])
-        if sha256(path) != evidence["ledger_sha256"]:
+        if not offline_export and sha256(path) != evidence["ledger_sha256"]:
             raise ValueError("Request ledger checksum mismatch")
         value = read_json(path)
-        if value.get("inventory_ref"):
-            inventory = read_json(owned_path(root, value["inventory_ref"]))
-            if hash_inventory(inventory) != value["inventory_sha256"]:
+        if value.get("inventory_ref") and (not offline_export or not value.get("tokenizer_fingerprint")):
+            ref = value["inventory_ref"]
+            inventory = inventories.get(ref) if inventories is not None else None
+            if inventory is None:
+                inventory = read_json(owned_path(root, ref))
+                if inventories is not None:
+                    inventories[ref] = inventory
+            if not offline_export and hash_inventory(inventory) != value["inventory_sha256"]:
                 raise ValueError("Request inventory checksum mismatch")
             needed = {
                 k: inventory[k]

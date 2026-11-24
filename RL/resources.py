@@ -29,7 +29,8 @@ def cgroup_memory():
     try:
         line = next(x for x in Path("/proc/self/cgroup").read_text().splitlines() if x.startswith("0::"))
         root = Path("/sys/fs/cgroup")
-        path = root / line.split(":", 2)[2].lstrip("/")
+        cgroup_path = line.split(":", 2)[2]
+        path = root / cgroup_path.lstrip("/")
         limits, remaining = [], []
         while path == root or root in path.parents:
             maximum = (path / "memory.max").read_text().strip()
@@ -41,7 +42,7 @@ def cgroup_memory():
             path = path.parent
         return {"cgroup_limit_bytes": min(limits) if limits else None,
                 "cgroup_remaining_bytes": min(remaining) if remaining else None,
-                "cgroup_capability": "v2"}
+                "cgroup_capability": "v2", "cgroup_path": cgroup_path}
     except (OSError, StopIteration, ValueError):
         return {"cgroup_limit_bytes": None, "cgroup_remaining_bytes": None,
                 "cgroup_capability": "unavailable"}
@@ -71,15 +72,20 @@ def memory_plan(config):
     element_bytes = 4 if config.model.dtype == "float32" else 2
     boundary = length * text["hidden_size"] * element_bytes * (text["num_hidden_layers"] + 2)
     world_size = len(getattr(config.runtime, "gpus", None) or [config.runtime.gpu])
-    budget = int(settings.host_budget_gib * 2**30)
+    budget = None if settings.host_budget_gib is None else int(settings.host_budget_gib * 2**30)
+    shared = settings.shared_trace_host_budget_gib
     required = int(boundary * 1.5)  # Concurrent graphs are bounded to one microbatch per rank.
     host = host_memory()
     managed = settings.host_offload
     admission = None
-    if managed.enabled:
+    if managed.enabled and shared is None:
         admission = check_host_capacity(managed,
             requested_bytes=int(managed.allocator_budget_gib * 2**30), world_size=world_size, host=host)
-    if config.preflight.check_resources and (settings.activation_offload != "none" or settings.oom_retry.enabled):
+    if shared is not None:
+        admission = {"scope": "complete_trace", "node_budget_bytes": int(shared * 2**30),
+                     "reserve_bytes": int(settings.offload_host_reserve_gib * 2**30)}
+    if budget is not None and config.preflight.check_resources and (
+            settings.activation_offload != "none" or settings.oom_retry.enabled):
         if required > budget:
             raise ValueError(f"Offload activation estimate {required} exceeds per-rank host budget {budget}")
         available = host.get("MemAvailable")

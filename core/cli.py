@@ -689,7 +689,7 @@ def main(argv=None):
     p.add_argument("--dataset-id", required=True)
     p.add_argument("--task-partitions", required=True, type=Path)
     a = parser.parse_args(argv)
-    if a.command in {"rl-gradient-compare", "rl-status", "rl-tensorboard", "rl-advantages", "rl-train", "rl-export", "rl-probe", "lora-export", "lora-train", "lora-prepare", "lora-status", "lora-tensorboard", "lora-advantages", "lora-memory", "lora-probe", "lora-probe-plot"} or (a.command == "artifact" and a.scope in {"lora-attempt", "rl-full-attempt"}):
+    if a.command in {"rl-gradient-compare", "rl-status", "rl-tensorboard", "rl-advantages", "rl-train", "rl-prepare-key-steps", "rl-prepare-baseline", "rl-prepare-baseline-stats", "rl-export", "rl-probe", "lora-export", "lora-train", "lora-prepare", "lora-status", "lora-tensorboard", "lora-advantages", "lora-memory", "lora-probe", "lora-probe-plot"} or (a.command == "artifact" and a.scope in {"lora-attempt", "rl-full-attempt"}):
         if a.set or a.analysis_run_id:
             parser.error("LoRA uses an independent training YAML; do not pass --set or --run-id")
         from RL.cli import execute as execute_lora
@@ -1435,7 +1435,10 @@ def main(argv=None):
         elif a.run_command == "active-status":
             result = active_run_statuses(cfg["project_root"], rl_config=cfg)
         elif a.run_command == "cancel":
-            result = cancel_run(cfg["project_root"], a.run_id, a.reason)
+            from RL.control import cancel_if_rl
+            result = cancel_if_rl(cfg, a.run_id, a.reason)
+            if result is None:
+                result = cancel_run(cfg["project_root"], a.run_id, a.reason)
         elif a.run_command == "wait":
             result = wait(cfg["project_root"], a.run_id)
         elif a.run_command in {"start", "resume"}:

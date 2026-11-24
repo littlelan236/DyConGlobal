@@ -45,7 +45,7 @@ def _masked_branch_mean(values, mask):
 
 def grpo_objective(logp_theta, logp_reference, advantages, loss_mask, *, clip_epsilon=0.1,
                    kl_beta=0.02, group_slices=None, ratio_guard_enabled=False, ratio_guard_threshold=1e-3,
-                   k3_cap=None):
+                   k3_cap=None, kl_logp_reference=None):
     """Compute one or more groups with branch-then-group mean reduction."""
     import math
     if not math.isfinite(ratio_guard_threshold) or not 0 < ratio_guard_threshold < 1:
@@ -79,7 +79,16 @@ def grpo_objective(logp_theta, logp_reference, advantages, loss_mask, *, clip_ep
     surrogate = torch.minimum(weighted, clipped)
     branch_policy = _masked_branch_mean(surrogate.masked_fill(rejected, 0), mask)
     delta = -objective_log_ratio
-    if k3_cap is None:
+    if kl_beta and kl_logp_reference is not None:
+        if kl_logp_reference.shape != logp_theta.shape:
+            raise ValueError("KL reference target shape mismatch")
+        kl_ref = kl_logp_reference.to(theta.device).float().detach().masked_fill(~mask, 0)
+        if not torch.isfinite(kl_ref).all():
+            raise ValueError("Nonfinite KL reference logprobs")
+        delta = (kl_ref - theta).masked_fill(rejected, 0)
+    if not kl_beta:
+        k3 = torch.zeros_like(delta)
+    elif k3_cap is None:
         k3 = raw_k3 = torch.expm1(delta) - delta
     else:
         # Find saturation without attaching an overflowing inverse ratio to
@@ -116,7 +125,7 @@ def grpo_objective(logp_theta, logp_reference, advantages, loss_mask, *, clip_ep
     positive_tokens = mask & (adv[:, None] > 0)
     negative_tokens = mask & (adv[:, None] < 0)
     cap_metrics = {}
-    if k3_cap is not None:
+    if kl_beta and k3_cap is not None:
         with torch.no_grad():
             retained = mask & ~rejected
             raw_branch = _masked_branch_mean(raw_k3.double().masked_fill(rejected, 0), mask)
@@ -152,7 +161,7 @@ def grpo_objective(logp_theta, logp_reference, advantages, loss_mask, *, clip_ep
         "negative_logprob_change": float((theta-ref)[mask & (adv[:, None] < 0)].mean().detach()) if (adv < 0).any() else None,
         "positive_branches": int((adv > 0).sum()), "negative_branches": int((adv < 0).sum()),
         "branch_count": int(logp_theta.shape[0]), "token_count": int(mask.sum()),
-        **token_statistics(raw_k3, mask, rejected, group_indices),
+        **(token_statistics(raw_k3, mask, rejected, group_indices) if kl_beta else {}),
         **cap_metrics,
         **token_signals(raw_log_ratio, raw_ratio, adv, mask, rejected, clip_epsilon),
     }, len(group_slices), int(logp_theta.shape[0]), int(mask.sum()))

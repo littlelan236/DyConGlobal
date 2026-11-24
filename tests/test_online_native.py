@@ -192,7 +192,8 @@ def test_mini_baseline_bypasses_consensus_without_changing_shared_config(tmp_pat
     assert cfg["parallel"]["enabled"]
 
 
-def test_harness_stage_grades_only_final_trajectories_and_reuses(tmp_path, monkeypatch):
+@pytest.mark.parametrize("with_discard", [False, True])
+def test_harness_stage_grades_only_final_trajectories_and_reuses(tmp_path, monkeypatch, with_discard):
     from RL.online_evidence import ensure_evaluated
     data = {"rollouts": {"final": {"task_key": "t", "evaluation_status": "not_run", "resolved": None},
                           "old-retry": {"evaluation_status": "not_run"}},
@@ -203,10 +204,19 @@ def test_harness_stage_grades_only_final_trajectories_and_reuses(tmp_path, monke
         def verify(self): pass
         def read(self): return data
         def select(self): return {"rollouts": {"final": data["rollouts"]["final"]}}
+    items = [{}]
+    if with_discard:
+        item = {"instance_id": "task", "repetition_id": "rep-000", "sample_key": "sample", "online_source": "dycon"}
+        items.append(item)
+        write_json(tmp_path / "rollout/tasks/task/repetitions/rep-000/result.json",
+                   {**item, "disposition": "failed", "exit_status": "selection_retry_exhausted", "physical_attempts": 4})
     monkeypatch.setattr("application.execution.evidence.RunEvidence", Evidence)
     monkeypatch.setattr("application.execution.run_plan.load_plan", lambda *args: {
-        "config": {}, "run": tmp_path, "work_items": {"items": [{}]}})
-    monkeypatch.setattr("application.execution.harness.prepare", lambda *args: calls.append("prepare"))
+        "config": {}, "run": tmp_path, "work_items": {"items": items}})
+    def prepare(*args, **kwargs):
+        assert kwargs == ({"rollout_ids": ("final",)} if with_discard else {})
+        calls.append("prepare")
+    monkeypatch.setattr("application.execution.harness.prepare", prepare)
     def run(*args):
         calls.append("run")
         data["rollouts"]["final"].update(evaluation_status="completed", resolved=True, selected_evaluation_id="eval")
@@ -280,7 +290,8 @@ def test_resolved_publication_uses_bound_mini_terminal_receipt(tmp_path):
         _completion_receipt(tmp_path, row, 'r', 's')
 
 
-def test_native_assembler_excludes_unscored_decision_before_probability_loading(tmp_path, monkeypatch):
+@pytest.mark.parametrize("stop_failure", [None, "exhausted", "claimed_receipt", "sampling", "sampling_all", "native_missing", "native_recovers", "native_conflict"])
+def test_native_assembler_excludes_unusable_evidence_before_probability_loading(tmp_path, monkeypatch, stop_failure):
     from RL.online_evidence import NativeRunAssembler
     root = tmp_path
     run = root / "runs/run"
@@ -297,8 +308,23 @@ def test_native_assembler_excludes_unscored_decision_before_probability_loading(
         records[source] = {"trajectory_path": str(trajectory.relative_to(root)),
                            "trajectory_sha256": sha256(trajectory), "selected_evaluation_id": "eval"}
         items.append({"instance_id": "task", "online_source": source, "online_repetition": 0,
-                      "repetition_id": source})
+                      "repetition_id": source, "sample_key": source})
         write_json(run / "rollout/tasks/task/repetitions" / source / "result.json", {"rid": source})
+    if stop_failure in {"sampling", "sampling_all"}:
+        for source in (("dycon", "baseline") if stop_failure == "sampling_all" else ("dycon",)):
+            write_json(run / "rollout/tasks/task/repetitions" / source / "result.json", {
+                "disposition": "failed", "exit_status": "infrastructure_exhausted", "physical_attempts": 3,
+                "sample_key": source, "repetition_id": source})
+    if stop_failure in {"exhausted", "claimed_receipt"}:
+        write_json(run / "rollout/tasks/task/repetitions/dycon/result.json", {
+            "rid": "dycon", "capture_session_id": "session", "capture_stop_retry": {
+                "reason": "capture_stop_retries_exhausted", "attempt_count": 2, "retry_limit": 1,
+                "correlation_ids": ["first", "second"]}})
+        write_json(run / "hidden/publication.json", {
+            "schema_version": 1, "run_id": "run", "nas_locator": str(root / "native/run"),
+            "sessions": [{"session_id": "session", "rollout_id": "dycon",
+                          "trajectory_sha256": records["dycon"]["trajectory_sha256"],
+                          "files": {"receipt.json": {}} if stop_failure == "claimed_receipt" else {}}]})
     evidence_path = run / "evidence.json"
     write_json(evidence_path, {})
     class Evidence:
@@ -315,7 +341,15 @@ def test_native_assembler_excludes_unscored_decision_before_probability_loading(
     monkeypatch.setattr("benchmark_evaluation.swebench_settlement.training_label", lambda *args: False)
     session = root / "session"
     write_json(session / "parallel/decisions/decision.json", {})
-    monkeypatch.setattr("hidden.token_evidence.load_token_session", lambda *args, **kwargs: ({"base": session}, None))
+    calls = []
+    def load(*args, **kwargs):
+        calls.append(True)
+        if stop_failure == "native_conflict":
+            raise ValueError("native checksum mismatch")
+        if stop_failure == "native_missing" or (stop_failure == "native_recovers" and len(calls) == 1):
+            return None, "publication_token_proof_incomplete"
+        return {"base": session}, None
+    monkeypatch.setattr("hidden.token_evidence.load_token_session", load)
     monkeypatch.setattr("steering.datasets.sessions.full_decision", lambda *args: ({
         "branch_count": 2, "candidates": [{"branch_id": 0, "score": None}, {"branch_id": 1, "score": 1.}]}, "hash"))
     def completion(root, response, cfg, request):
@@ -325,11 +359,32 @@ def test_native_assembler_excludes_unscored_decision_before_probability_loading(
     request = {"step": 0, "tasks": ["task"], "policy_version": "S0", "estimator_version": "E0",
                "request_sha256": "request", "work_items": [
                    {"task_id": "task", "source": source, "trajectory_id": source} for source in ("dycon", "baseline")]}
-    result = NativeRunAssembler(cfg, feature={}, advantage_settings={"top_k": 1, "top_k_fraction": None})(
-        request, {"exit_code": 0}, run_id="run")
+    assemble = NativeRunAssembler(cfg, feature={}, advantage_settings={"top_k": 1, "top_k_fraction": None})
+    if stop_failure in {"claimed_receipt", "native_conflict"}:
+        with pytest.raises(ValueError, match="session proof mismatch|native checksum mismatch"):
+            assemble(request, {"exit_code": 0}, run_id="run")
+        return
+    result = assemble(request, {"exit_code": 0}, run_id="run")
+    if stop_failure == "sampling_all":
+        empty = OnlineRolloutBatch.from_dict(result)
+        assert not empty.rows and not empty.resolved_points
+        assert len(empty.discarded_trajectories) == 2
+        assert not calls
+        return
     assert len(result["rows"]) == 1
     assert result["rows"][0]["advantage"] == -1.
-    assert result["excluded_groups"][0]["reason"] == "missing_or_nonfinite_score"
+    if stop_failure in {"exhausted", "sampling", "native_missing"}:
+        reason = {"exhausted": "capture_stop_retries_exhausted", "sampling": "sampling_retries_exhausted",
+                  "native_missing": "native_evidence_retries_exhausted"}[stop_failure]
+        discard = result["discarded_trajectories"][0]
+        assert discard["reason"] == reason
+        assert discard["result_sha256"] and not result.get("excluded_groups")
+        assert len(calls) == (2 if stop_failure == "native_missing" else 0)
+        if stop_failure == "sampling":
+            assert discard["rollout_id"] is None and discard["retry_count"] == 2
+    else:
+        assert result["excluded_groups"][0]["reason"] == "missing_or_nonfinite_score"
+        assert len(calls) == (2 if stop_failure == "native_recovers" else 1)
 
 
 def shared_broker():

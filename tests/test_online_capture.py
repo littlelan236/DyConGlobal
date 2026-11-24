@@ -279,3 +279,38 @@ def test_capture_request_accepts_parallel_consensus_32_branch_identity():
     request = CaptureRequest.from_mapping(metadata)
     assert request.branch_id == 31
     assert request.branch_count == 32
+
+
+def test_stop_can_retry_after_drain_timeout_and_terminal_status(tmp_path, monkeypatch):
+    from hidden.backends.vllm.online import CaptureClient
+    import requests
+
+    controller = OnlineCaptureController(tmp_path, {"export": {"root": "hidden/online"}})
+    controller.start(capture_request_metadata("retry-stop", "task", "run", "rollout", 0, ["think_open"]))
+    server = CaptureControlServer(controller).start()
+    path = controller.export_root / "sessions/retry-stop/receipt.json"
+    original_drain = controller.queue.drain_session
+
+    def timeout(*args):
+        raise TimeoutError("Session capture writer did not drain")
+
+    try:
+        monkeypatch.setattr(controller.queue, "drain_session", timeout)
+        client = CaptureClient(server.base_url)
+        with pytest.raises(requests.HTTPError) as failed:
+            client.stop("retry-stop")
+        diagnostic = failed.value.capture_diagnostic
+        assert diagnostic["server_error_type"] == "ExportQueueDrainTimeout"
+        assert not path.exists()
+
+        session = controller.sessions["retry-stop"]
+        session.status = "complete"
+        session.finalization = {"session_id": "retry-stop"}
+        monkeypatch.setattr(controller.queue, "drain_session", original_drain)
+        assert client.stop("retry-stop")["status"] == "complete"
+        written = path.read_bytes()
+        monkeypatch.setattr(controller.queue, "drain_session", timeout)
+        assert client.stop("retry-stop")["status"] == "complete"
+        assert path.read_bytes() == written
+    finally:
+        server.close()

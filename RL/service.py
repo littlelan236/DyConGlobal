@@ -27,7 +27,7 @@ def _source(config):
     mode = config.run.start.mode
     if mode == "fresh":
         return None
-    # checkpoints imports Torch; source validation for dry-run uses receipt/JSON only instead.
+    # Source validation stays Torch-free so dry-run can use the runner environment.
     from RL.artifacts import read_receipt, verify_receipt
 
     path = Path(config.run.start.checkpoint)
@@ -35,18 +35,22 @@ def _source(config):
     owner = path if resuming else path.parent
     if resuming and not (path / "training-state.pt").is_file():
         raise ValueError("resume needs a complete checkpoint; choose warm_start for adapter-only output")
-    receipt = (verify_receipt if config.preflight.verify_checkpoint else read_receipt)(
-        owner, "lora-checkpoint-v1" if resuming else None)
+    if mode == "resume" and config.algorithm and config.algorithm.name in {"offline_baseline_grpo_v1", "key_step_grpo_v1"}:
+        from RL.checkpoints import verify_checkpoint
+        receipt = verify_checkpoint(owner, verify_hashes=config.preflight.verify_checkpoint)
+    else:
+        receipt = (verify_receipt if config.preflight.verify_checkpoint else read_receipt)(
+            owner, "lora-checkpoint-v1" if resuming else None)
     if receipt["kind"] not in {"lora-checkpoint-v1", "lora-attempt-v1"}:
         raise ValueError("Unsupported source adapter owner")
     adapter = path / "adapter" if resuming else path
     if adapter.name != "adapter":
         raise ValueError("warm_start requires an explicitly named adapter/ export")
     identity = read_json(adapter / "identity.json")
-    if not resuming and (owner / "state.json").exists():
+    if not resuming and (owner / "state.json").exists() and not (config.algorithm and config.algorithm.name == "key_step_grpo_v1"):
         from RL.grpo.stream_resume import execution_mode
         execution_mode(config, read_json(owner / "state.json")["contract"])
-    if resuming:
+    if resuming and not (config.algorithm and config.algorithm.name == "key_step_grpo_v1"):
         from RL.grpo.stream_resume import execution_mode
         contract = read_json(path / "state.json")["contract"]
         execution_mode(config, contract)
@@ -64,6 +68,25 @@ def _preflight(config, root, parent):
     if is_full(config):
         from RL.full_artifacts import preflight
         return preflight(config, root, parent)
+    from RL.key_steps import enabled as key_steps_enabled
+    if key_steps_enabled(config):
+        from RL.key_steps import schedule, manifest, binding, validate_resume
+        schedule(config)
+        data = manifest(config.key_steps.dataset)
+        tokenizers = {m["tokenizer"] for e in data["entries"] for m in e["members"]}
+        if len(tokenizers)!=1:
+            raise ValueError("Key-step dataset mixes tokenizer identities")
+        base = base_identity(config.model.path, root, config.preflight.verify_identity)
+        proof = binding(config.key_steps,base["fingerprint"],next(iter(tokenizers)))
+        validate_resume(config,parent,proof)
+        return {**base,"key_step_dataset":proof}
+    from RL.offline_baseline import baseline_only, schedule as baseline_schedule, validate_advantage_stats
+    if baseline_only(config):
+        if config.run.start.mode not in {"fresh", "resume", "warm_start"}:
+            raise ValueError("Baseline-only training supports fresh/resume/warm_start")
+        baseline_schedule(config)
+        return base_identity(config.model.path, root, config.preflight.verify_identity)
+    validate_advantage_stats(config.offline_baseline)
     from RL.parallel import execution_contract
     if parent and config.run.start.mode in {"resume", "append_resume"}:
         from RL.topology import validate_resume as validate_topology
@@ -211,7 +234,7 @@ def run(root_config, training_config):
                     "supervision": describe_policy(config.training.supervision),
                     "algorithm": config.algorithm.name if config.algorithm else "causal_ce",
                     "grpo": config.grpo.model_dump() if config.grpo else None,
-                    "dataset": base.get("grpo_dataset"),
+                    "dataset": base.get("grpo_dataset") or base.get("key_step_dataset"),
                     "streaming_resume": base.get("streaming_resume"),
                     "physical_execution": execution_record(config) if portable_enabled(config) else None,
                     "training_rng_validation": "pending_model_and_update" if portable_enabled(config) else None,
@@ -443,8 +466,16 @@ def _train_impl(config, root, directory, base, parent, attempt, *, allocator_war
     manifest["checkpoint_inventory"] = checkpoint_inventory
     manifest["extra_backbone_targets"] = [t for t in targets if t["category"] == "extra"]
     write_json(directory / "trainable-parameters.json", manifest)
+    from RL.offline_baseline import baseline_only
+    from RL.key_steps import enabled as key_steps_enabled
+    if baseline_only(config) or key_steps_enabled(config):
+        from RL.offline_baseline_train import execute
+        return execute(config, directory, base, parent, attempt, model, targets, memory_controller)
     if config.algorithm is not None:
         if config.algorithm.name == "online_bootstrap_grpo_v1":
+            if parallel and not parallel.primary:
+                from RL.online_parallel import follower
+                return follower(config, model)
             return _train_online(config, root, directory, base, parent, attempt, model, targets,
                                  optimizer_settings=config.training, environment=environment,
                                  loading=loading, mlps=mlps, offloader=offloader,
@@ -828,6 +859,16 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
         if reader is None and not streaming_mode:
             raise ValueError("Distributed GRPO requires prepared indexed groups; migrate the legacy attempt first")
         contract["parallel"] = execution_contract(config)
+    from RL.policy_reference import computation
+    if computation(config) == "recompute":
+        contract["kl_reference"] = {
+            "policy": "initial_policy", "computation": "recompute",
+            "snapshot": "grpo/reference/adapter",
+            "identity": reference_proof["reference_identity"]}
+    from RL.offline_baseline import binding as baseline_binding, build_updater as baseline_updater
+    baseline_contract = baseline_binding(config.offline_baseline, base["fingerprint"], proof["tokenizer_fingerprint"])
+    if baseline_contract is not None:
+        contract["offline_baseline"] = baseline_contract
     from RL.topology import bind as bind_topology
     bind_topology(config, metadata, contract, directory)
     from RL.config_migration import write_transition
@@ -871,8 +912,9 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
                             "streaming": streaming_mode,
                             "stop": config.validation.stop_after_update or proof["planned_updates"]})
     coverage = Coverage(model, targets)
+    from RL.policy_reference import dycon_scorer
     objective = GroupObjective(reference_values, config.grpo, config.training.memory.loss_chunk_tokens,
-                              offloader=offloader)
+                              offloader=offloader, reference_scorer=dycon_scorer(config, model, directory))
     telemetry = UpdateTelemetry(model, objective, mlps, offloader, directory,
                     config.training.memory.profile_first_update,
                     config.training.memory.attention_policy == "flash_only")
@@ -940,7 +982,9 @@ def _train_grpo(config, root, directory, base, parent, attempt, model, targets, 
                 max_updates=stop, grad_clip=config.training.grad_clip, state=state,
                 on_update=update, on_window_start=start_attempt, on_gradients=coverage.gradients,
                 on_stage=live.emit, parallel=parallel, memory_controller=memory_controller,
-                on_attempt_abort=abort_attempt)
+                on_attempt_abort=abort_attempt,
+                baseline=baseline_updater(config, model, directory, contract, optimizer, scheduler,
+                                          memory_controller=memory_controller))
         if state["global_step"] != stop:
             raise ValueError("GRPO dataset exhausted before its planned update boundary")
         final_adapter = adapter_fingerprint(model)
@@ -1027,6 +1071,7 @@ def _train_online_impl(config, root, directory, base, parent, attempt, model, ta
     from RL.online_runtime import (HttpRolloutClient, JsonlRolloutProvider,
                                    SharedVllmRolloutProvider, TorchOnlineUpdater)
 
+    from RL.policy_reference import computation
     options = config.online_bootstrap
     if options.rollout_manifest is not None and options.rollout_endpoint is not None:
         raise ValueError("configure exactly one of rollout_manifest or rollout_endpoint")
@@ -1039,6 +1084,8 @@ def _train_online_impl(config, root, directory, base, parent, attempt, model, ta
     campaign_contract = {"campaign_id": options.campaign_id or config.run.attempt_id,
                          "initial_sha256": sha256(options.initial_estimator),
                          "options": options.model_dump(exclude={"state_path", "estimator_store"})}
+    if computation(config) != "legacy":
+        campaign_contract["kl_reference_computation"] = computation(config)
     for key in ("baseline_failure_reward", "verifier_error_retries"):
         if getattr(options, key) is None:
             campaign_contract["options"].pop(key, None)
@@ -1081,7 +1128,7 @@ def _train_online_impl(config, root, directory, base, parent, attempt, model, ta
     source_mass = SourceMass(options.dycon_weight, options.baseline_weight)
     updater = TorchOnlineUpdater(model, optimizer_settings, source_mass=source_mass,
                                  kl_beta=options.kl_beta, clip_epsilon=options.clip_epsilon,
-                                 k3_cap=options.k3_cap,
+                                 k3_cap=options.k3_cap, kl_reference_mode=computation(config),
                                  baseline_training_mode=options.baseline_training_mode,
                                  max_trace_input_tokens=options.max_trace_input_tokens)
     adapter_identity = adapter_contract(base, targets, config.lora)
@@ -1125,16 +1172,29 @@ def _train_online_impl(config, root, directory, base, parent, attempt, model, ta
         "k3_cap": options.k3_cap, "baseline_supervision": "all_completion_tokens_v1"},
         "input": {"rollout_provider": rollout_input},
         "adapter": adapter_identity, "dependencies": (environment or {}).get("versions", {})}
+    if computation(config) != "legacy":
+        contract["objective"]["kl_reference_computation"] = computation(config)
     if options.baseline_training_mode != "agent_step":
         contract["objective"]["baseline_training"] = {
             "mode": options.baseline_training_mode, "version": "strict_token_prefix_v1",
             "max_trace_input_tokens": options.max_trace_input_tokens}
+    from RL.parallel import current as online_context
+    if online_context():
+        contract["objective"]["data_parallel"] = {
+            "world_size": online_context().world_size,
+            "partition": "training_unit_ordinal_mod_world_size", "gradient_reduction": "sum_fp32"}
     initial_export = online_root / "serving/step-000000/adapter"
     if Path(state_path).is_file() and not initial_export.is_dir():
         raise ValueError("resuming online campaign has lost its immutable initial adapter")
     publish_adapter(model, initial_export, adapter_identity)
     if options.kl_beta:
         updater.reference_scorer = InitialPolicyScorer(model, initial_export)
+    from RL.parallel import current as online_parallel_context
+    online_parallel = online_parallel_context()
+    if online_parallel:
+        online_parallel.broadcast({"command": "initialize", "initial_adapter": str(initial_export)})
+        from RL.online_parallel import PrimaryUpdater
+        updater = PrimaryUpdater(updater, online_parallel)
 
     def deployment(policy_version, estimator_version):
         from RL.online_server import request_digest
@@ -1428,6 +1488,8 @@ def _train_online_impl(config, root, directory, base, parent, attempt, model, ta
                                         campaign_id=options.campaign_id or config.run.attempt_id,
                                         state_path=state_path)
         history = coordinator.run()
+        if online_parallel:
+            online_parallel.broadcast({"command": "stop"})
         committed_step = coordinator.state.committed_step
         final_adapter = adapter_fingerprint(model)
         if frozen_before is not None and frozen_before != frozen_checksums(model):

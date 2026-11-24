@@ -20,6 +20,8 @@ from rollout.artifacts import import_rollout
 from rollout.progress import Progress
 from rollout.retry import INFRASTRUCTURE as INFRASTRUCTURE
 from rollout.retry import (
+    ONLINE_LIMIT_RESAMPLE_RETRIES,
+    RETRY_STATUSES,
     SEED_POLICY,
     TERMINAL,
     counts_recorded,
@@ -27,6 +29,7 @@ from rollout.retry import (
     enabled,
     resampling_enabled,
     initialize_counts,
+    online_sampling_discard,
     publish_once,
     rebuild_counts,
     record_agent_outcome,
@@ -198,6 +201,8 @@ def _finish_attempt(cfg, run_id, task, sample, context, out, runtime, state,
         'timings': timings, 'capture_session_id': capture_session_id, 'usage': usage,
         'progress_errors': runtime.get('progress_errors', []),
     }
+    if 'capture_stop_retry' in state:
+        result['capture_stop_retry'] = state['capture_stop_retry']
     dependency_failure = (state.get('error') or {}).get('dependency_failure')
     if dependency_failure:
         result['dependency_failure'] = dependency_failure
@@ -370,12 +375,30 @@ def _execute_mini_attempt(cfg, run_id, task, factory, runtime, sample, context, 
                     except Exception as exc:
                         capture_failure(exc, abort=False)
                         capture_status = 'partial'
-                    capture_client.timeout = cfg['capture']['finalize_seconds'] + cfg['capture']['control_seconds']
-                    try:
-                        capture_client.stop(capture_session_id)
-                    except Exception as exc:
-                        capture_failure(exc, abort=False)
-                        capture_status = 'partial'
+                    capture_cfg = cfg['capture']
+                    capture_client.timeout = max(capture_cfg.get('finalize_request_seconds') or 0,
+                        2 * capture_cfg['finalize_seconds'] + capture_cfg['control_seconds'])
+                    online = cfg['execution'].get('online_rl_failure_policy') is not None
+                    retry_limit = 1 if online else 0
+                    stop_timeouts = []
+                    for attempt in range(retry_limit + 1):
+                        try:
+                            capture_client.stop(capture_session_id)
+                            break
+                        except Exception as exc:
+                            diagnostic = getattr(exc, 'capture_diagnostic', None) or {}
+                            drain_timeout = diagnostic.get('server_error_type') == 'ExportQueueDrainTimeout'
+                            if drain_timeout:
+                                stop_timeouts.append(diagnostic.get('correlation_id'))
+                                if attempt < retry_limit:
+                                    continue
+                            if online and len(stop_timeouts) == retry_limit + 1:
+                                state['capture_stop_retry'] = {
+                                    'reason': 'capture_stop_retries_exhausted', 'retry_limit': retry_limit,
+                                    'attempt_count': len(stop_timeouts), 'correlation_ids': stop_timeouts}
+                            capture_failure(exc, abort=False)
+                            capture_status = 'partial'
+                            break
                     try:
                         capture_client.prepare(capture_session_id, path)
                         write_json(out / 'capture-prepared.json', {'session_id': capture_session_id, 'trajectory_sha256': sha256(path)})
@@ -480,6 +503,11 @@ def _decorate_result(cfg, sample, work, out, result, history):
     result.setdefault('seed_round', 0)
     result.setdefault('effective_seed', sample.sample_seed)
     result.setdefault('disposition', disposition(cfg, result.get('exit_status')))
+    if (cfg.get('_online_rl_source') in {'baseline', 'dycon'}
+            and (result.get('exit_status') in {'CaptureError', 'CleanupError', 'OpenHandsError', 'TimeoutError'}
+                 or (result.get('failure_type') == 'dependency_error'
+                     and result['disposition'] == 'failed'))):
+        result['disposition'] = 'infrastructure_retry'
     records = [*history, result]
     started = [p for p in (work / 'attempts').iterdir() if (p / 'attempt-started.json').exists()]
     contexts = [read_json(p / 'attempt-context.json') for p in started if (p / 'attempt-context.json').exists()]
@@ -495,6 +523,10 @@ def _decorate_result(cfg, sample, work, out, result, history):
         result['selection_retry_count'] = selection_failures - 1
         if selection_failures > cfg['execution']['selection_retry']['max_retries']:
             result.update(exit_status='selection_retry_exhausted', last_exit_status='ParallelSelectionError', disposition='failed')
+    if cfg.get('_online_rl_source') == 'dycon' and result['disposition'] == 'retry_pending':
+        if sum(r.get('exit_status') in RETRY_STATUSES for r in records) > ONLINE_LIMIT_RESAMPLE_RETRIES:
+            result.update(exit_status='limits_retry_exhausted', last_exit_status=result['exit_status'],
+                          disposition='failed')
     if result.get('disposition') == 'infrastructure_retry' and result['infrastructure_retry_count'] >= cfg['execution']['infrastructure_retry_limit']:
         result.update(exit_status='infrastructure_exhausted', last_exit_status=result['exit_status'], disposition='failed')
     write_json(out / 'attempt.json', result)
@@ -620,7 +652,10 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
         try:
             seed = effective_seed(sample, manifest, round_id, actual)
         except ValueError as exc:
-            value = {**sample.as_dict(), 'exit_status': 'SeedSpaceExhausted', 'error': str(exc), 'disposition': 'failed'}
+            if cfg.get('_online_rl_source') and not str(exc).startswith('seed_space_exhausted:'):
+                raise
+            value = {**sample.as_dict(), 'exit_status': 'SeedSpaceExhausted', 'error': str(exc), 'disposition': 'failed',
+                     'physical_attempts': sum((p / 'attempt-started.json').exists() for _, p in existing)}
             write_json(result_path, value)
             return value
         if reserved:
@@ -650,7 +685,15 @@ def run_task(cfg, run_id, task_key, task, factory, runtime=None, sample=None):
                 'base_url': runtime['serving_worker_endpoint'], 'tensor_parallel_size': 1,
                 'config_hash': cfg['config_hash'], 'assigned_at': now(),
             })
-        result = _execute_attempt(cfg, run_id, task, factory, runtime, sample, context, out)
+        try:
+            result = _execute_attempt(cfg, run_id, task, factory, runtime, sample, context, out)
+        except Exception as exc:
+            if (cfg.get('_online_rl_source') not in {'baseline', 'dycon'}
+                    or not (isinstance(exc, (TimeoutError, ConnectionError))
+                            or type(exc).__name__ in INFRASTRUCTURE)):
+                raise
+            result = {**context, 'exit_status': type(exc).__name__, 'disposition': 'infrastructure_retry',
+                      'error': repr(exc)}
         return _decorate_result(cfg, sample, work, out, result, history)
 
 
@@ -707,8 +750,7 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
         if len(settled) == len(work_items):
             tracker = Progress(run, cfg, work_items, settled)
             tracker._write()
-            failed = [k for k, v in settled.items() if not sample_accepted(cfg, v)]
-            update_run_status(run, 'failed' if failed else 'complete', failed=failed)
+            _settle_run_status(run, cfg, work_items, settled)
             _finalize_capture_publication(cfg, run_id, work_items)
             return settled
     if factory is not None:
@@ -916,9 +958,7 @@ def _run_manifest_active(cfg, run_id, loaded, adapter, settled, factory, operato
         if counts_recorded(run):
             rebuild_counts(run, loaded['work_items'])
         tracker._write()
-        failed = [item['sample_key'] for item in work_items
-                  if not sample_accepted(cfg, outcomes.get(item['sample_key'], {}))]
-        update_run_status(run, "failed" if failed else "complete", failed=failed)
+        _settle_run_status(run, cfg, work_items, outcomes)
         return outcomes
     except Cancelled:
         update_run_status(run, 'cancelling', reason='Cancelled')
@@ -937,6 +977,21 @@ def _run_manifest_active(cfg, run_id, loaded, adapter, settled, factory, operato
                     _finalize_capture_publication(cfg, run_id, work_items, producers=capture_producers)
 
 
+def _settle_run_status(run, cfg, work_items, outcomes):
+    failed, discarded = [], []
+    for item in work_items:
+        key = item['sample_key']
+        result = outcomes.get(key, {})
+        if sample_accepted(cfg, result):
+            continue
+        if item.get('online_source') in {'baseline', 'dycon'} and online_sampling_discard(result):
+            discarded.append(key)
+        else:
+            failed.append(key)
+    update_run_status(run, 'failed' if failed else 'complete', failed=failed,
+                      **({'discarded_samples': discarded} if discarded else {}))
+
+
 def _finalize_capture_publication(cfg, run_id, work_items, *, producers=()):
     # run_manifest owns the run lock. All worker/serving/backend contexts have
     # exited before this call, including cancellation and exception paths.
@@ -953,14 +1008,15 @@ def admitted_task(cfg, run_id, key, task, factory, runtime, sample=None):
     # and config_hash remain authoritative for all other execution semantics.
     if 'serving_cfg' in runtime:
         cfg = copy.deepcopy(runtime['serving_cfg'])
+    if runtime.get('online_source') in {'baseline', 'dycon'}:
+        cfg = copy.deepcopy(cfg)
+        cfg['_online_rl_source'] = runtime['online_source']
     if runtime.get('online_source') == 'baseline':
         # The shared server keeps the estimator broker available for DyCon.
         # Only this trajectory's agent bypasses branch generation/scoring.
-        cfg = copy.deepcopy(cfg)
         if (cfg.get('execution', {}).get('online_rl_failure_policy') or {}).get('baseline_failure_reward') is not None:
-            cfg['_online_rl_source'] = 'baseline'
             cfg['execution']['limits_retry'] = {**cfg['execution'].get('limits_retry', {}), 'enabled': False}
-        cfg['parallel']['enabled'] = False
+        cfg.setdefault('parallel', {})['enabled'] = False
         cfg['parallel']['branch_count'] = 1
     run = Path(cfg['project_root']) / 'runs' / run_id
     boundary = _boundary(run, factory)

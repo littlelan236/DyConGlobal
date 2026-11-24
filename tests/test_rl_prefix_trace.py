@@ -139,3 +139,20 @@ def test_bound_campaign_inherits_numerics_and_mode(tmp_path):
     raw['runtime']['bf16_allow_split_k']=True
     with pytest.raises(ValueError, match='numerics differ'):
         online_training_defaults(raw,tmp_path)
+
+
+def test_completion_budget_merges_steps_beyond_old_context_limit():
+    template = rows()[0]
+    base = (1,) * 32768
+    source = tuple(replace(template, row_id=str(i), agent_step=i,
+                           input_token_ids=base + (2, 3) * (i + 1),
+                           completion_token_ids=(3,), trajectory_token_count=5)
+                   for i in range(5))
+    units, weights, receipt = build_training_traces(
+        source, [.2] * 5, max_input_tokens=None, max_completion_tokens=2)
+    assert [unit.input_token_ids for unit in units] == [
+        source[1].input_token_ids, source[3].input_token_ids, source[4].input_token_ids]
+    assert [unit.supervision_positions for unit in units] == [
+        (32769, 32771), (32773, 32775), (32777,)]
+    assert weights == pytest.approx([.4, .4, .2])
+    assert receipt["break_reasons"] == {"completion_budget": 2}

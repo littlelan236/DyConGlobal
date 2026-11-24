@@ -78,6 +78,13 @@ def test_extreme_finite_log_ratio_caps_before_autograd_overflow(beta):
     theta = torch.tensor([[-1000., -.3]], requires_grad=True)
     result = evaluate(theta, beta=beta)
     result.loss.backward()
+    if not beta:
+        assert result.k3_penalty.item() == 0
+        assert "k3_cap_clipped_tokens" not in result.metrics
+        assert torch.isfinite(theta.grad).all()
+        uncapped = evaluate(theta.detach(), cap=None, beta=0.)
+        assert uncapped.loss.item() == pytest.approx(result.loss.item())
+        return
     assert result.k3_penalty.item() == pytest.approx((1 + math.expm1(.3) - .3) / 2)
     assert torch.isfinite(theta.grad).all()
     assert theta.grad[0, 0] == 0

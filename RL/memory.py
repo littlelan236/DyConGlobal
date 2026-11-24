@@ -239,8 +239,11 @@ def install_mlp_backend(model, chunk_tokens):
 
 class BoundaryOffload:
     """Offload only non-reentrant checkpoint input activations, never model weights."""
-    def __init__(self, model, budget_bytes, *, enabled=True, host_settings=None, pressure_settings=None):
+    def __init__(self, model, budget_bytes, *, enabled=True, host_settings=None, pressure_settings=None, host_reserve_bytes=0):
+        self.host_reserve_bytes = host_reserve_bytes
         self.budget_bytes = budget_bytes
+        self.trace_admission = None
+        self.failed_trace = None
         self.enabled = enabled
         self.host_settings, self.pressure_settings = host_settings, pressure_settings
         self.pool = None
@@ -262,6 +265,7 @@ class BoundaryOffload:
         self.events = {"d2h": [], "h2d": []}
         self.peak_bytes = self.live_bytes
         self.budget_rejection = None
+        self.host_wait_seconds = 0.0
         self._boundary_clean = False
         self.selected_boundaries = self.retained_boundaries = 0
         self.selection_reasons = {}
@@ -308,6 +312,116 @@ class BoundaryOffload:
         self.selection_reasons[choice["reason"]] = self.selection_reasons.get(choice["reason"], 0) + 1
         return choice["offload"]
 
+    @contextlib.contextmanager
+    def trace_scope(self, input_tokens, stage):
+        admission = self.trace_admission
+        if admission is None:
+            yield
+            return
+        if not self.enabled or self.pool is None or self.live_bytes or self.failed_trace is not None:
+            raise RuntimeError("Trace admission requires an empty, enabled managed offload pool")
+        size = input_tokens * self.trace_bytes_per_token + 512 * 2**20
+        token, status, waited = admission.acquire(
+            size, lambda **kw: stage("trace_host_wait", trace_host_request_bytes=size, **kw))
+        pool = self.pool
+        old_capacity = pool.capacity
+        old_residency_hook = pool.on_residency_change
+        accounted = size
+
+        def account_allocation(_settings, *, requested_bytes):
+            nonlocal accounted
+            if requested_bytes:
+                projected = pool.allocator.stats()["host_allocated_bytes"] + requested_bytes
+                if projected > accounted:
+                    admission.account_overrun(token, projected)
+                    accounted = projected
+
+        # Keep the estimate soft once the trace has started. Only admission
+        # of future traces is affected by an overrun.
+        def account_residency(delta):
+            admission.account_residency(token, delta)
+
+        pool.capacity = account_allocation
+        pool.on_residency_change = account_residency
+        try:
+            stage("trace_host_admitted", trace_host_request_bytes=size, wait_seconds=waited, **status)
+            yield
+            self.safe_boundary()
+            if pool.blocks or pool.native_release_pending:
+                raise RuntimeError("Cannot release trace reservation with live pinned blocks")
+            admission.release(token)
+            token = None
+            stage("trace_host_released", trace_host_request_bytes=size,
+                  trace_host_accounted_bytes=accounted, shared_reserved_bytes=None)
+        except BaseException:
+            # The traceback may still hold the graph and its pinned activations.
+            # The retry caller drains them after the failed stack has unwound.
+            self.failed_trace = token
+            raise
+        finally:
+            pool.capacity = old_capacity
+            pool.on_residency_change = old_residency_hook
+
+    def release_failed_trace(self):
+        if self.failed_trace is None:
+            return
+        pool = self.pool
+        token = self.failed_trace
+        old_residency_hook = pool.on_residency_change
+        pool.on_residency_change = lambda delta: self.trace_admission.account_residency(token, delta)
+        try:
+            self.safe_boundary()
+            if pool.blocks:
+                pool.trim(0, reason="failed_trace", finalize=True)
+            if pool.blocks or pool.native_release_pending:
+                raise RuntimeError("Cannot release failed trace reservation with live pinned blocks")
+            self.trace_admission.release(token)
+            self.failed_trace = None
+        finally:
+            pool.on_residency_change = old_residency_hook
+
+    @contextlib.contextmanager
+    def _host_admission(self, size, device):
+        if not self.host_reserve_bytes:
+            yield
+            return
+        import fcntl
+        from RL.resources import host_memory
+
+        started = time.monotonic()
+        heartbeat = started
+        deadline = started + 420
+        lock_path = Path("/tmp") / f"dycon-offload-{os.getuid()}.lock"
+        with lock_path.open("a") as lock:
+            while True:
+                with contextlib.ExitStack() as stack:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        pass
+                    else:
+                        stack.callback(fcntl.flock, lock, fcntl.LOCK_UN)
+                        host = host_memory()
+                        limits = [host.get("MemAvailable", 0)]
+                        if host.get("cgroup_remaining_bytes") is not None:
+                            limits.append(host["cgroup_remaining_bytes"])
+                        if min(limits) >= self.host_reserve_bytes + size:
+                            self.host_wait_seconds += time.monotonic() - started
+                            yield
+                            # Make the pinned allocation visible before another rank checks.
+                            torch.cuda.current_stream(device).synchronize()
+                            return
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"Timed out waiting for host memory to offload {size} bytes")
+                if time.monotonic() - heartbeat >= 30:
+                    import sys
+                    print(json.dumps({"event": "offload_host_wait", "pid": os.getpid(),
+                          "wait_seconds": time.monotonic() - started, "requested_bytes": size,
+                          "reserve_bytes": self.host_reserve_bytes, "host": host_memory()}),
+                          file=sys.stderr, flush=True)
+                    heartbeat = time.monotonic()
+                time.sleep(0.5)
+
     def _release(self, size):
         self.live_bytes -= size
 
@@ -333,35 +447,36 @@ class BoundaryOffload:
             if not self._select(tensor, size):
                 self.retained_boundaries += 1
                 return False, tensor
-            if self.live_bytes + size > self.budget_bytes:
+            if self.budget_bytes is not None and self.live_bytes + size > self.budget_bytes:
                 self.budget_rejection = {"requested_bytes": size, "live_bytes": self.live_bytes,
                                          "budget_bytes": self.budget_bytes}
                 raise RuntimeError("Pinned activation host budget exceeded; offload was not disabled")
             started = time.monotonic()
             self._boundary_clean = False
-            if self.host_settings is not None and self.host_settings.enabled:
-                from RL.host_offload import ManagedHostPool, HostLease
-                if self.pool is None: self.pool = ManagedHostPool(self.host_settings)
-                block = self.pool.acquire(size)
-                try:
-                    packed = HostLease(self.pool, block, tensor)
-                    self._copy("d2h", lambda: packed.tensor.copy_(tensor, non_blocking=True))
-                    block["events"].append(self.events["d2h"][-1][1])
-                except BaseException:
-                    # Even a failing copy callback may have enqueued work. Keep
-                    # the block unavailable until this stream dependency passes.
+            with self._host_admission(size, tensor.device):
+                if self.host_settings is not None and self.host_settings.enabled:
+                    from RL.host_offload import ManagedHostPool, HostLease
+                    if self.pool is None: self.pool = ManagedHostPool(self.host_settings)
+                    block = self.pool.acquire(size)
                     try:
-                        failed_copy = torch.cuda.Event()
-                        failed_copy.record()
-                        block["events"].append(failed_copy)
+                        packed = HostLease(self.pool, block, tensor)
+                        self._copy("d2h", lambda: packed.tensor.copy_(tensor, non_blocking=True))
+                        block["events"].append(self.events["d2h"][-1][1])
                     except BaseException:
-                        block["poisoned"] = True
-                    self.pool.release(block)
-                    raise
-                finalizable = packed
-            else:
-                packed = self._copy("d2h", lambda: native.pack_hook(tensor))
-                finalizable = packed[1]
+                        # Even a failing copy callback may have enqueued work. Keep
+                        # the block unavailable until this stream dependency passes.
+                        try:
+                            failed_copy = torch.cuda.Event()
+                            failed_copy.record()
+                            block["events"].append(failed_copy)
+                        except BaseException:
+                            block["poisoned"] = True
+                        self.pool.release(block)
+                        raise
+                    finalizable = packed
+                else:
+                    packed = self._copy("d2h", lambda: native.pack_hook(tensor))
+                    finalizable = packed[1]
             self.pack_seconds += time.monotonic() - started
             self.d2h_bytes += size
             self.live_bytes += size
@@ -403,6 +518,7 @@ class BoundaryOffload:
         # The training core synchronizes before calling the update callback.
         values = {"offload_d2h_bytes": self.d2h_bytes, "offload_h2d_bytes": self.h2d_bytes,
                   "offload_pinned_peak_bytes": self.peak_bytes, "offload_live_bytes": self.live_bytes,
+                  "offload_host_wait_seconds": self.host_wait_seconds,
                   "offload_pack_wall_seconds": self.pack_seconds,
                   "offload_unpack_wall_seconds": self.unpack_seconds,
                   "offload_host_budget_bytes": self.budget_bytes,
@@ -669,7 +785,24 @@ def configure_checkpointing(model, config, budget_bytes):
         offloader = BoundaryOffload(model, budget_bytes,
             enabled=memory.activation_offload in {"checkpoint_boundary", "memory_pressure"},
             host_settings=memory.host_offload,
-            pressure_settings=memory.memory_pressure if memory.activation_offload == "memory_pressure" else None)
+            pressure_settings=memory.memory_pressure if memory.activation_offload == "memory_pressure" else None,
+            host_reserve_bytes=(0 if memory.shared_trace_host_budget_gib is not None else
+                                int(memory.offload_host_reserve_gib * 2**30)))
+        if memory.shared_trace_host_budget_gib is not None:
+            from RL.host_admission import TraceAdmission
+            from RL.parallel import current
+            parallel = current()
+            offloader.trace_admission = TraceAdmission(
+                Path("/tmp") / f"dycon-trace-admission-{os.getuid()}",
+                budget=int(memory.shared_trace_host_budget_gib * 2**30),
+                reserve=int(memory.offload_host_reserve_gib * 2**30),
+                attempt=config.run.attempt_id, rank=parallel.rank if parallel else 0)
+            backbone = text_backbone(model)
+            layers = backbone.config.num_hidden_layers
+            width = backbone.config.hidden_size
+            element_bytes = backbone.get_input_embeddings().weight.element_size()
+            # Use the existing activation estimate with a 50% margin.
+            offloader.trace_bytes_per_token = (layers + 2) * width * element_bytes * 3 // 2
     if config.training.checkpoint_policy == "layer":
         enable_checkpointing(model)
         if offloader:

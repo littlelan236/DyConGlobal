@@ -54,6 +54,10 @@ def accept_reasoning_event(state, position: int, anchor: str, stats=None) -> boo
     return True
 
 
+class ExportQueueDrainTimeout(TimeoutError):
+    pass
+
+
 class AnchorError(ValueError):
     """Prompt/anchor evidence is not sufficient for an online capture."""
 
@@ -563,6 +567,8 @@ class _Session:
     diagnostic_identity: dict[str, Any] = field(default_factory=dict)
     stage_diagnostics: dict[str, Any] = field(default_factory=dict)
     stage_diagnostics_truncated_count: int = 0
+    stop_lock: Any = field(default_factory=threading.Lock)
+    stop_receipt_written: bool = False
     metrics: dict[str, int] = field(
         default_factory=lambda: {
             "graph_replays": 0,
@@ -1821,6 +1827,14 @@ class OnlineCaptureController:
             return entry
 
     def stop(self, session_id: str):
+        with self._lock:
+            session = self.sessions[session_id]
+        with session.stop_lock:
+            if session.stop_receipt_written:
+                return self.status(session_id)
+            return self._stop_and_write_receipt(session_id)
+
+    def _stop_and_write_receipt(self, session_id: str):
         started = time.monotonic()
         stop_evidence = {"session_id": session_id, "started_at": now(),
                          "queue_before": self._diagnostic_queue_status(session_id)}
@@ -1829,9 +1843,8 @@ class OnlineCaptureController:
             session = self.sessions.get(session_id)
             if session is None:
                 raise KeyError(session_id)
-            if session.status in {'stopped', 'complete', 'partial', 'not_exported'}:
-                return self.status(session_id)
-            session.status = 'draining'
+            if session.status not in {'stopped', 'complete', 'partial', 'not_exported'}:
+                session.status = 'draining'
             required_requests = {rid for rid, request in session.requests.items()
                                  if 'think_close' in (request.anchors or [])}
             if not self._output_condition.wait_for(
@@ -1854,18 +1867,22 @@ class OnlineCaptureController:
                 queue_at_failure=self._diagnostic_queue_status(session_id), controller_requests=self.control_status(),
                 error_type=type(exc).__name__, failed=True, finished_at=now())
             self._write_failure_artifact(f"sessions/{session_id}/stop-diagnostics.json", stop_evidence)
+            if isinstance(exc, TimeoutError):
+                raise ExportQueueDrainTimeout(str(exc)) from exc
             raise
         export_elapsed = time.monotonic() - export_started
         with self._lock:
             session = self.sessions.get(session_id)
             if session is None:
                 raise KeyError(session_id)
-            session.status = 'stopped'
+            finalized = session.finalization is not None
+            if not finalized:
+                session.status = 'stopped'
             for sample in session.samples:
                 if sample.get('status') in {'queued','captured'}:
-                    sample['session_status'] = 'stopped'
-            metadata = dict(session.samples[0]) if session.samples else None
-            value = {'session_id':session_id,'status':session.status,
+                    sample['session_status'] = session.status
+            metadata = dict(session.samples[0]) if session.samples and not finalized else None
+            value = {'session_id':session_id,'status':'stopped',
                 'metadata':self._request_summary(session.default_request),
                 'samples':len(session.samples),'metrics':dict(session.metrics)}
         stop_evidence.update(phase="completed", native_output_drain_seconds=native_elapsed,
@@ -1883,6 +1900,7 @@ class OnlineCaptureController:
         value.update(export=self.queue.status(session_id), files={
             'queue.jsonl':sha256(self.queue.journal) if self.queue.journal.exists() else None})
         self._write(f'sessions/{session_id}/receipt.json', value)
+        session.stop_receipt_written = True
         status = self.status(session_id)
         status["stop_diagnostics"] = stop_evidence
         return status

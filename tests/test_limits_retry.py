@@ -364,3 +364,36 @@ def test_retry_does_not_change_other_operation_selection(cfg, operation):
     cfg['operation'] = operation
     assert not enabled(cfg)
     assert disposition(cfg, 'LimitsExceeded') == 'accepted'
+
+
+@pytest.mark.parametrize("status,attempts_per_slot,discarded_count", [
+    ("APIError", 2, 2), ("LimitsExceeded", 4, 1)])
+def test_online_sampler_settles_exhausted_slot_and_preserves_healthy_slot(
+        cfg, monkeypatch, status, attempts_per_slot, discarded_count):
+    from application.execution.run_plan import _selection_from_tasks
+    from RL.online_runtime import make_online_run_work_items
+
+    cfg = configure(cfg, infra=1)
+    cfg['execution']['online_rl_failure_policy'] = {'baseline_failure_reward': -3.0}
+    cfg['config_hash'] = hash_json({k: v for k, v in cfg.items() if k != 'config_hash'})
+    root = cfg['project_root']
+    Catalog(root).register_tasks([task('a'), task('b')])
+    selection = _selection_from_tasks(Catalog(root), task_ids=['a', 'b'], cfg=cfg)
+    run_id = 'online-local-failure'
+    work = make_online_run_work_items(selection, run_id, m=1, base_seed=cfg['generation']['seed'],
+                                      branch_count=1)
+    run = create_run(cfg, run_id, operation='rollout', task_ids=['a', 'b'], repeat_count=2,
+                     online_work_items=work)
+    factory, calls, _, _ = fake_runtime(monkeypatch, {'a': [status], 'b': ['Submitted']})
+    outcomes = run_manifest(cfg, run_id, resume=True, factory=factory)
+    failures = attempts_per_slot * discarded_count
+    accepted_a = 2 - discarded_count
+    assert [c[3] for c in calls if c[0] == 'a'] == [status] * (failures + accepted_a)
+    assert [c[3] for c in calls if c[0] == 'b'] == ['Submitted'] * 2
+    summary = read_json(run / 'status.json')
+    assert summary['stage'] == 'complete'
+    assert len(summary['discarded_samples']) == discarded_count
+    assert all(outcomes[key]['instance_id'] == 'a' for key in summary['discarded_samples'])
+    assert len(RunEvidence(root, run_id).select()['rollouts']) == 2 + accepted_a
+    assert run_manifest(cfg, run_id, resume=True, factory=factory) == outcomes
+    assert len(calls) == failures + accepted_a + 2

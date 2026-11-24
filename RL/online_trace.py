@@ -6,9 +6,13 @@ import json
 import math
 
 
-def build_training_traces(rows, masses, *, max_input_tokens=32768):
-    """Merge exact append-only baseline inputs, preserving per-token mass."""
-    if len(rows) != len(masses) or max_input_tokens < 1:
+def build_training_traces(rows, masses, *, max_input_tokens=32768, max_completion_tokens=None):
+    """Merge exact append-only baseline inputs, preserving per-token mass.
+
+    A single agent step is indivisible, even when it exceeds a merge budget.
+    """
+    if (len(rows) != len(masses)
+            or any(limit is not None and limit < 1 for limit in (max_input_tokens, max_completion_tokens))):
         raise ValueError("invalid trace builder arguments")
     groups = {}
     units = []
@@ -25,6 +29,7 @@ def build_training_traces(rows, masses, *, max_input_tokens=32768):
         if len({r.agent_step for r, _ in items}) != len(items):
             raise ValueError("duplicate agent step")
         chain, weights = [], []
+        supervised_tokens = 0
         for row, mass in items:
             if not math.isfinite(mass) or mass < 0:
                 raise ValueError("invalid token mass")
@@ -50,14 +55,19 @@ def build_training_traces(rows, masses, *, max_input_tokens=32768):
                 if (prefix_length > len(row.input_token_ids) - len(row.completion_token_ids)
                         or row.input_token_ids[:prefix_length] != previous.input_token_ids):
                     reason = "prefix_break"
-                elif len(row.input_token_ids) > max_input_tokens:
+                elif max_input_tokens is not None and len(row.input_token_ids) > max_input_tokens:
                     reason = "length_budget"
+                elif (max_completion_tokens is not None
+                      and supervised_tokens + len(row.completion_token_ids) > max_completion_tokens):
+                    reason = "completion_budget"
             if reason:
                 units.append((chain, weights, reason))
                 reasons[reason] += 1
                 chain, weights = [], []
+                supervised_tokens = 0
             chain.append(row)
             weights.append(mass)
+            supervised_tokens += len(row.completion_token_ids)
         units.append((chain, weights, "trajectory_end"))
     order = {row.row_id: i for i, row in enumerate(rows)}
     if len(order) != len(rows):
@@ -92,8 +102,11 @@ def build_training_traces(rows, masses, *, max_input_tokens=32768):
                              "task": merged.task_id, "trajectory": merged.trajectory_id
                          }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()})
     encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    completion_budget = ({} if max_completion_tokens is None else
+                         {"max_completion_tokens": max_completion_tokens})
     return tuple(result), coefficients, {
         "version": "strict_token_prefix_v1", "manifest_sha256": hashlib.sha256(encoded).hexdigest(),
+        **completion_budget,
         "max_input_tokens": max_input_tokens, "original_rows": len(rows),
         "training_units": len(result), "baseline_traces": len(result) - sum(r.source == "dycon" for r in rows),
         "original_input_tokens": sum(len(r.input_token_ids) for r in rows),

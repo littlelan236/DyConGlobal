@@ -141,7 +141,7 @@ def train(model, batches, loss_callback, optimizer, scheduler, *, max_updates,
 
 
 def _grpo_local_attempt(model, window, objective, parameters, *, cursor, parallel,
-                        stage, memory, attempt, step, on_start, rng, execution_plan=None):
+                        stage, memory, attempt, step, on_start, rng, execution_plan=None, kl_only=False):
     """Return only scalar evidence; no exception traceback escapes this scope."""
     import traceback
     from RL.memory import is_cuda_oom
@@ -155,7 +155,7 @@ def _grpo_local_attempt(model, window, objective, parameters, *, cursor, paralle
         if memory: memory.phase(name, **fields)
     try:
         if rng is not None: restore_rng(rng)
-        if hasattr(objective, "reset"): objective.reset()
+        if not kl_only and hasattr(objective, "reset"): objective.reset()
         if on_start: on_start()
         if execution_plan:
             from RL.grpo.execution import validate_window
@@ -196,7 +196,8 @@ def _grpo_local_attempt(model, window, objective, parameters, *, cursor, paralle
                     if device.type == "cuda": torch.cuda.synchronize(device)
                     forward += time.monotonic() - before
                     if result is None: break
-                    loss = result.loss
+                    loss = (result.k3_penalty * objective.settings.kl_beta / group.group_size
+                            if kl_only else result.loss)
                     if loss.ndim != 0 or not torch.isfinite(loss):
                         raise ValueError("Nonfinite GRPO objective; optimizer update rejected")
                     loss_value += float(loss.detach()) * parent_fraction / len(window)
@@ -285,7 +286,11 @@ def _rollback_grpo(model, objective, optimizer, buffers, on_abort, memory):
             torch.cuda.empty_cache()
         if memory and memory.offloader and memory.offloader.live_bytes:
             raise RuntimeError("Pinned checkpoint activations survived whole-step cleanup")
-        if memory: memory.safe_boundary()
+        if memory:
+            release = getattr(memory.offloader, "release_failed_trace", None)
+            if release is not None:
+                release()
+            memory.safe_boundary()
         return {"state": "OK"}
     except BaseException as exc:
         return {"state": "FATAL", "error": f"Cleanup failed: {type(exc).__name__}: {exc}"}
@@ -294,7 +299,7 @@ def _rollback_grpo(model, objective, optimizer, buffers, on_abort, memory):
 def train_grpo(model, groups, objective_callback, optimizer, scheduler, *,
                group_batch_size=4, max_epochs=1, grad_clip=1.0, state=None,
                max_updates=None, on_update=None, on_gradients=None, on_window_start=None,
-               on_stage=None, parallel=None, memory_controller=None, on_attempt_abort=None):
+               on_stage=None, parallel=None, memory_controller=None, on_attempt_abort=None, baseline=None):
     """Whole-group local attempts, Gloo acknowledgement, then one committed update."""
     if max_epochs != 1: raise ValueError("offline GRPO supports exactly one epoch")
     from RL.grpo.groups import iter_group_batches
@@ -357,10 +362,36 @@ def train_grpo(model, groups, objective_callback, optimizer, scheduler, *,
             failed_seconds = 0.
             for attempt in range(retry_limit + 1):
                 if attempt: memory.retry(window, global_step=state["global_step"], attempt_id=attempt)
+                attempt_rng = (capture_rng() if baseline is not None and baseline.replay_kl
+                               and step % baseline.attribution_every == 0 else None)
                 local = _grpo_local_attempt(model, window, objective_callback, parameters,
                     cursor=consumed(), parallel=parallel, stage=stage, memory=memory,
                     attempt=attempt, step=state["global_step"], on_start=on_window_start,
                     rng=step_rng if attempt else None, execution_plan=execution_plan)
+                if baseline is not None and local["status"]["state"] == "OK":
+                    try:
+                        def replay_kl():
+                            after_rng = capture_rng()
+                            try:
+                                restore_rng(attempt_rng)
+                                result = _grpo_local_attempt(
+                                    model, window, objective_callback, parameters,
+                                    cursor=consumed(), parallel=parallel, stage=lambda *_args, **_kw: None,
+                                    memory=None, attempt=attempt, step=state["global_step"],
+                                    on_start=None, rng=None, execution_plan=execution_plan, kl_only=True)
+                                if result["status"]["state"] == "CUDA_OOM":
+                                    raise torch.cuda.OutOfMemoryError(result["status"]["error"])
+                                if result["status"]["state"] != "OK":
+                                    raise RuntimeError(str(result["status"]))
+                            finally:
+                                restore_rng(after_rng)
+                        local["baseline"], local["baseline_cursor"], local["attribution"] = baseline(
+                            state, parallel, replay_kl=replay_kl)
+                    except Exception as exc:
+                        retryable = isinstance(exc, torch.cuda.OutOfMemoryError) and retry_limit
+                        local["status"] = {"state": "CUDA_OOM" if retryable else "FATAL",
+                                           "phase": "offline_baseline", "error": str(exc),
+                                           "error_type": type(exc).__name__}
                 if memory: memory.pause()
                 status = {**local["status"], "rank": parallel.rank if parallel else 0,
                           "memory": memory.logger.memory() if memory else None,
@@ -404,6 +435,22 @@ def train_grpo(model, groups, objective_callback, optimizer, scheduler, *,
                 rows, loss_value, prefixes, parallel_metrics = parallel.finish_window(
                     model, parameters, window, local["rows"], loss_value, prefixes, local["seconds"])
                 stage("gradient_sync_complete", completed_groups_in_update=len(window))
+            if baseline is not None and not local["baseline"].get("skipped"):
+                attribution = local.pop("attribution")
+                if attribution is not None:
+                    if parallel:
+                        from RL.online_parallel import reduce_attribution
+                        reduce_attribution(parallel, parameters, attribution)
+                    summary = attribution.summary()
+                    local["baseline"]["gradient_attribution"] = summary
+                    del attribution
+                baseline_metrics = local["baseline"]
+                peers = parallel.gather(baseline_metrics) if parallel else [baseline_metrics]
+                baseline_metrics["rank_compute_seconds"] = [
+                    peer["source_compute_seconds"].get("baseline", 0.) for peer in peers]
+                baseline_metrics["loss"] = sum(peer["loss"] for peer in peers)
+                baseline_metrics["token_count"] = sum(peer["token_count"] for peer in peers)
+                loss_value = loss_value * baseline_metrics["dycon_weight"] + baseline_metrics["loss"]
             for parameter in parameters:
                 if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
                     raise ValueError("Nonfinite GRPO gradient; optimizer update rejected")
@@ -419,6 +466,8 @@ def train_grpo(model, groups, objective_callback, optimizer, scheduler, *,
             if parallel: parallel.after_step(model)
             next_count = consumed() + len(window)
             state["global_step"] += 1
+            if baseline is not None:
+                state["baseline_cursor"] = local["baseline_cursor"]
             if not execution_plan:
                 state["group_cursor"] += len(window)
                 state["consumed_groups"] += len(window)
@@ -455,6 +504,8 @@ def train_grpo(model, groups, objective_callback, optimizer, scheduler, *,
                         len(window) if window[0].metadata["execution_chunk"]["half_index"] == 1 else 0),
                     branch_loss_weight=1 / (16 * len(window)), metrics_schema_version=3)
                 metrics.update(getattr(all_groups, "window_io", {}))
+            if baseline is not None:
+                metrics["offline_baseline"] = local["baseline"]
             if prefixes: metrics["prefix_reuse"] = prefixes
             if parallel_metrics:
                 metrics["parallel"] = parallel_metrics
