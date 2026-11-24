@@ -977,7 +977,9 @@ def main(argv=None):
                     or (a.command == "harbor" and a.harbor_command in {"preflight", "controls", "controls-audit"})
                     or a.analysis_run_id is not None
                     or (a.command in {"enrich", "token-trace", "trajectory-token-audit", "hidden", "dataset-index", "token-join"} and explicit_run is not None))
-    if use_snapshot:
+    rl_cancel = (a.command == "run" and a.run_command == "cancel"
+                 and (Path(a.config).resolve().parent / "RL/checkpoints" / a.run_id / "attempt.json").is_file())
+    if use_snapshot and not rl_cancel:
         if a.set:
             parser.error("Existing runs use frozen config; create a new run to change settings")
         from application.execution.run_plan import load_plan
