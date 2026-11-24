@@ -5,7 +5,7 @@ from application.execution.subject import subject_digest
 
 
 def validate_policy(policy):
-    if policy not in {'resolved_only', 'positive_reward', 'accepted_terminal'}:
+    if policy not in {'resolved_only', 'positive_reward', 'accepted_terminal', 'submitted'}:
         raise ValueError('Unknown training eligibility policy: ' + str(policy))
 
 
@@ -16,6 +16,11 @@ def positive_reward(rewards):
 
 def eligible_evaluation(row, evidence, rollout_id, policy):
     validate_policy(policy)
+    if policy == 'submitted':
+        # Workload-to-submission labels require no benchmark-success outcome.
+        return (row.get('submission_status') == 'submitted'
+                and row.get('termination_reason') == 'Submitted'
+                and row.get('evaluation_subject', {}).get('kind') not in {'workspace', 'web_trace'})
     if row.get('evaluation_status') != 'completed':
         return False
     from benchmark_evaluation.swebench_settlement import training_label

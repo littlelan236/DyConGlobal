@@ -125,7 +125,7 @@ def prepare_changes(source, target, selected, records, output):
     return changes, applied, skipped
 
 
-def replace_outcomes(root, source, target, selected, records, output, before):
+def replace_outcomes(root, source, target, selected, records, output, before, *, allow_active_source=False):
     from application.execution.config_revision import _offline
     from application.execution.evidence import RunEvidence
     from application.execution.run_plan import load_plan
@@ -137,7 +137,8 @@ def replace_outcomes(root, source, target, selected, records, output, before):
                      run / 'execution/supervisor.lock', run / 'execution/active-supervisor.lock',
                      run / 'validation/.oracle-lifecycle.lock', run / 'evidence.lock', run / 'progress.lock']:
             locks.enter_context(file_lock(path, nonblocking=True))
-        _offline(run)
+        if not allow_active_source:
+            _offline(run)
         changed = [p for p, digest in before.items() if not Path(p).is_file() or sha256(p) != digest]
         if changed:
             raise ValueError('Historical sources changed during replay; refusing replacement')

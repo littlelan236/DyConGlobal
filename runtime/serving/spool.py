@@ -320,13 +320,23 @@ class CaptureSpool:
         with self.lock:
             self._session_metadata_hints[session] = (published, cleanup)
 
-    def publish_session(self, session, timeout):
+    def publish_session(self, session, timeout, *, metadata_paths=None, checkpoint=None):
+        check = checkpoint or (lambda: None)
+        check()
         self.seal(session)
         deadline = time.monotonic() + timeout
+
+        def wait_pending():
+            while any(j['session_id'] == session for j in self.pending.values()):
+                check()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self.condition.wait(min(0.25, remaining) if checkpoint else remaining)
+            check()
+            return True
         with self.condition:
-            if not self.condition.wait_for(
-                lambda: not any(j['session_id'] == session for j in self.pending.values()),
-                max(0, deadline-time.monotonic())):
+            if not wait_pending():
                 return False
             if any(j['session_id'] == session for j in self.failures):
                 return False
@@ -341,23 +351,27 @@ class CaptureSpool:
                     files[relative] = sha256(path)
         else:
             # Compatibility for recovery of old sessions lacking a live index.
-            for pattern in (f'sessions/{session}/**/*.json', 'requests/*.json', 'index/*.json'):
-                for path in self.root.glob(pattern):
-                    value = read_json(path)
-                    sid = value[0].get('session_id') if isinstance(value, list) and value else value.get('session_id') if isinstance(value, dict) else None
-                    if pattern.startswith('sessions/') or sid == session:
-                        relative = str(path.relative_to(self.root))
-                        cleanup.add(relative)
-                        if pattern != 'index/*.json' or isinstance(value, list):
-                            files[relative] = sha256(path)
-                            if isinstance(value, dict):
-                                probability = value.get("raw_t1_probability") or {}
-                                if probability.get("status") == "sealed":
-                                    from runtime.serving.raw_logprobs import read_values
-                                    read_values(self.root, probability, output_ids=value["output_token_ids"], record=value)
-                                    raw_path = owned_path(self.root, probability["locator"])
-                                    files[probability["locator"]] = sha256(raw_path)
-                                    cleanup.add(probability["locator"])
+            paths = (list((self.root / 'sessions' / session).rglob('*.json'))
+                     + list(metadata_paths)) if metadata_paths is not None else [
+                         path for pattern in (f'sessions/{session}/**/*.json', 'requests/*.json', 'index/*.json')
+                         for path in self.root.glob(pattern)]
+            for path in paths:
+                check()
+                value = read_json(path)
+                sid = value[0].get('session_id') if isinstance(value, list) and value else value.get('session_id') if isinstance(value, dict) else None
+                relative = str(path.relative_to(self.root))
+                if relative.startswith(f'sessions/{session}/') or sid == session:
+                    cleanup.add(relative)
+                    if not relative.startswith('index/') or isinstance(value, list):
+                        files[relative] = sha256(path)
+                        if isinstance(value, dict):
+                            probability = value.get("raw_t1_probability") or {}
+                            if probability.get("status") == "sealed":
+                                from runtime.serving.raw_logprobs import read_values
+                                read_values(self.root, probability, output_ids=value["output_token_ids"], record=value)
+                                raw_path = owned_path(self.root, probability["locator"])
+                                files[probability["locator"]] = sha256(raw_path)
+                                cleanup.add(probability["locator"])
         session_path = self.root / 'sessions' / session / 'session.json'
         if session_path.exists():
             info = read_json(session_path)
@@ -381,26 +395,31 @@ class CaptureSpool:
             self._published_cleanup_paths[session] = set(cleanup)
             self.write_json(f'uploads/{key}.json', job)
             self._submit(job)
-            return self.condition.wait_for(
-                lambda: not any(j['session_id'] == session for j in self.pending.values()),
-                max(0, deadline-time.monotonic())) and not any(j['session_id'] == session for j in self.failures)
+            return wait_pending() and not any(j['session_id'] == session for j in self.failures)
 
-    def recover(self):
+    def recover(self, *, snapshot=None, checkpoint=None):
         """Re-submit incomplete jobs; a rename without ACK is safe to retry."""
         jobs = []
+        check = checkpoint or (lambda: None)
         with self.lock:
             active = {j["key"] for j in self.pending.values()}
             self.failures.clear()
-            for path in sorted((self.root / "uploads").glob("*.json")):
+            for path in (snapshot['uploads'] if snapshot is not None else sorted((self.root / "uploads").glob("*.json"))):
+                check()
                 if path.name.endswith(".pid.json"):
                     continue
                 job = read_json(path)
+                if snapshot is not None and job.get('session_id') in snapshot['deferred_sessions']:
+                    continue
                 if job["state"] != "published" and job["key"] not in active:
                     self._submit(job)
                     jobs.append(job["key"])
             staged = {}
-            for path in sorted((self.root / "index").glob("*.json")):
+            for path in (snapshot['index'] if snapshot is not None else sorted((self.root / "index").glob("*.json"))):
+                check()
                 row = read_json(path)
+                if snapshot is not None and isinstance(row, dict) and row.get('session_id') in snapshot['deferred_sessions']:
+                    continue
                 if (
                     isinstance(row, dict)
                     and row.get("artifact_state") == "queued"
@@ -432,6 +451,7 @@ class CaptureSpool:
                 ):
                     staged.setdefault(row["session_id"], []).append(row)
             for session, rows in staged.items():
+                check()
                 self.members[session] = rows
                 self.seal(session)
         return jobs

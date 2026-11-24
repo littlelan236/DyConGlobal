@@ -22,7 +22,9 @@ def token_statistics(k3, mask, rejected, group_indices):
         values = k3.detach().masked_fill(~retained, 0)
         count = int(retained.sum())
         counts = mask.sum(-1)
-        result = {'k3_diagnostic_tokens': count, 'k3_penalty_max': float(values.max())}
+        maximum = values.max()
+        result = {'k3_diagnostic_tokens': count,
+                  'k3_penalty_max': float(maximum) if torch.isfinite(maximum) else None}
         for cap in K3_CAPS:
             branch_means = values.clamp(max=cap).sum(-1) / counts
             mean = torch.stack([branch_means[indices].mean() for indices in group_indices]).mean()
@@ -40,8 +42,9 @@ def summarize_statistics(groups):
         # Legacy/mixed producers provide no complete comparison; never invent zeros.
         return {}
     count = sum(row['k3_diagnostic_tokens'] for row in rows)
+    maxima = [row['k3_penalty_max'] for row in rows]
     result = {'k3_diagnostic_tokens': count,
-              'k3_penalty_max': max(row['k3_penalty_max'] for row in rows)}
+              'k3_penalty_max': max(maxima) if all(v is not None for v in maxima) else None}
     for cap in K3_CAPS:
         key = f'k3_cap_{cap}_mean'
         mean = sum(sum(row[key] for row in group) / len(group) for group in groups) / len(groups)

@@ -404,3 +404,75 @@ def test_identical_instance_id_with_other_revision_is_not_common(cfg):
     report = compare_runs(cfg["project_root"], [left.name, other.name])
     assert report["runs"][1]["submitted_task_count"] == 1
     assert report["common_submitted_task_count"] == 0
+
+
+
+def test_solution_source_ignores_review_without_changing_cohort_or_evidence(cfg):
+    from benchmark_evaluation.swebench_settlement import project
+
+    left, right = make_runs(cfg, "solution-left", "solution-right", ids=("a", "b", "c", "d"))
+    for run in (left, right):
+        for iid in ("a", "b", "c", "d"):
+            add_attempt(cfg, run, iid, resolved=True if iid == "a" else None)
+    evidence = RunEvidence(cfg["project_root"], left.name)
+    data = evidence.read()
+    by_iid = {data["tasks"][row["task_key"]]["instance_id"]: (rid, row)
+              for rid, row in data["rollouts"].items()}
+    outcomes = {}
+    for iid in ("b", "c", "d"):
+        rid, row = by_iid[iid]
+        # b: official true beats conflicting raw false; c: raw false fallback;
+        # d: no boolean exists and must remain unknown, despite raw status completed.
+        raw = {"patch_sha256": row["patch_sha256"], "status": "completed",
+               "resolved": False if iid in {"b", "c"} else None}
+        outcomes[rid] = project(raw, {
+            "classification": "Review", "effective_resolved": None,
+            "reason_code": "execution_evidence_incomplete",
+            "official_result": {"completed": True, "resolved": True if iid == "b" else None}})
+    report_file = left / "harness/solution-review.json"
+    write_json(report_file, outcomes)
+    evidence.record_evaluation("solution-review", report_file, outcomes, {})
+    before = sha256(left / "evidence.json")
+    default = compare_runs(cfg["project_root"], [left.name, right.name], baseline=left.name)
+    solution = compare_runs(cfg["project_root"], [left.name, right.name], baseline=left.name,
+                            resolved_source="solution")
+    assert default["resolved_source"] == "settled"
+    assert default["runs"][0]["common_submitted"]["resolved_rate"] == .25
+    assert solution["resolved_rate_denominator"] == default["resolved_rate_denominator"] == 4
+    assert solution["common_submitted_samples"] == default["common_submitted_samples"]
+    metrics = solution["runs"][0]["common_submitted"]
+    assert metrics["resolved_count"] == 2 and metrics["resolved_rate"] == .5
+    assert metrics["unresolved_count"] == 1 and metrics["unknown_evaluation_count"] == 1
+    assert metrics["steps"] == default["runs"][0]["common_submitted"]["steps"]
+    assert metrics["total_tokens"] == default["runs"][0]["common_submitted"]["total_tokens"]
+    assert solution["runs"][0]["exits"] == default["runs"][0]["exits"]
+    sample = next(s for s in solution["runs"][0]["samples"] if s["rollout_id"] == by_iid["b"][0])
+    assert sample["evaluation_status"] == "Review" and sample["settled_resolved"] is None
+    assert sample["resolved"] is True and sample["resolved_value_source"] == "official_result"
+    assert sha256(left / "evidence.json") == before
+    assert "Resolved source: solution" in format_markdown(solution)
+    assert solution["runs"][1]["changes_from_baseline"]["common_submitted"]["resolved_rate"]["percentage_point_change"] == -25
+
+
+@pytest.mark.parametrize("classification", ["Review", "VerifierError"])
+def test_solution_source_selected_evaluation_and_strict_boolean(classification):
+    from application.execution.comparison import _comparison_resolution
+
+    row = {"selected_evaluation_id": "current", "resolved": None, "evaluation_status": classification}
+    evidence = {"evaluations": {
+        "old": {"outcomes": {"r": {"official_result": {"resolved": True}}}},
+        "current": {"outcomes": {"r": {"status": classification,
+            "official_result": {"resolved": False}, "raw_outcome": {"resolved": True}}}}}}
+    assert _comparison_resolution(row, evidence, "r", "solution") == (False, "official_result")
+    assert _comparison_resolution(row, evidence, "r", "settled") == (None, "settled")
+    outcome = evidence["evaluations"]["current"]["outcomes"]["r"]
+    outcome.update(official_result={"resolved": "false"}, raw_outcome={"resolved": 1})
+    assert _comparison_resolution(row, evidence, "r", "solution") == (None, "unknown")
+    outcome["resolved"] = True
+    assert _comparison_resolution(row, evidence, "r", "solution") == (True, "evaluation.resolved")
+    assert _comparison_resolution({"resolved": False}, {}, "r", "solution") == (False, "settled_fallback")
+
+
+def test_invalid_resolved_source_rejected_before_reading_runs(tmp_path):
+    with pytest.raises(ValueError, match="resolved_source"):
+        compare_runs(tmp_path, ["left", "right"], resolved_source="invalid")

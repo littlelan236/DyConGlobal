@@ -84,6 +84,8 @@ class UpdateTelemetry:
             self.profiler.__enter__()
 
     def finish(self):
+        if self.offloader:
+            self.offloader.safe_boundary()
         values = {"projected_tokens": self.loss.tokens, "ce_chunks": self.loss.blocks,
                   "kernel_observation": "profiled_this_update" if self.profiler else "not_profiled",
                   "sequence_lengths": self.loss.sequence_lengths,

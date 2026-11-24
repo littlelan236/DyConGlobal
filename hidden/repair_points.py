@@ -18,6 +18,7 @@ from application.execution.evidence import RunEvidence
 from core.io import hash_json, identifier, now, owned_path, read_json, sha256, write_json
 from enrichment.online_trace import reasoning_targets
 from hidden.artifacts import artifact_bytes, matching_request_receipts, read_request, response_records
+from hidden.layer_contract import storage_binding
 from runtime.serving.spool import publish_files
 
 
@@ -130,8 +131,11 @@ def _tensor(variants, nas, cfg, cache):
                 data = artifact_bytes(base, event)
             with np.load(io.BytesIO(data), allow_pickle=False) as archive:
                 arrays = {k: archive[k] for k in archive.files}
-            if set(arrays) != {'layer_' + str(layer) for layer in cfg['capture']['layers']}:
-                raise ValueError('Incomplete tensor layer count')
+            sites = tuple(sorted(arrays))
+            bindings = cache.setdefault('_layer_bindings', {})
+            if sites not in bindings:
+                bindings[sites] = storage_binding(cfg, sites)
+            binding = bindings[sites]
             if set(arrays) != set(event.get('storage_shapes', {})) or set(arrays) != set(event.get('storage_dtypes', {})):
                 raise ValueError('Missing or inconsistent tensor layer metadata')
             for name, array in arrays.items():
@@ -150,6 +154,8 @@ def _tensor(variants, nas, cfg, cache):
                 raise ValueError('Tensor member checksum mismatch')
             # Persist derived digest only in the independent repaired point row.
             event['sha256'] = member_digest
+            if binding is not None:
+                event['layer_binding'] = binding
             return base, relative, digest, event
         except (OSError, ValueError, KeyError, TypeError) as exc:
             failures.append(type(exc).__name__ + ': ' + str(exc))
@@ -455,6 +461,9 @@ def _recover_points(cfg, run_id, *, rollout_ids=(), session_ids=(), apply=False,
                 points.append(event); counts[classification]+=1
                 dependencies.append((base,relative,digest))
                 proofs[str(owned_path(base,relative))]=digest
+                if event.get('layer_binding'):
+                    binding = event['layer_binding']
+                    proofs[binding['model_config']] = binding['model_config_sha256']
             except (OSError,ValueError,KeyError,TypeError) as exc:
                 errors.append({'stage':'point','sample_id':sample_id,'reason':str(exc)})
         coordinates = Counter((p['request_id'], p['absolute_position'], p['anchor']) for p in points

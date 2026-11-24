@@ -88,6 +88,7 @@ def test_storage_status_reports_live_budget_not_a_copied_limit(tmp_path):
                          'spool_high_watermark': .95, 'spool_low_watermark': .95}}
     controller.spool = SimpleNamespace(base=tmp_path,
         budget=SimpleNamespace(limit=128 * 2**30, usage=lambda: 11))
+    controller.raw_writer = None
     controller.capture_config_ref = 'capture-config-revisions/test.json'
     value = controller.storage_status()
     assert value['spool_max_bytes'] == 128 * 2**30

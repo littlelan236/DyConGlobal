@@ -1,7 +1,7 @@
-# Single GPU bf16 engineering LoRA training; serving environments stay untouched.
+# Dedicated LoRA/GRPO training and metric reads; serving stays untouched.
 torch==2.13.0
 transformers==5.17.0
-peft>=0.18,<1
+peft==0.21.2
 accelerate==1.15.0
 safetensors==0.8.0
 numpy==2.3.5
@@ -12,3 +12,4 @@ packaging>=23
 pytest==9.1.1
 ruff==0.17.0
 setuptools==80.10.2
+ijson==3.5.1

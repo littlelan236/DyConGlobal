@@ -16,6 +16,7 @@ def cfg(tmp_path):
     raw["agent"].update(backend="minisweagent", profile_ref=None)
     raw["agent"].pop("condenser_max_tokens", None)  # Generic fixtures retain legacy profile policy.
     raw["execution"]["sample_completion_token_budget"] = None
+    raw["timeouts"]["model_seconds"] = 28800  # Match default parallel TTL in synthetic fixtures.
     raw["generation"].update(thinking_token_budget=None, require_reasoning_close=False)
     raw["paths"]["artifact_roots"] = {}
     raw["paths"]["artifact_scan_roots"] = []
@@ -23,7 +24,8 @@ def cfg(tmp_path):
     raw["environment"]["wheelhouse"] = None  # Published host caches are not unit fixtures.
     raw["model"].update(path=None, fingerprint="fixture-model", served_name="fixture")
     raw["capture"]["enabled"] = False
-    raw["capture"].pop("logprobs", None)
+    raw["capture"].setdefault("logprobs", {})["enabled"] = False
+
     if raw.get("harbor"):
         raw["harbor"].pop("terminal_policy", None)
         raw["harbor"].pop("task_python_index", None)

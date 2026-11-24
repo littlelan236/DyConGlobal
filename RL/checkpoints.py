@@ -67,6 +67,9 @@ def verify_checkpoint(directory):
     if not required.issubset(receipt["files"]):
         raise ValueError("Checkpoint required files missing")
     metadata = read_json(directory / "state.json")
+    if metadata.get("physical_execution") is not None:
+        from RL.topology import validate_record
+        validate_record(metadata["physical_execution"])
     state = metadata["state"]
     if (receipt.get("contract_sha256") != hash_json(metadata["contract"])
             or metadata["contract"].get("adapter", metadata["adapter_contract"]) != metadata["adapter_contract"]):
@@ -115,6 +118,11 @@ def save_checkpoint(model, optimizer, scheduler, state, directory, contract, ada
     export_adapter(model, staging / "adapter", adapter_identity)
     metadata = {"schema_version": 1, "state": dict(state), "contract": contract,
                 "adapter_contract": adapter_identity}
+    from RL.parallel import current
+    execution_context = current()
+    if execution_context is not None and getattr(execution_context, "physical_execution", None):
+        from RL.topology import validate_record
+        metadata["physical_execution"] = dict(validate_record(execution_context.physical_execution))
     write_json(staging / "state.json", metadata)
     if extra_files:
         import shutil
@@ -178,9 +186,15 @@ def restore_checkpoint(directory, optimizer, scheduler, expected_contract, expec
     parallel = current()
     rank_rng = payload.get("rank_rng")
     if parallel:
-        if not rank_rng or len(rank_rng) != parallel.world_size:
-            raise ValueError("Checkpoint rank RNG topology mismatch")
-        restore_rng(rank_rng[parallel.rank])
+        from RL.topology import portable, restore_rank_rng
+        if portable(parallel):
+            restore_rank_rng(payload, metadata, parallel)
+        else:
+            if metadata.get("physical_execution") is not None:
+                raise ValueError("Portable checkpoint requires preserve_updates execution")
+            if not rank_rng or len(rank_rng) != parallel.world_size:
+                raise ValueError("Checkpoint rank RNG topology mismatch")
+            restore_rng(rank_rng[parallel.rank])
     else:
         if rank_rng:
             raise ValueError("Distributed checkpoint requires its original world size")

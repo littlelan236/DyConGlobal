@@ -140,6 +140,36 @@ def test_pending_is_not_a_failure():
     assert result["latest_attempt"]["failure_counts"] == {}
 
 
+def test_active_status_reports_live_rl_and_keeps_stale_and_errors_separate(cfg, monkeypatch, capsys):
+    import json
+    from core.cli import main
+    from RL import observability
+
+    def row(name, liveness):
+        return {"attempt_id": name, "observed_liveness": liveness,
+                "source": {"storage_root": "/training"}, "status": "training",
+                "stage": "backward", "last_completed_update": 7, "max_updates": 100,
+                "inflight_update": 8, "live": {"process_alive_at": "heartbeat"},
+                "latest_metric": {"observed_at": "metric-time", "reward_mean": 0, "loss": 0.2}}
+
+    def active(resolved, *, progress_only):
+        assert resolved["project_root"] == cfg["project_root"] and progress_only
+        return {"attempts": [row("live", "running"), row("stale", "not_running_with_stale_state")],
+                "errors": [{"attempt_id": "broken", "error": "invalid attempt"}]}
+
+    monkeypatch.setattr(observability, "active", active)
+    main(["--config", cfg["config_source"], "run", "active-status"])
+    result = json.loads(capsys.readouterr().out)
+    assert result["rl_count"] == 1
+    active_row, = result["rl_runs"]
+    assert active_row["attempt_id"] == "live"
+    assert (active_row["last_completed_update"], active_row["inflight_update"]) == (7, 8)
+    assert active_row["latest_metric"]["reward_mean"] == 0
+    assert (active_row["updated_at"], active_row["last_metric_at"]) == ("heartbeat", "metric-time")
+    assert [row["attempt_id"] for row in result["rl_stale_runs"]] == ["stale"]
+    assert [row["attempt_id"] for row in result["rl_errors"]] == ["broken"]
+
+
 def test_resumed_queue_overrides_old_cancelled_attempt_and_counts_running_as_pending(loaded):
     old = attempt(loaded, 0, 0, execution="001")
     write_json(loaded["run"] / "execution/attempts/001/exit.json", {"exit_code": -15})

@@ -170,6 +170,8 @@ def main(argv=None):
     sb.add_argument('--plan-only', action='store_true')
     sb.add_argument('--replace-original-with-backup', action='store_true',
                     help='Replace only valid replay scores in the source run after backup; preserve unavailable/error samples')
+    sb.add_argument('--allow-active-source', action='store_true',
+                    help='Allow backed-up replacement while unrelated source samples are still running; selected sample must remain terminal')
     sb = sb_sub.add_parser('audit-rewards', help='Read-only audit of accepted SkillsBench rewards below one')
     sb.add_argument('run_id')
     sb.add_argument('--output', type=Path, required=True, help='New report directory; existing paths are rejected')
@@ -257,6 +259,7 @@ def main(argv=None):
     q.add_argument("--from-run", help="Clone frozen rollout or harness configuration and task selection")
     q.add_argument("--reverse-task-order", action="store_true",
                    help="Reverse the source task order in a frozen run clone")
+    q.add_argument("--key-step-config", type=Path, help="Run-local B=8 source or pure-replay continuation configuration")
     q.add_argument("--parallel-config", type=Path,
                    help="Freeze a run-local consensus/entropy policy YAML; never edits root config")
     q = run_sub.add_parser("show")
@@ -321,6 +324,8 @@ def main(argv=None):
     q.add_argument("--format", choices=["json", "markdown"], default="markdown")
     q.add_argument("--output", type=Path, help="Optional new report file; refuses overwrite")
     q = run_sub.add_parser("compare", help="Compare physical exits and common final submitted task/repetition pairs")
+    q.add_argument("--resolved-source", choices=["settled", "solution"], default="settled",
+                   help="Resolved numerator: settled labels (default), or original solution results regardless of audit status; denominator is unchanged")
     q.add_argument("run_ids", nargs="+", metavar="RUN_ID")
     q.add_argument("--baseline", help="Reference run, which must occur in RUN_IDs")
     q.add_argument("--repetition", action="append", default=[], metavar="RUN_ID=REPETITION",
@@ -336,8 +341,11 @@ def main(argv=None):
     q = run_sub.add_parser("merge", help="Merge accepted samples from SOURCE_RUN into DESTINATION_RUN")
     q.add_argument("source_run", metavar="SOURCE_RUN")
     q.add_argument("destination_run", metavar="DESTINATION_RUN")
+    q.add_argument("--mode", choices=["by-repetition", "append-executed"], default="by-repetition",
+                   help="Append actually executed repetitions, including failures, into remaining task slots, capped by destination repeat_count")
+    q.add_argument("--dry-run", action="store_true", help="Preview mapping without changing run artifacts")
     run_sub.add_parser("list")
-    run_sub.add_parser("active-status", help="Query all live runs and their progress")
+    run_sub.add_parser("active-status", help="Query live rollout and RL progress")
     harness = sub.add_parser("harness", help="Prepare, run and inspect run-local harness results")
     harness_sub = harness.add_subparsers(dest="harness_command", required=True)
     q = harness_sub.add_parser("prepare")
@@ -407,13 +415,13 @@ def main(argv=None):
     artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
     q = artifact_sub.add_parser("show")
     q.add_argument("run_id", nargs="?")
-    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-dataset", "rl-cache", "rl-replay", "rl-probability", "rl-probability-plan", "rl-prepared", "rl-reference", "rl-extension"], default="run")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-full-attempt", "rl-dataset", "rl-cache", "rl-replay", "rl-probability", "rl-probability-plan", "rl-prepared", "rl-reference", "rl-extension"], default="run")
     q.add_argument("--storage-root", type=Path)
     q.add_argument("--with-tensors", action="store_true")
     q.add_argument("--dataset-id")
     q = artifact_sub.add_parser("verify")
     q.add_argument("run_id", nargs="?")
-    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-dataset", "rl-cache", "rl-replay", "rl-probability", "rl-probability-plan", "rl-prepared", "rl-reference", "rl-extension"], default="run")
+    q.add_argument("--scope", choices=["run", "difficulty-dataset", "difficulty-split", "difficulty-attempt", "difficulty-prediction", "difficulty-evaluation", "action-analysis", "steering-dataset", "steering-analysis", "lora-attempt", "rl-full-attempt", "rl-dataset", "rl-cache", "rl-replay", "rl-probability", "rl-probability-plan", "rl-prepared", "rl-reference", "rl-extension"], default="run")
     q.add_argument("--storage-root", type=Path)
     q.add_argument("--with-tensors", action="store_true")
     q.add_argument("--dataset-id")
@@ -468,7 +476,7 @@ def main(argv=None):
     q.add_argument("--rollout-id", action="append", default=[])
     q.add_argument("--rollout-list", type=Path)
     q.add_argument("--label-normalization", choices=["raw", "trajectory_fraction"], default="raw")
-    q.add_argument("--eligibility", choices=["resolved_only", "positive_reward", "accepted_terminal"], default="resolved_only")
+    q.add_argument("--eligibility", choices=["resolved_only", "positive_reward", "accepted_terminal", "submitted"], default="resolved_only")
     p = sub.add_parser("difficulty-split", help="Freeze a reusable dataset split")
     p.add_argument("dataset_id")
     p.add_argument("split_id")
@@ -599,6 +607,9 @@ def main(argv=None):
     p.add_argument("index_id")
     p.add_argument("predictor")
     p.add_argument("prediction_id")
+    p = sub.add_parser("difficulty-evaluate-drift", help="Evaluate one frozen predictor on composed published submission datasets")
+    p.add_argument("evaluation_id")
+    p.add_argument("--workflow-config", required=True, type=Path)
     p = sub.add_parser("difficulty-evaluate")
     p.add_argument("index_id")
     p.add_argument("predictions")
@@ -617,6 +628,12 @@ def main(argv=None):
     p.add_argument("--target", required=True, choices=[
         "submission_remaining_reasoning_tokens_log1p", "submission_remaining_reasoning_tokens_linear",
         "submission_remaining_steps_log1p", "submission_remaining_steps_linear"])
+    p = sub.add_parser("difficulty-plot-consensus-spread", help="Plot mean branch-score disagreement across consensus trajectories")
+    p.add_argument("run_id")
+    p.add_argument("plot_id")
+    p.add_argument("--rollout-id", action="append", default=[])
+    p.add_argument("--task-id")
+    p.add_argument("--bins", type=int, default=101)
     p = sub.add_parser("difficulty-plot-parallel", help="Plot stored branch scores on a finalized trajectory")
     p.add_argument("run_id")
     p.add_argument("plot_id", nargs="?")
@@ -642,6 +659,15 @@ def main(argv=None):
     p.add_argument("--bootstrap-samples", type=int, default=2000)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--skip-unavailable", action="store_true")
+    p = sub.add_parser("difficulty-evaluate-consensus-length", help="Compare completion length and score inside each winning consensus group")
+    p.add_argument("run_id")
+    p.add_argument("evaluation_id")
+    p.add_argument("--rollout-id", action="append", default=[])
+    p.add_argument("--bootstrap-samples", type=int, default=2000)
+    p.add_argument("--seed", type=int, default=42)
+    p = sub.add_parser("difficulty-plot-consensus-length", help="Plot length/estimator rank alignment and token-excess ECDF")
+    p.add_argument("plot_id")
+    p.add_argument("--evaluation-id", action="append", default=[], required=True)
     p = sub.add_parser("difficulty-ridge-holdout", help="Dataset Ridge search with outer task holdout and full test evaluation")
     p.add_argument("evaluation_id")
     p.add_argument("--workflow-config", required=True)
@@ -683,7 +709,7 @@ def main(argv=None):
     p.add_argument("--dataset-id", required=True)
     p.add_argument("--task-partitions", required=True, type=Path)
     a = parser.parse_args(argv)
-    if a.command in {"lora-train", "lora-prepare", "lora-status", "lora-tensorboard", "lora-advantages", "lora-memory"} or (a.command == "artifact" and a.scope == "lora-attempt"):
+    if a.command in {"rl-gradient-compare", "rl-status", "rl-tensorboard", "rl-advantages", "rl-train", "rl-export", "rl-probe", "lora-export", "lora-train", "lora-prepare", "lora-status", "lora-tensorboard", "lora-advantages", "lora-memory", "lora-probe", "lora-probe-plot"} or (a.command == "artifact" and a.scope in {"lora-attempt", "rl-full-attempt"}):
         if a.set or a.analysis_run_id:
             parser.error("LoRA uses an independent training YAML; do not pass --set or --run-id")
         from RL.cli import execute as execute_lora
@@ -734,6 +760,10 @@ def main(argv=None):
             parser.error("--attempt-id requires --task-id")
     if a.command == "difficulty-evaluate-parallel" and a.attempt_id and not a.task_id:
         parser.error("--attempt-id requires --task-id")
+    if a.command == "difficulty-evaluate-consensus-length" and (a.set or a.analysis_run_id):
+        parser.error("Consensus length uses the explicit source run; do not pass --set or --run-id")
+    if a.command == "difficulty-plot-consensus-length" and (a.set or a.analysis_run_id):
+        parser.error("Consensus plots use existing evaluation artifacts; do not pass --set or --run-id")
     if a.command == "run" and a.run_command != "create" and a.set:
         parser.error("run status/resume/reconcile accepts only the frozen run plan; use run create for overrides")
     if a.command == "run" and a.run_command == "create":
@@ -762,7 +792,7 @@ def main(argv=None):
                     raise ValueError(f"Duplicate repetition selector for run: {run_id}")
                 repetitions[run_id] = repetition
             result = compare_runs(Path(a.config).resolve().parent, a.run_ids, baseline=a.baseline,
-                                  repetitions=repetitions)
+                                  repetitions=repetitions, resolved_source=a.resolved_source)
             rendered = (format_markdown(result) if a.format == "markdown"
                         else json.dumps(result, ensure_ascii=False, indent=2))
             if a.output:
@@ -842,7 +872,8 @@ def main(argv=None):
             parser.error("run merge reads only the two frozen run snapshots; do not pass --run-id or --set")
         from application.execution.merge import merge_runs
         try:
-            result = merge_runs(Path(a.config).resolve().parent, a.source_run, a.destination_run)
+            result = merge_runs(Path(a.config).resolve().parent, a.source_run, a.destination_run,
+                                mode=a.mode, dry_run=a.dry_run)
         except (ValueError, OSError) as exc:
             parser.error(str(exc))
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -889,7 +920,8 @@ def main(argv=None):
         from runtime.agents.submission_regrading import regrade
         result = regrade(Path(a.config).resolve().parent, a.run_id, a.source_run,
                          a.audit_report, a.output, workers=a.workers, plan_only=a.plan_only,
-                         replace_original=a.replace_original_with_backup)
+                         replace_original=a.replace_original_with_backup,
+                         allow_active_source=a.allow_active_source)
         print(json.dumps(result, ensure_ascii=False))
         if not a.plan_only and not result.get("complete"):
             raise SystemExit(3)
@@ -1427,7 +1459,7 @@ def main(argv=None):
                 cfg, a.run_id, operation=a.operation, tasks_file=a.tasks_file,
                 task_ids=a.task_id, partition=a.partition, repeat_count=a.repeat_count,
                 from_run=a.from_run, clone_overrides=a.set, parallel_config=a.parallel_config,
-                reverse_task_order=a.reverse_task_order))}
+                reverse_task_order=a.reverse_task_order, key_step_config=a.key_step_config))}
         elif a.run_command == "queue-resume":
             from application.execution.queued_resume import enqueue
             result = enqueue(cfg["project_root"], a.run_id, after_run=a.after_run,
@@ -1447,7 +1479,7 @@ def main(argv=None):
         elif a.run_command == "list":
             result = list_runs(cfg["project_root"])
         elif a.run_command == "active-status":
-            result = active_run_statuses(cfg["project_root"])
+            result = active_run_statuses(cfg["project_root"], rl_config=cfg)
         elif a.run_command == "cancel":
             result = cancel_run(cfg["project_root"], a.run_id, a.reason)
         elif a.run_command == "wait":
@@ -1704,6 +1736,9 @@ def main(argv=None):
         from action.datasets.index import create_action_index
 
         result = str(create_action_index(cfg, a.shared_index_id, a.index_id))
+    elif a.command == "difficulty-evaluate-drift":
+        from difficulty.evaluation.drift import run
+        result = run(cfg, a.evaluation_id, workflow_config=a.workflow_config)
     elif a.command == "difficulty-predict":
         from difficulty.evaluation.predict import predict_hidden
         result = predict_hidden(cfg, a.index_id, a.predictor, a.prediction_id)
@@ -1744,6 +1779,9 @@ def main(argv=None):
                                         reuse_predictions_id=a.reuse_predictions_id,
                                         rollout_ids=a.rollout_id, rollout_list=a.rollout_list,
                                         publication_id=a.publication_id)
+    elif a.command == "difficulty-plot-consensus-spread":
+        from difficulty.evaluation.consensus_spread import plot_consensus_spread
+        result = plot_consensus_spread(cfg, a.run_id, a.plot_id, rollout_ids=a.rollout_id or None, task_id=a.task_id, bins=a.bins)
     elif a.command == "difficulty-plot-parallel":
         from difficulty.evaluation.parallel import list_parallel_trajectories, visualize_parallel
 
@@ -1761,6 +1799,23 @@ def main(argv=None):
             multipliers=a.multipliers, bootstrap_samples=a.bootstrap_samples, seed=a.seed,
             skip_unavailable=a.skip_unavailable,
         )
+    elif a.command == "difficulty-evaluate-consensus-length":
+        from difficulty.evaluation.consensus_length import evaluate_consensus_length
+
+        try:
+            result = evaluate_consensus_length(
+                cfg, a.run_id, a.evaluation_id, rollout_ids=a.rollout_id,
+                bootstrap_samples=a.bootstrap_samples, seed=a.seed,
+            )
+        except (ValueError, OSError, KeyError) as exc:
+            parser.error(str(exc))
+    elif a.command == "difficulty-plot-consensus-length":
+        from difficulty.evaluation.consensus_length_viz import plot_consensus_length
+
+        try:
+            result = plot_consensus_length(cfg, a.plot_id, evaluation_ids=a.evaluation_id)
+        except (ValueError, OSError, KeyError) as exc:
+            parser.error(str(exc))
     else:
         from runtime.containers.recovery import recover
 

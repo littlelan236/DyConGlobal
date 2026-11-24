@@ -5,6 +5,16 @@ import statistics
 
 ADVANTAGE_VERSION = "historical_topk_zero_sum_v1"
 CONSENSUS_ADVANTAGE_VERSION = "consensus_top_half_zero_sum_v1"
+SAME_ACTION_ADVANTAGE_VERSION = "same_action_top_half_v1"
+
+
+def advantage_settings(grpo):
+    settings = grpo.model_dump(include={"top_k", "top_k_fraction", "score_scale_floor", "boundary_tie_sigma"})
+    if grpo.advantage_policy != ADVANTAGE_VERSION:
+        settings["advantage_policy"] = grpo.advantage_policy
+    if grpo.advantage_policy == SAME_ACTION_ADVANTAGE_VERSION:
+        settings.pop("score_scale_floor")
+    return settings
 
 
 def validate_retained(retained, n):
@@ -25,12 +35,14 @@ class AdvantageResult:
 
 def compute_advantages(scores, *, top_k=4, top_k_fraction=None, score_scale_floor=0.1,
                        boundary_tie_sigma=0.05, advantage_policy=ADVANTAGE_VERSION, retained=None):
-    if advantage_policy not in {ADVANTAGE_VERSION, CONSENSUS_ADVANTAGE_VERSION}:
+    if advantage_policy not in {ADVANTAGE_VERSION, CONSENSUS_ADVANTAGE_VERSION, SAME_ACTION_ADVANTAGE_VERSION}:
         raise ValueError("Unknown advantage policy")
     consensus = advantage_policy == CONSENSUS_ADVANTAGE_VERSION
+    same_action = advantage_policy == SAME_ACTION_ADVANTAGE_VERSION
+    if (consensus or same_action) and (top_k is not None or top_k_fraction != 0.5 or boundary_tie_sigma != 0):
+        label = "Consensus top-half" if consensus else "Same-action top-half"
+        raise ValueError(f"{label} requires top_k=null, top_k_fraction=0.5 and boundary_tie_sigma=0")
     if consensus:
-        if top_k is not None or top_k_fraction != 0.5 or boundary_tie_sigma != 0:
-            raise ValueError("Consensus top-half requires top_k=null, top_k_fraction=0.5 and boundary_tie_sigma=0")
         validate_retained(retained, len(scores))
     if (top_k is None) == (top_k_fraction is None):
         raise ValueError("Specify exactly one top-k policy")
@@ -51,14 +63,26 @@ def compute_advantages(scores, *, top_k=4, top_k_fraction=None, score_scale_floo
         if k >= n:
             raise ValueError("Explicit top_k must be smaller than group size")
     try:
-        values = [float(x) for x in scores]
-    except (TypeError, ValueError):
+        values = [float(x) for x in scores] if not same_action or all(type(x) in (int, float) for x in scores) else []
+    except (TypeError, ValueError, OverflowError):
         values = []
     if len(values) != n or any(not math.isfinite(x) for x in values):
         return AdvantageResult([], [], [], 0, 0, 0.0, k,
             {"version": advantage_policy, "status": "skipped", "skip_reason": "missing_or_nonfinite_score"})
     order = list(sorted(range(n), key=lambda i: (values[i], i)))
     ranks = [sum(s < x for s in values) for x in values]
+    if same_action:
+        info = {"version": advantage_policy, "ranking_scope": "same_action",
+                "ranking_cutoff": k, "tie_break": "frozen_native_branch_order"}
+        if values[order[0]] == values[order[-1]]:
+            return AdvantageResult([], order, ranks, 0, 0, 0.0, k,
+                {**info, "status": "skipped", "skip_reason": "all_scores_equal"})
+        positive = order[:k]
+        result = [-1.0] * n
+        for i in positive:
+            result[i] = 1.0
+        return AdvantageResult(result, order, ranks, k, n - k, math.fsum(result), k,
+            {**info, "status": "ok", "positive_indices": positive})
     center = sum(x / n for x in values)
     sigma = math.hypot(*(x - center for x in values)) / math.sqrt(n)
     gap = values[order[k]] - values[order[k - 1]]

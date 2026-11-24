@@ -208,6 +208,8 @@ if _active is None:
             _emit(state, 'sdk_http_failed', **state['last_error'])
             raise
         error = response_error_evidence(response) if response.status_code >= 400 else {}
+        state['last_http_status'] = response.status_code
+        state['last_http_error'] = error
         _emit(state, 'sdk_http_finished', **facts, http_status=response.status_code,
               trace=trace, **error)
         if response.status_code == 400:
@@ -253,7 +255,10 @@ def completion(function, llm, **kwargs):
         evidence = exception_evidence(exc)
         if evidence['phase'] == 'unknown' and state['last_error']:
             evidence['phase'] = state['last_error']['phase']
-        _emit(state, 'sdk_call_failed', **evidence, elapsed_seconds=time.monotonic()-started)
+        failure = {**evidence, 'http_status': state.get('last_http_status'),
+                   **state.get('last_http_error', {}),
+                   'elapsed_seconds': time.monotonic() - started}
+        _emit(state, 'sdk_call_failed', **failure)
         if state.get('format_error'):
             # The pinned Agent.step appends this native validation error as a
             # correction message and continues. This is not an SDK retry.

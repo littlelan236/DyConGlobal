@@ -187,10 +187,14 @@ def validate_snapshot_tensors(resolved, contract):
     return {"tensor_validation": "verified", "tensor_count": len(mapped), "adapter_hash": hash_json(mapped)}
 
 
-def restore_training(directory, optimizer, scheduler, contract, *, expected_state=None, groups=None):
+def restore_training(directory, optimizer, scheduler, contract, *, expected_state=None, groups=None, config=None):
     """One restore rule for rank zero and followers; RNG restoration is last."""
     from RL.checkpoints import restore_checkpoint
-    state = restore_checkpoint(directory, optimizer, scheduler, contract, contract["adapter"], verify=True)
+    from RL.config_migration import restore_contract, apply_optimizer_config
+    source_contract = restore_contract(config, directory, contract) if config is not None else contract
+    state = restore_checkpoint(directory, optimizer, scheduler, source_contract, contract["adapter"], verify=True)
+    if config is not None:
+        apply_optimizer_config(config, optimizer, scheduler)
     if expected_state is not None and state != expected_state:
         raise ValueError("Restored rank state differs from broadcast checkpoint state")
     if groups is not None:

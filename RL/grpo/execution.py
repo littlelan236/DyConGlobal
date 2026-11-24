@@ -210,11 +210,14 @@ def placeholder(parent, chunk, window, rank):
 
 class PreparedExecution:
     """Trainer view over the existing immutable indexed parent artifact."""
-    def __init__(self, reader, *, rank=0, world_size=1):
+    def __init__(self, reader, *, rank=0, world_size=1, fsdp_replicate_empty=False):
         self.reader = reader
         self.plan = validate(reader.proof["execution_plan"])
         self.execution_plan = self.plan
         self.rank, self.world_size = rank, world_size
+        self.fsdp_replicate_empty = bool(fsdp_replicate_empty)
+        if self.fsdp_replicate_empty and world_size not in {2, 4, 8}:
+            raise ValueError("FSDP2 8x16 requires world_size=2/4/8")
         self.parents = {p["parent_group_id"]: p for p in self.plan["parents"]}
 
     def __len__(self):
@@ -234,8 +237,10 @@ class PreparedExecution:
                 continue
             groups = []
             for index, chunk in enumerate(self.plan["chunks"][window["start"]:window["end"]]):
-                if index % self.world_size != self.rank:
-                    group = placeholder(self.parents[chunk["parent_group_id"]], chunk, window, index % self.world_size)
+                assigned_rank = index % self.world_size
+                replicate_for_empty = self.fsdp_replicate_empty and self.rank >= window["end"] - window["start"] and index == 0
+                if assigned_rank != self.rank and not replicate_for_empty:
+                    group = placeholder(self.parents[chunk["parent_group_id"]], chunk, window, assigned_rank)
                 else:
                     parent = self.reader.metadata(chunk["parent_group_id"])
                     if parent_record(parent) != self.parents[chunk["parent_group_id"]]:

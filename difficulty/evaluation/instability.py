@@ -145,7 +145,7 @@ def _bootstrap(records, count, seed, *, ratio=False, cluster="task"):
     return {"ci95": ci, "clusters": len(buckets), "valid_resamples": len(values)}
 
 
-def aggregate_steps(rows, names, *, bootstrap_samples=2000, seed=42):
+def aggregate_metrics(rows, names, *, bootstrap_samples=2000, seed=42, require_repo=False):
     """Equal step -> rollout -> task means; bootstrap whole tasks/repositories."""
     report = {}
     for name in names:
@@ -154,7 +154,15 @@ def aggregate_steps(rows, names, *, bootstrap_samples=2000, seed=42):
             "mean": _point([r["values"] for r in records], False) if records else None,
             "tasks": len(records), "rollouts": trajectories, "steps": steps,
             "task_bootstrap": _bootstrap(records, bootstrap_samples, seed),
-            "repo_bootstrap": _bootstrap(records, bootstrap_samples, seed, cluster="repo")}
+            "repo_bootstrap": _bootstrap(
+                [r for r in records if r["repo"]] if require_repo else records,
+                bootstrap_samples, seed, cluster="repo")}
+    return report
+
+
+def aggregate_steps(rows, names, *, bootstrap_samples=2000, seed=42):
+    """Aggregate standalone metrics and the paired relative-gap metric."""
+    report = aggregate_metrics(rows, names, bootstrap_samples=bootstrap_samples, seed=seed)
     keys = ["relative_same_gap", "relative_different_gap"]
     records, trajectories, steps = _task_means(rows, keys)
     means = np.mean([r["values"] for r in records], axis=0) if records else [None, None]

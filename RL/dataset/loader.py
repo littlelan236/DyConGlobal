@@ -106,13 +106,25 @@ def iter_ce_batches(path, **kwargs):
 def iter_grpo_groups(path, *, top_k=4, top_k_fraction=None, score_scale_floor=0.1,
                      boundary_tie_sigma=0.05, advantage_policy="historical_topk_zero_sum_v1", **kwargs):
     """Yield objective-ready frozen groups without changing native coordinates."""
+    from RL.grpo.advantage import SAME_ACTION_ADVANTAGE_VERSION
+    from RL.grpo.grouping import training_groups
     from RL.grpo.groups import GroupBatch
 
-    for value in iter_groups(path, **kwargs):
-        yield GroupBatch.from_dataset_group(
-            value, top_k=top_k, top_k_fraction=top_k_fraction,
-            score_scale_floor=score_scale_floor, boundary_tie_sigma=boundary_tie_sigma,
-            advantage_policy=advantage_policy)
+    for value, reason in training_groups(iter_groups(path, **kwargs), advantage_policy):
+        if reason:
+            continue
+        try:
+            group = GroupBatch.from_dataset_group(
+                value, top_k=top_k, top_k_fraction=top_k_fraction,
+                score_scale_floor=score_scale_floor, boundary_tie_sigma=boundary_tie_sigma,
+                advantage_policy=advantage_policy)
+        except ValueError as exc:
+            if advantage_policy == SAME_ACTION_ADVANTAGE_VERSION and str(exc) in {
+                "singleton_action_group", "missing_or_nonfinite_score", "all_scores_equal"
+            }:
+                continue
+            raise
+        yield group
 
 
 def iter_grpo_batches(path, group_batch_size=4, **kwargs):

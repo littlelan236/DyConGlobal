@@ -294,19 +294,34 @@ def _execute_mini_attempt(cfg, run_id, task, factory, runtime, sample, context, 
                 capture_context = False
                 capture_status = 'failed'
                 capture_failure(exc)
-        agent_cfg = adapter.agent_config(cfg)
-        local_cfg['agent'] = agent_cfg
-        agent = DurableAgent(
-            make_model(local_cfg, factory.deadline, capture_context, runtime), env,
-            system_template=agent_cfg['system_template'], instance_template=agent_cfg['instance_template'],
-            step_limit=cfg['agent']['step_limit'], cost_limit=cfg['agent']['cost_limit'],
-            max_consecutive_format_errors=cfg['agent']['max_consecutive_format_errors'],
-            loop_repeat_limit=cfg['agent'].get('loop_repeat_limit'), loop_max_period=cfg['agent'].get('loop_max_period', 7),
-            output_path=path)
-        _phase(runtime, sample, 'agent')
-        stage_start = time.monotonic()
-        info = agent.run(adapter.prompt(task))
-        status, patch = info.get('exit_status', 'Unknown'), info.get('submission', '')
+        key_settings = cfg.get('key_steps') or {}
+        child = runtime.get('continuation')
+        if key_settings.get('mode') == 'scan':
+            from types import SimpleNamespace
+            from rollout.key_steps.service import continue_agent
+            info = continue_agent(SimpleNamespace(env=env), key_settings, child, out)
+            status, patch = info['exit_status'], ''
+        else:
+            agent_cfg = adapter.agent_config(cfg)
+            local_cfg['agent'] = agent_cfg
+            agent = DurableAgent(
+                make_model(local_cfg, factory.deadline, capture_context, runtime), env,
+                system_template=agent_cfg['system_template'], instance_template=agent_cfg['instance_template'],
+                step_limit=cfg['agent']['step_limit'], cost_limit=cfg['agent']['cost_limit'],
+                max_consecutive_format_errors=cfg['agent']['max_consecutive_format_errors'],
+                loop_repeat_limit=cfg['agent'].get('loop_repeat_limit'), loop_max_period=cfg['agent'].get('loop_max_period', 7),
+                output_path=path)
+            _phase(runtime, sample, 'agent')
+            stage_start = time.monotonic()
+            if key_settings.get('mode') == 'source':
+                from rollout.key_steps.state import Recorder
+                agent.key_step_recorder = Recorder(env, key_settings, out)
+            if key_settings.get('mode') == 'continuation':
+                from rollout.key_steps.service import continue_agent
+                info = continue_agent(agent, key_settings, child, out)
+            else:
+                info = agent.run(adapter.prompt(task))
+            status, patch = info.get('exit_status', 'Unknown'), info.get('submission', '')
     except Exception as exc:
         if agent is not None and getattr(exc, 'response_message', None) is not None:
             agent.messages.append(exc.response_message)
@@ -707,20 +722,24 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
     elif request_for(run, os.environ.get('DYCON_EXECUTION_ATTEMPT')) is not None:
         update_run_status(run, 'cancelled', reason='Cancelled')
         return settled
-    # Recover capture publication using the established no-model recovery path.
-    if resume and cfg.get('capture', {}).get('enabled'):
-        needs_capture_recovery = any(p.exists() for p in (run / 'rollout/tasks').glob('*/repetitions/*/attempts/*/capture-session.json'))
-        if needs_capture_recovery:
-            from hidden.recover_online import recover_online
-            try:
-                recover_online.__wrapped__(cfg, run_id)
-            except Exception as exc:
-                write_json(run / 'capture-recovery-error.json', {'error': repr(exc)})
+    from hidden.recover_online import BackgroundCaptureRecovery
+    with BackgroundCaptureRecovery(cfg, run_id, CURRENT.get(), enabled=resume and not check_only) as recovery:
+        return _run_manifest_active(cfg, run_id, loaded, adapter, settled, factory,
+                                    operator_retries, check_only, recovery)
 
+
+def _run_manifest_active(cfg, run_id, loaded, adapter, settled, factory, operator_retries, check_only, recovery):
+    from core.model_identity import model_identity_verification_enabled, verify_model
+    from runtime.serving.manager import ServingManager
+
+    root = Path(cfg['project_root'])
+    run = root / 'runs' / run_id
+    selection = cfg['selection']
+    work_items = loaded['work_items']['items']
     from core.preflight import long_checks_enabled, timed_check
     model_checks = {}
     try:
-        if model_identity_verification_enabled(cfg):
+        if (cfg.get('key_steps') or {}).get('mode') != 'scan' and model_identity_verification_enabled(cfg):
             deep = long_checks_enabled(cfg)
             with timed_check(model_checks, "model_sha", enabled=deep):
                 verify_model(cfg) if deep else verify_model(cfg, deep=False)
@@ -737,12 +756,18 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
         checked = adapter.preflight(backend_context, selection["tasks"])
         if not checked.passed:
             raise ValueError(adapter.binding.adapter + ' preflight rejected run: ' + '; '.join(checked.blockers))
-        sharded = cfg['serving'].get('trajectory_sharding', 'none') == 'per_gpu_tp1'
+        sharded = (cfg['serving'].get('trajectory_sharding', 'none') == 'per_gpu_tp1'
+                   and (cfg.get('key_steps') or {}).get('mode') != 'scan')
         if sharded:
             from runtime.serving.pool import ServingPool
             context = ServingPool(cfg, run / 'serving', run_id)
         else:
             context = ServingManager(cfg, run / 'serving')
+        scan_only = (cfg.get('key_steps') or {}).get('mode') == 'scan'
+        if scan_only:
+            from contextlib import nullcontext
+            from types import SimpleNamespace
+            context = nullcontext(SimpleNamespace(runtime={}))
         with context as serving:
             runtime = {} if sharded else getattr(serving, 'runtime', {})
             capture_producers = ([worker.manager.runtime.get('capture_controller') for worker in serving.workers]
@@ -782,7 +807,7 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
             if sharded:
                 for worker in serving.workers:
                     adapter.startup(backend_context, worker.cfg, startup_task, {**runtime, **worker.runtime()})
-            else:
+            elif not scan_only:
                 adapter.startup(backend_context, cfg, startup_task, runtime)
             # Resolve lazy native driver imports before worker admission. This
             # keeps the scheduler's first concurrent attempts from serializing
@@ -808,6 +833,10 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
             stopped = None
             from rollout.startup_failure_gate import StartupFailureGate
             startup_gate = StartupFailureGate(cfg['execution'].get('startup_failure_limit'))
+            mixed = None
+            if cfg.get('key_steps'):
+                from rollout.key_steps.schedule import MixedQueue
+                mixed = MixedQueue(work_items, cfg['key_steps'], worker_limit, run/'rollout/key-step-schedule.jsonl')
             reservations = {}
             with concurrent.futures.ThreadPoolExecutor(max_workers=worker_limit) as pool:
                 def fill():
@@ -821,9 +850,15 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
                         worker = serving.acquire() if sharded else None
                         if sharded and worker is None:
                             return
-                        item = pending.popleft()
+                        item = mixed.pop(pending) if mixed else pending.popleft()
+                        if item is None:
+                            if worker is not None:
+                                serving.release(worker)
+                            return
                         task = selection['tasks'][item['task_key']]
                         task_runtime = {**runtime, 'queue_wait_seconds': time.monotonic() - queued_at[item['sample_key']]}
+                        if item.get('continuation'):
+                            task_runtime['continuation'] = item['continuation']
                         if worker is not None:
                             task_runtime.update(worker.runtime())
                         tracker.phase(item['sample_key'], 'admission')
@@ -844,6 +879,9 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
                     if not running:
                         fill()
                         if not running:
+                            if pending and mixed and not stopped:
+                                cancellation.event.wait(0.25)
+                                continue
                             break
                     finished = wake.wait(running, cancellation)
                     if cancellation.event.is_set():
@@ -864,6 +902,8 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
                             value = {**item, 'exit_status': 'WorkerFailure', 'disposition': 'failed',
                                      'error': repr(exc), 'traceback': traceback.format_exc()}
                         kind = value.get('disposition') or disposition(cfg, value.get('exit_status'))
+                        if mixed:
+                            mixed.release(item, retry=kind in {'retry_pending','infrastructure_retry','admission_waiting'})
                         tracker.result(item['sample_key'], value)
                         if startup_gate.observe(value):
                             stopped = 'StartupFailureThreshold'
@@ -901,10 +941,13 @@ def run_manifest(cfg, run_id, resume=False, factory=None, *, task_ids=(), check_
         raise
     finally:
         try:
-            adapter.close_run(backend_context, CURRENT.get())
+            recovery.close()
         finally:
-            if not check_only:
-                _finalize_capture_publication(cfg, run_id, work_items, producers=capture_producers)
+            try:
+                adapter.close_run(backend_context, CURRENT.get())
+            finally:
+                if not check_only:
+                    _finalize_capture_publication(cfg, run_id, work_items, producers=capture_producers)
 
 
 def _finalize_capture_publication(cfg, run_id, work_items, *, producers=()):

@@ -3,7 +3,15 @@
 from dataclasses import dataclass, field
 import math
 
-from .advantage import ADVANTAGE_VERSION, CONSENSUS_ADVANTAGE_VERSION, compute_advantages, validate_retained
+from .advantage import (ADVANTAGE_VERSION, CONSENSUS_ADVANTAGE_VERSION, SAME_ACTION_ADVANTAGE_VERSION,
+                        compute_advantages, validate_retained)
+from .grouping import lineage, same_action_group_id
+
+
+def advantages_for_members(members, **settings):
+    if settings.get("advantage_policy") == CONSENSUS_ADVANTAGE_VERSION:
+        settings["retained"] = [row.get("retained") for row in members]
+    return compute_advantages([row.get("historical_score") for row in members], **settings)
 
 
 @dataclass(frozen=True)
@@ -33,11 +41,16 @@ class GroupBatch:
         members = value.get("members", [])
         if not members:
             raise ValueError("Cannot construct an empty GRPO group")
-        retained = None
-        if advantage_policy == CONSENSUS_ADVANTAGE_VERSION:
-            retained = [row.get("retained") for row in members]
-            validate_retained(retained, len(members))
         inventory = value.get("group", {})
+        same_action = advantage_policy == SAME_ACTION_ADVANTAGE_VERSION
+        if same_action and (not inventory.get("source_group_id") or not inventory.get("action_hash")
+                            or inventory.get("group_id") != same_action_group_id(
+                                inventory["source_group_id"], inventory["action_hash"])
+                            or any(row.get("group_id") != inventory["source_group_id"]
+                                   or row.get("action_hash") != inventory["action_hash"] for row in members)):
+            raise ValueError("Same-action advantages require a derived training group")
+        if advantage_policy == CONSENSUS_ADVANTAGE_VERSION:
+            validate_retained([row.get("retained") for row in members], len(members))
         if inventory.get("terminal_scoring_exclusion") or any(r.get("terminal_scoring_exclusion") for r in members):
             raise ValueError("terminal_evaluation_ineligible")
         if inventory.get("expected_branch_count", len(members)) != len(members):
@@ -51,26 +64,27 @@ class GroupBatch:
         if any(p != prompts[0] for p in prompts[1:]):
             raise ValueError("GRPO group prompt tokens are not identical")
         scores = [row.get("historical_score") for row in members]
-        if any(type(s) not in (int, float) or not math.isfinite(float(s)) for s in scores):
+        if not same_action and any(type(s) not in (int, float) or not math.isfinite(float(s)) for s in scores):
             raise ValueError("GRPO groups require finite historical scores")
         if len(members) < 2:
-            raise ValueError("GRPO groups require at least two branches")
+            raise ValueError("singleton_action_group" if same_action else "GRPO groups require at least two branches")
         if any(not row.get("action") for row in members):
             raise ValueError("missing_action")
         from RL.dataset.loader import collate_group
         tensors = (collate_group({"members": members}, as_tensors=as_tensors, pad_token_id=pad_token_id)
                    if collate else dict.fromkeys(("input_ids", "attention_mask", "labels", "loss_mask")))
-        adv = compute_advantages(scores, top_k=top_k, top_k_fraction=top_k_fraction,
-                                 score_scale_floor=score_scale_floor,
-                                 boundary_tie_sigma=boundary_tie_sigma,
-                                 advantage_policy=advantage_policy, retained=retained)
+        adv = advantages_for_members(members, top_k=top_k, top_k_fraction=top_k_fraction,
+                                     score_scale_floor=score_scale_floor,
+                                     boundary_tie_sigma=boundary_tie_sigma,
+                                     advantage_policy=advantage_policy)
         if adv.metadata["status"] != "ok":
             raise ValueError(adv.metadata["skip_reason"])
         return cls(value.get("group", {}).get("group_id", members[0].get("group_id", "")),
                    [str(row.get("branch_sample_id", row.get("branch_id"))) for row in members],
                    prompts, completions, tensors["input_ids"], tensors["attention_mask"],
                    tensors["labels"], tensors["loss_mask"], [float(x) for x in scores],
-                   adv.advantages, metadata={**adv.metadata, "order": adv.order, "ranks": adv.ranks})
+                   adv.advantages, metadata={**adv.metadata, **lineage(inventory),
+                                             "order": adv.order, "ranks": adv.ranks})
 
     def branch_batch(self, index, device):
         """Physical microbatch=1, with complete native prefix and no padding."""

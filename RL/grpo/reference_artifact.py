@@ -72,30 +72,12 @@ class ReferenceReader:
         is memory-mapped; unselected completion arrays are not copied into RAM.
         Selected token/mask identities use the same reference manifest entries.
         """
-        import torch
-        from .reference import _entries
+        from .reference import load_reference_group
         owner, chunk = self.owners[group.group_id]
         if owner is not self:
             return owner.for_group(group)
-        folder = self.path / chunk["name"]
-        manifest = read_json(folder / "grpo/reference.json")
-        selected = set(group.branch_ids)
-        expected = _entries([group], chunk["contract"]["input"], chunk["reference"]["reference_identity"])
-        entries = [e for e in manifest["entries"] if e["group_id"] == group.group_id and e["branch_id"] in selected]
-        if entries != expected:
-            raise ValueError("Selected reference branch/token/mask identity mismatch")
-        payload = torch.load(folder / "grpo/reference-logprobs.pt", map_location="cpu", weights_only=True, mmap=True)
-        if (payload.get("identity") != chunk["reference"]["reference_identity"]
-                or payload.get("input_sha256") != hash_json(chunk["contract"]["input"])):
-            raise ValueError("Selected reference parent anchor/input identity mismatch")
-        result = {}
-        for i, bid in enumerate(group.branch_ids):
-            value = payload["groups"][group.group_id][bid]
-            if (value.dtype != torch.float32 or value.ndim != 1 or value.requires_grad
-                    or len(value) != len(group.completion_token_ids[i]) or not torch.isfinite(value).all()):
-                raise ValueError("Selected reference target shape/dtype/finite mismatch")
-            result[bid] = value.clone()
-        return result
+        return load_reference_group(self.path / chunk["name"], group,
+                                    chunk["contract"]["input"], chunk["reference"])
 
     def summary(self):
         return {"reference_id":self.path.name, "groups":len(self.owners),

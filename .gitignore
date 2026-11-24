@@ -70,6 +70,10 @@ desktop.ini
 
 # Generated SWE-bench verifier resource publications (not repair profiles)
 /runtime/resources/swebench-verifier-assets-*/
+
+# FSDP checkpoint shards and host-specific profiling output
+*.distcp
+/RL/memory-traces/
 /capture/**
 /online/**
 
@@ -234,16 +238,22 @@ desktop.ini
 /RL/extractions/
 /RL/logs/**
 /RL/reports/**
-# Machine-specific execution configs; reusable experiment templates stay tracked
+# Machine-local and dated RL execution configs; reusable presets stay visible
 /RL/experiments/*.local.yaml
 /RL/experiments/*.local.yml
 /RL/experiments/**/*.local.yaml
 /RL/experiments/**/*.local.yml
-/RL/experiments/grpo-objective-20261110/
+/RL/experiments/*-20[0-9][0-9][01][0-9][0-3][0-9]*.yaml
+/RL/experiments/*-20[0-9][0-9][01][0-9][0-3][0-9]*.yml
+/RL/experiments/*-20[0-9][0-9][01][0-9][0-3][0-9]*/
 # Local profiler traces, tensorboard events and adapter exports
 /RL/profiles/
 /RL/tensorboard/
 /RL/exports/
+# Optional experiment tracking writes local service state and binary events
+/wandb/
+/RL/wandb/
+events.out.tfevents.*
 
 # Mutable RL progress, TensorBoard services and generated artifact publications
 /runtime/rl-observability/
@@ -253,14 +263,14 @@ desktop.ini
 /RL/extensions/
 /RL/probabilities/
 /RL/probability-plans/
-# Historical machine/GPU-bound attempts; reusable smoke/prefix templates stay visible
-/RL/experiments/grpo-data-parallel-*-20261113*.yaml
-/RL/experiments/observability-20261112/
 # Historical verifier execution evidence; catalog/verifier_patches remains source
 /analysis/pddl-airport-revalidation-*/
 
-# Generated catalog revisions and published reference packages (rebuild via CLI)
+# Generated catalog revision evidence and task-specific selections
 /catalog/changes/
+/catalog/task-sets/
+
+# Generated catalog revisions and published reference packages (rebuild via CLI)
 /catalog/reference-solutions/
 
 # Migration release bundles and machine-local backend/cache environments
@@ -277,3 +287,6 @@ desktop.ini
 # Machine-local rollout launch configurations
 /run-launch-*.yaml
 /run-launch-*.yml
+
+# Legacy one-off source patch helper; maintained changes belong in modules
+/patch_remote.py

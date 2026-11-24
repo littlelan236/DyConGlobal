@@ -1,5 +1,5 @@
 # Online-only export. Replace IDs and physical roots with sealed source bindings.
-# For missing-only replay, see ../PROBABILITY_ARTIFACTS.md before freezing a plan.
+# See ../README.md for missing-only replay before freezing a coverage plan.
 schema_version: 1
 dataset:
   id: DATASET_ID

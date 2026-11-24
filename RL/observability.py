@@ -13,6 +13,7 @@ import warnings
 
 from core.io import artifact_roots, hash_json, now, read_json, write_json
 from RL.artifacts import _directory
+from RL.metric_schema import SIGNAL_SCALARS
 
 MAX_METRIC_BYTES = 64 * 1024 * 1024
 SCALARS = ('consumed_execution_chunks', 'execution_window_cursor', 'completed_parent_groups',
@@ -23,7 +24,8 @@ SCALARS = ('consumed_execution_chunks', 'execution_window_cursor', 'completed_pa
            'ratio_mean', 'positive_ratio_mean', 'negative_ratio_mean',
            'gradient_norm', 'learning_rate', 'seconds', 'step_seconds',
            'forward_seconds', 'backward_seconds', 'peak_allocated_bytes',
-           'peak_reserved_bytes', 'free_bytes', 'observed_at', 'attempt_id', 'metrics_schema_version')
+           'reward', 'reward_mean', 'mean_reward',
+           'peak_reserved_bytes', 'free_bytes', 'observed_at', 'attempt_id', 'metrics_schema_version') + SIGNAL_SCALARS
 
 
 def streaming_json():
@@ -209,7 +211,7 @@ def training_process(directory, attempt, live):
         if not item:
             continue
         cmd = item['command']
-        if 'lora-train' not in cmd or '--training-config' not in cmd:
+        if not {'lora-train', 'rl-train'}.intersection(cmd) or '--training-config' not in cmd:
             continue
         try:
             path = Path(cmd[cmd.index('--training-config') + 1])
@@ -231,7 +233,7 @@ def training_process(directory, attempt, live):
     return None
 
 
-def snapshot(cfg, attempt_id, storage_root=None, recent=10, reader=None):
+def snapshot(cfg, attempt_id, storage_root=None, recent=10, reader=None, *, verify_checkpoints=True):
     directory, attempt, identity, cache = source(cfg, attempt_id, storage_root)
     config = read_json(directory / 'resolved-config.json')
     contract = attempt.get('contract') or {}
@@ -256,7 +258,8 @@ def snapshot(cfg, attempt_id, storage_root=None, recent=10, reader=None):
             messages.append('Stage snapshot belongs to an exited/different process')
         live = {}
     checkpoint = None
-    for path in sorted((directory / 'checkpoints').glob('step-*'), reverse=True):
+    checkpoint_paths = (directory / 'checkpoints').glob('step-*') if verify_checkpoints else ()
+    for path in sorted(checkpoint_paths, reverse=True):
         if not (path / 'receipt.json').is_file():
             continue
         cp = read_json(path / 'state.json')
@@ -334,14 +337,21 @@ def snapshot(cfg, attempt_id, storage_root=None, recent=10, reader=None):
             'eta': eta, 'visualization': visualization, 'warnings': messages}
 
 
-def active(cfg, storage_root=None, recent=0):
+def active(cfg, storage_root=None, recent=0, *, progress_only=False):
     roots = [Path(storage_root).resolve()] if storage_root else artifact_roots(cfg, 'lora-attempt')
     candidates = set()
+    errors = []
     for root in roots:
         for path in (root / 'RL/checkpoints').glob('*/attempt.json'):
             if path.is_symlink() or path.parent.is_symlink():
                 continue
-            attempt = read_json(path)
+            try:
+                attempt = read_json(path)
+            except (OSError, ValueError) as exc:
+                if not progress_only:
+                    raise
+                errors.append({'attempt_id': path.parent.name, 'storage_root': str(root), 'error': str(exc)[:400]})
+                continue
             if attempt.get('status') not in ('completed', 'paused', 'failed', 'dry_run'):
                 candidates.add((path.parent.name, str(root)))
     if not storage_root:
@@ -353,7 +363,7 @@ def active(cfg, storage_root=None, recent=0):
                 continue
             item = process(entry.name)
             command = item['command'] if item else []
-            if 'lora-train' not in command or '--training-config' not in command:
+            if not {'lora-train', 'rl-train'}.intersection(command) or '--training-config' not in command:
                 continue
             try:
                 config_path = Path(command[command.index('--training-config')+1])
@@ -376,8 +386,16 @@ def active(cfg, storage_root=None, recent=0):
                     candidates.add((binding['attempt_id'], binding['storage_root']))
             except (OSError, ValueError, KeyError):
                 continue
-    found = [snapshot(cfg, name, root, recent) for name,root in sorted(candidates)]
-    return {'schema_version': 1, 'attempts': found}
+    if not progress_only:
+        return {'schema_version': 1, 'attempts': [
+            snapshot(cfg, name, root, recent) for name, root in sorted(candidates)]}
+    found = []
+    for name, root in sorted(candidates):
+        try:
+            found.append(snapshot(cfg, name, root, recent, verify_checkpoints=False))
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            errors.append({'attempt_id': name, 'storage_root': root, 'error': str(exc)[:400]})
+    return {'schema_version': 1, 'attempts': found, 'errors': errors}
 
 
 class LiveTelemetry:

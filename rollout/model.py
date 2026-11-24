@@ -157,7 +157,28 @@ def make_model(cfg, deadline, capture_context=None, runtime=None, sample=None):
             with generation_phase(runtime):
                 return super()._query(messages, **kwargs)
 
+        def inject_saved_response(self, response, cost, source_ref):
+            if hasattr(self, "_dycon_injection"):
+                raise ValueError("A candidate may only be injected once")
+            self._dycon_injection = (copy.deepcopy(response), cost, source_ref)
+
         def query(self, messages, **kwargs):
+            if hasattr(self, "_dycon_injection"):
+                from litellm import ModelResponse
+                response, cost, source_ref = self._dycon_injection
+                del self._dycon_injection
+                response = ModelResponse(**response)
+                try:
+                    actions = self._parse_actions(response)
+                except FormatError as error:
+                    for message in error.messages:
+                        message.setdefault("extra", {}).update(response=response.model_dump(mode="json"),
+                            cost=cost, continuation_source=source_ref)
+                    raise
+                message = response.choices[0].message.model_dump()
+                message["extra"] = {"actions": actions, "cost": cost,
+                    "response": response.model_dump(mode="json"), "continuation_source": source_ref}
+                return message
             from core.io import hash_json
             cancellation = (runtime or {}).get('cancellation')
             if cancellation is not None:

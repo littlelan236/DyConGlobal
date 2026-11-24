@@ -22,7 +22,8 @@ def validate_input(base, proof):
 def validate_resume(config, proof, metadata):
     from RL.config import schedule_contract
     contract = metadata["contract"]
-    if contract.get("schedule") != schedule_contract(config) or contract.get("input") != proof:
+    from RL.config_migration import schedule_matches
+    if not schedule_matches(config, contract.get("schedule")) or contract.get("input") != proof:
         raise ValueError("GRPO resume schedule/dataset/objective/order identity mismatch")
     state = metadata["state"]
     n = proof["group_count"]
@@ -220,6 +221,8 @@ def receipt_metadata(contract, state):
                  "schedule_id":contract["prepared_schedule_id"],
                  "schedule_manifest_sha256":contract["prepared_schedule_sha256"],
                  **{k:state[k] for k in ("segment_id", "segment_ordinal", "last_consumed_group_id", "consumed_group_ids_sha256")}}
+    if "same_action_grouping" in proof:
+        extra["same_action_grouping"] = proof["same_action_grouping"]
     if proof.get("execution_plan"):
         from .execution import validate, validate_state
         validate(proof["execution_plan"])

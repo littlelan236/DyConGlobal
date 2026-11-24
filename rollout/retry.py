@@ -29,6 +29,10 @@ def enabled(cfg):
 
 
 def disposition(cfg, status):
+    if status == 'ReplayValidated':
+        return 'accepted'
+    if status == 'ReplayMismatch':
+        return 'infrastructure_retry'
     if status == 'Cancelled':
         return 'interrupted'
     if enabled(cfg) and status in RETRY_STATUSES:

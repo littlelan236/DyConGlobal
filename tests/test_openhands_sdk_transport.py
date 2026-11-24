@@ -4,7 +4,7 @@ import httpx
 import pytest
 import requests
 from runtime.agents import openhands_transport as transport
-from runtime.agents.skillsbench import _acp_details
+from runtime.agents.skillsbench import _acp_details, _openhands_error_diagnostics
 from rollout.adapters.openhands_bridge import OpenHandsBridge, upstream_error_evidence
 from core.deadline import Deadline
 
@@ -169,3 +169,30 @@ def test_only_owner_bound_typed_format_errors_are_recoverable(monkeypatch,payloa
             response.raise_for_status()
     with pytest.raises(httpx.HTTPStatusError):
         transport.completion(native,llm,api_base='http://127.0.0.1:19000/v1',api_key='injection-only')
+
+
+def test_openhands_error_summary_joins_sdk_http_failure(tmp_path):
+    diagnostics = tmp_path / 'diagnostics'
+    diagnostics.mkdir()
+    receipt = {
+        'schema_version': 1,
+        'sdk_request_id': 'sdk-' + 'a' * 32,
+        'events': [
+            {'event': 'sdk_http_finished', 'sdk_request_id': 'sdk-' + 'a' * 32,
+             'http_status': 502, 'http_error_message': 'backend [redacted]'},
+            {'event': 'sdk_call_failed', 'sdk_request_id': 'sdk-' + 'a' * 32,
+             'http_status': 502, 'phase': 'unknown',
+             'exception_types': ['httpx.HTTPStatusError']},
+        ],
+    }
+    (diagnostics / ('sdk-transport-sdk-' + 'a' * 32 + '.json')).write_text(
+        json.dumps(receipt), encoding='utf-8')
+    row = _openhands_error_diagnostics(
+        tmp_path, {'error': 'ACP error -32603: Internal error', 'error_category': 'agent'},
+        {'run_id': 'run', 'attempt_id': 'attempt'})
+    assert row['cause'] == 'sdk_http_error'
+    assert row['cause_source'] == 'actual_sdk_http_transport'
+    assert row['http_status'] == 502
+    assert row['sdk_request_id'] == 'sdk-' + 'a' * 32
+    assert row['sdk_transport']['http_failures'][0]['http_status'] == 502
+    assert 'Internal error' in row['public_error']

@@ -1,4 +1,4 @@
-"""Merge accepted sample artifacts from one finished rollout run into another."""
+"""Merge finished rollout sample artifacts with explicit repetition precedence."""
 
 from __future__ import annotations
 
@@ -25,6 +25,8 @@ def sample_state(cfg, value):
     """Classify a sample for merge precedence without treating AgentCompleted as failure."""
     if not value or value.get("exit_status") in PENDING_STATUSES or value.get("disposition") in PENDING_DISPOSITIONS:
         return "pending"
+    if value.get("disposition") in {"failed", "blocked"}:
+        return "failed"
     if sample_accepted(cfg, value):
         return "accepted"
     return "failed"
@@ -78,6 +80,8 @@ def _destination_sample(item, source_result, destination_run, attempt_id):
     value["source_run_id"] = source_result.get("run_id")
     value["source_sample_key"] = source_result.get("sample_key")
     value["source_attempt_id"] = source_attempt
+    value["source_repetition_id"] = source_result.get("repetition_id")
+    value["source_sample_seed"] = source_result.get("sample_seed")
     value["merged_from"] = {"run_id": source_result.get("run_id"), "attempt_id": source_attempt}
     return value
 
@@ -106,13 +110,15 @@ def _copy_attempt(source_work, destination_work, source_attempt, destination_att
             continue
         if not isinstance(value, dict):
             continue
-        for key in ("run_id", "task_key", "sample_key", "repetition_id", "sample_seed"):
+        source_binding = {k: value.get(k) for k in ("run_id", "sample_key", "repetition_id", "sample_seed", "attempt_id")}
+        for key in ("run_id", "task_key", "sample_key", "repetition_id", "repetition_index", "sample_seed", "seed_policy"):
             if key in item:
                 value[key] = item[key]
         if "attempt_id" in value:
             value["attempt_id"] = destination_attempt
-        value["source_run_id"] = value.get("source_run_id") or source_dir.parts[-3]
+        value["source_run_id"] = value.get("source_run_id") or source_binding["run_id"]
         value["source_attempt_id"] = source_attempt
+        value["source_binding"] = source_binding
         write_json(path, value)
 
 
@@ -135,6 +141,16 @@ def _copy_rollout_artifacts(root, source_run, destination_run, source_row, desti
         _copy_tree(source.parent, destination.parent)
         destination_row["subject_path"] = artifact_reference(root, destination)
         destination_row["subject_sha256"] = sha256(destination)
+
+
+def _copy_sample_attempts(source_work, destination_work, source_attempt, destination_attempt,
+                          item, destination_run, mode):
+    _copy_attempt(source_work, destination_work, source_attempt, destination_attempt, item, destination_run)
+    if mode == "append-executed":
+        for history in sorted((source_work / "attempts").glob("*")):
+            if history.is_dir() and history.name != source_attempt:
+                historical_id = destination_attempt + "-history-" + hash_json(history.name)[:12]
+                _copy_attempt(source_work, destination_work, history.name, historical_id, item, destination_run)
 
 
 def _append_event(run, event):
@@ -264,15 +280,95 @@ def _legacy_rollout_is_stale(loaded, progress):
         return False
 
 
-def merge_runs(root, source_run_id, destination_run_id):
-    """Merge accepted source samples into a finished destination run."""
+def _executed(run, value):
+    """An admission/queue cursor is not evidence of physical execution."""
+    if not value:
+        return False
+    if value.get("merged_from") or value.get("rollout_id"):
+        return True
+    if not value.get("attempt_id") or not value.get("instance_id") or not value.get("repetition_id"):
+        return False
+    attempt = (run / "rollout/tasks" / value["instance_id"] / "repetitions" /
+               value["repetition_id"] / "attempts" / value["attempt_id"])
+    return (attempt / "attempt-started.json").is_file()
+
+
+def _append_pairs(source_samples, destination_samples, items, source_run, destination_run):
+    """Keep destination executed repetitions, then fill vacant frozen task slots."""
+    used = {(v.get("source_run_id"), v.get("source_sample_key"), v.get("source_attempt_id"))
+            for v in destination_samples.values() if v.get("merged_from")}
+    used_rollouts = {v.get("rollout_id") for v in destination_samples.values()
+                     if v.get("rollout_id")}
+    pairs, summary = [], Counter()
+    by_task = {}
+    for item in items:
+        by_task.setdefault(item["task_key"], []).append(item)
+    for task_key, task_items in by_task.items():
+        slots = [i for i in sorted(task_items, key=lambda i: i["repetition_index"])
+                 if not _executed(destination_run, destination_samples.get(i["sample_key"]))]
+        candidates = sorted((v for v in source_samples.values() if v.get("task_key") == task_key
+                             and _executed(source_run, v)),
+                            key=lambda v: (v.get("repetition_index", 0), v.get("sample_key", "")))
+        available = []
+        for value in candidates:
+            rid = value.get("rollout_id")
+            if (value.get("run_id"), value.get("sample_key"), value.get("attempt_id")) in used or (rid and rid in used_rollouts):
+                summary["already_imported"] += 1
+                continue
+            available.append(value)
+            if rid:
+                used_rollouts.add(rid)
+        summary["over_target"] += max(0, len(available) - len(slots))
+        pairs.extend((i["sample_key"], v) for i, v in zip(slots, available))
+    return pairs, summary
+
+
+def _executed_sample_projection(loaded, progress):
+    """Use the final actually started attempt when a later cursor only queued."""
+    from .status import _sample_status_projection
+    rows, _ = _sample_status_projection(loaded, progress)
+    for item in loaded["work_items"]["items"]:
+        key = item["sample_key"]
+        if _executed(loaded["run"], rows.get(key)):
+            continue
+        work = loaded["run"] / "rollout/tasks" / item["instance_id"] / "repetitions" / item["repetition_id"]
+        started = [p for p in (work / "attempts").glob("*")
+                   if (p / "attempt-started.json").is_file() and p.name.startswith(item["repetition_id"] + "-attempt-")]
+        if not started:
+            continue
+        last = max(started, key=lambda p: int(p.name.rsplit("-", 1)[-1]))
+        final = last / "attempt.json"
+        if final.exists():
+            rows[key] = {**item, **read_json(final)}
+        else:
+            rows[key] = {**item, "attempt_id": last.name, "exit_status": "Interrupted", "disposition": "infrastructure_retry"}
+    return rows
+
+
+def _require_clean_exit(loaded):
+    run = loaded["run"]
+    latest = run / "execution/latest.json"
+    if not latest.exists():
+        return
+    attempt = run / "execution/attempts" / read_json(latest)["attempt"]
+    if not (attempt / "exit.json").exists():
+        raise ValueError(f"Run {run.name} has no supervisor exit receipt")
+    termination = attempt / "termination.json"
+    if not termination.exists() or not read_json(termination).get("cleanup_complete"):
+        raise ValueError(f"Run {run.name} resource cleanup is incomplete")
+
+
+def merge_runs(root, source_run_id, destination_run_id, *, mode="by-repetition", dry_run=False):
+    """Merge source results into a finished destination under the selected policy."""
     root = Path(root).resolve()
     source_run_id, destination_run_id = identifier(source_run_id), identifier(destination_run_id)
     if source_run_id == destination_run_id:
         raise ValueError("Source and destination runs must differ")
+    if mode not in {"by-repetition", "append-executed"}:
+        raise ValueError("Unknown merge mode")
     lock_ids = sorted((source_run_id, destination_run_id))
-    with file_lock(root / "state/run-locks" / (lock_ids[0] + ".lock")):
-        with file_lock(root / "state/run-locks" / (lock_ids[1] + ".lock")):
+    with file_lock(root / "state/run-locks" / (lock_ids[0] + ".lock"), nonblocking=True):
+        with file_lock(root / "state/run-locks" / (lock_ids[1] + ".lock"), nonblocking=True):
             source = load_plan(root, source_run_id)
             destination = load_plan(root, destination_run_id)
             if source["plan"]["operation"] != "rollout" or destination["plan"]["operation"] != "rollout":
@@ -282,9 +378,11 @@ def merge_runs(root, source_run_id, destination_run_id):
             for loaded, label, progress in ((source, "source", source_progress),
                                              (destination, "destination", destination_progress)):
                 stage = read_json(loaded["run"] / "status.json").get("stage")
-                if stage not in TERMINAL_RUN_STAGES and not (label == "source" and _legacy_rollout_is_stale(loaded, progress)):
+                if not dry_run and stage not in TERMINAL_RUN_STAGES and not (label == "source" and _legacy_rollout_is_stale(loaded, progress)):
                     raise ValueError(f"{label} run is not finished: {stage}")
-            if source["plan"]["repeat_count"] != destination["plan"]["repeat_count"]:
+                if mode == "append-executed" and not dry_run:
+                    _require_clean_exit(loaded)
+            if mode == "by-repetition" and source["plan"]["repeat_count"] != destination["plan"]["repeat_count"]:
                 raise ValueError("Runs must have the same repeat_count")
             source_tasks = {row["task_key"]: row["task"] for row in source["tasks"]["tasks"]}
             destination_tasks = {row["task_key"]: row["task"] for row in destination["tasks"]["tasks"]}
@@ -295,36 +393,74 @@ def merge_runs(root, source_run_id, destination_run_id):
             destination_evidence = RunEvidence(root, destination_run_id)
             source_samples = _legacy_samples(source_run_id, source, source_progress, source_evidence, source_cfg)
             destination_samples = destination_progress.get("samples", {})
+            if mode == "append-executed":
+                source_samples = _executed_sample_projection(source, source_progress)
+                destination_samples = _executed_sample_projection(destination, destination_progress)
             source_by_identity = {(v.get("task_key"), v.get("repetition_id")): v for v in source_samples.values()}
             destination_by_identity = {(v.get("task_key"), v.get("repetition_id")): (k, v) for k, v in destination_samples.items()}
             source_rows = source_evidence["rollouts"]
             changed = []
             stats = Counter()
+            items_by_key = {i["sample_key"]: i for i in destination["work_items"]["items"]}
+            if mode == "append-executed":
+                pairs, append_stats = _append_pairs(source_samples, destination_samples,
+                                                   list(items_by_key.values()), source["run"], destination["run"])
+                stats.update(append_stats)
+                from rollout.retry import verify_final
+                source_items = {i["sample_key"]: i for i in source["work_items"]["items"]}
+                for _, result in pairs:
+                    row = source_rows.get(result.get("rollout_id"), {})
+                    if row.get("provenance", {}).get("quarantined"):
+                        raise ValueError("Cannot append quarantined source rollout")
+                    if row.get("evaluation_subject", {}).get("kind") in {"live_state", "web_trace"}:
+                        raise ValueError("Append currently supports patch/workspace subjects only")
+                    if sample_state(source_cfg, result) == "accepted":
+                        verify_final(root, source_run_id, source_items[result["sample_key"]], result, source_evidence)
+                    elif row:
+                        from .subject import verify_subject
+                        verify_subject(root, row)
+            else:
+                pairs = [(destination_by_identity[identity][0], result)
+                         for identity, result in source_by_identity.items()
+                         if identity in destination_by_identity
+                         and choose_sample(destination_by_identity[identity][1], result, destination_cfg, source_cfg) == "source"]
+            if dry_run:
+                return {"source_run_id": source_run_id, "destination_run_id": destination_run_id,
+                        "mode": mode, "dry_run": True, "changed": len(pairs), "stats": dict(stats),
+                        "mapping": [{"source_sample_key": r.get("sample_key"),
+                                     "source_repetition_id": r.get("repetition_id"),
+                                     "destination_sample_key": k,
+                                     "destination_repetition_id": items_by_key[k]["repetition_id"],
+                                     "instance_id": items_by_key[k]["instance_id"]} for k, r in pairs]}
             with destination_evidence.transaction() as evidence:
-                for identity, source_result in source_by_identity.items():
-                    if identity not in destination_by_identity:
-                        continue
-                    destination_key, destination_result = destination_by_identity[identity]
-                    choice = choose_sample(destination_result, source_result, destination_cfg, source_cfg)
-                    stats[f"{choice}_kept"] += 1
-                    if choice != "source":
-                        continue
+                for destination_key, source_result in pairs:
+                    destination_result = destination_samples.get(destination_key, {})
                     source_rid = source_result.get("rollout_id")
                     source_row = source_rows.get(source_rid)
                     if not source_row and sample_state(source_cfg, source_result) == "accepted":
                         raise ValueError(f"Accepted source sample lacks evidence: {source_rid}")
                     source_attempt = source_result.get("attempt_id") or "unknown"
                     merge_attempt = f"merge-{source_run_id[:24]}-{source_attempt}"
-                    destination_item = next(item for item in destination["work_items"]["items"]
-                                            if item["sample_key"] == destination_key)
+                    if mode == "append-executed":
+                        merge_attempt = "merge-" + hash_json({"source": source_run_id, "sample": source_result["sample_key"],
+                                                             "attempt": source_attempt,
+                                                             "destination": destination_key})[:24]
+                    destination_item = items_by_key[destination_key]
+                    if mode == "append-executed":
+                        old_result = destination["run"] / "rollout/tasks" / destination_item["instance_id"] / "repetitions" / destination_item["repetition_id"] / "result.json"
+                        if old_result.exists():
+                            backup = destination["run"] / "execution/merge-backups" / merge_attempt / "result.json"
+                            _copy_file(old_result, backup)
                     if not source_row:
                         source_work = source["run"] / "rollout/tasks" / source_result["instance_id"] / "repetitions" / source_result["repetition_id"]
                         destination_work = destination["run"] / "rollout/tasks" / destination_item["instance_id"] / "repetitions" / destination_item["repetition_id"]
-                        _copy_attempt(source_work, destination_work, source_attempt, merge_attempt, destination_item, destination_run_id)
+                        _copy_sample_attempts(source_work, destination_work, source_attempt, merge_attempt,
+                                              destination_item, destination_run_id, mode)
                         destination_result = _destination_sample(destination_item, source_result, destination_run_id, merge_attempt)
                         write_json(destination_work / "result.json", destination_result)
                         destination_samples[destination_key] = destination_result
-                        changed.append({"task_key": destination_item["task_key"], "repetition_id": destination_item["repetition_id"], "sample_key": destination_key, "rollout_id": None, "source_attempt_id": source_attempt, "destination_attempt_id": merge_attempt})
+                        changed.append({"task_key": destination_item["task_key"], "repetition_id": destination_item["repetition_id"], "sample_key": destination_key, "rollout_id": None, "source_attempt_id": source_attempt, "destination_attempt_id": merge_attempt,
+                                        "source_sample_key": source_result.get("sample_key"), "source_repetition_id": source_result.get("repetition_id")})
                         stats["source_overrides"] += 1
                         continue
                     destination_row = copy.deepcopy(source_row)
@@ -332,11 +468,19 @@ def merge_runs(root, source_run_id, destination_run_id):
                     destination_row["rollout_id"] = source_rid
                     destination_row["sample_key"] = destination_key
                     destination_row["attempt_id"] = merge_attempt
+                    if mode == "append-executed":
+                        for key in ("repetition_id", "repetition_index", "sample_seed", "seed_policy"):
+                            destination_row[key] = destination_item[key]
+                        if destination_row.get("evaluation_subject", {}).get("kind") == "workspace":
+                            evidence["schema_version"] = max(2, evidence["schema_version"])
                     destination_row["provenance"] = {
                         **copy.deepcopy(source_row.get("provenance", {})),
                         "source_run_id": source_run_id,
                         "source_rollout_id": source_rid,
                         "source_attempt_id": source_attempt,
+                        "source_sample_key": source_result.get("sample_key"),
+                        "source_repetition_id": source_result.get("repetition_id"),
+                        "source_sample_seed": source_result.get("sample_seed"),
                         "merged_into_run": destination_run_id,
                     }
                     if source_rid in evidence["rollouts"]:
@@ -351,7 +495,8 @@ def merge_runs(root, source_run_id, destination_run_id):
                     source_eval_id = source_row.get("selected_evaluation_id")
                     if source_eval_id and source_eval_id in source_evidence["evaluations"]:
                         source_eval = source_evidence["evaluations"][source_eval_id]
-                        merged_eval_id = identifier(f"merge-{source_run_id[:18]}-{source_eval_id[:24]}")
+                        merged_eval_id = identifier("merge-" + hash_json({"run": source_run_id, "evaluation": source_eval_id,
+                                                                        "rollout": source_rid})[:24])
                         report_source = root / source_eval["report_path"]
                         report_target = destination["run"] / "reports" / (merged_eval_id + ".json")
                         _copy_file(report_source, report_target)
@@ -368,15 +513,22 @@ def merge_runs(root, source_run_id, destination_run_id):
                         destination_row["resolved"] = source_row.get("resolved")
                     source_work = source["run"] / "rollout/tasks" / source_result["instance_id"] / "repetitions" / source_result["repetition_id"]
                     destination_work = destination["run"] / "rollout/tasks" / destination_item["instance_id"] / "repetitions" / destination_item["repetition_id"]
-                    _copy_attempt(source_work, destination_work, source_attempt, merge_attempt, destination_item, destination_run_id)
+                    _copy_sample_attempts(source_work, destination_work, source_attempt, merge_attempt,
+                                          destination_item, destination_run_id, mode)
                     destination_result = _destination_sample(destination_item, source_result, destination_run_id, merge_attempt)
                     destination_result["rollout_id"] = source_rid
                     destination_result["source_rollout_id"] = source_rid
+                    destination_result["source_repetition_id"] = source_result.get("repetition_id")
+                    destination_result["source_sample_seed"] = source_result.get("sample_seed")
+                    if source_eval_id and source_eval_id in source_evidence["evaluations"]:
+                        destination_result["evaluation_id"] = merged_eval_id
                     write_json(destination_work / "result.json", destination_result)
                     destination_samples[destination_key] = destination_result
                     changed.append({"task_key": destination_item["task_key"], "repetition_id": destination_item["repetition_id"],
                                     "sample_key": destination_key, "rollout_id": source_rid,
-                                    "source_attempt_id": source_attempt, "destination_attempt_id": merge_attempt})
+                                    "source_attempt_id": source_attempt, "destination_attempt_id": merge_attempt,
+                                    "source_sample_key": source_result.get("sample_key"),
+                                    "source_repetition_id": source_result.get("repetition_id")})
                     stats["source_overrides"] += 1
             from rollout.retry import rebuild_counts
             counts = rebuild_counts(destination["run"], destination["work_items"])
@@ -386,7 +538,9 @@ def merge_runs(root, source_run_id, destination_run_id):
             write_json(destination["run"] / "progress.json", progress)
             receipt = {
                 "schema_version": 1, "source_run_id": source_run_id, "destination_run_id": destination_run_id,
-                "created_at": now(), "rule": "source non-pending overrides destination pending; source accepted overrides destination failed; destination accepted wins",
+                "created_at": now(), "mode": mode,
+                "rule": ("destination executed repetitions first; append source executed repetitions including failures to remaining frozen task slots; cap at destination repeat_count"
+                         if mode == "append-executed" else "source non-pending overrides destination pending; source accepted overrides destination failed; destination accepted wins"),
                 "changed": changed, "stats": dict(stats), "destination_progress_sha256": hash_json(progress),
             }
             receipt_id = "merge-" + hash_json({"source": source_run_id, "destination": destination_run_id, "changed": changed})[:24]
@@ -395,6 +549,10 @@ def merge_runs(root, source_run_id, destination_run_id):
             _append_event(destination["run"], {"event": "run.merge", "run_id": destination_run_id,
                                                "source_run_id": source_run_id, "receipt": str(receipt_path),
                                                "changed": len(changed), "at": receipt["created_at"]})
+            from .status import refresh_run_status_summary
+            refresh_run_status_summary(root, destination_run_id)
+            from .artifact import refresh
+            refresh(root, destination_run_id)
             return {"source_run_id": source_run_id, "destination_run_id": destination_run_id,
-                    "receipt": str(receipt_path), "changed": len(changed), "stats": dict(stats),
+                    "mode": mode, "receipt": str(receipt_path), "changed": len(changed), "stats": dict(stats),
                     "progress": {k: progress[k] for k in ("planned_samples", "accepted_samples", "failed_samples", "pending_samples")}}

@@ -15,7 +15,7 @@ import requests
 
 from core.io import hash_json, now, sha256, write_json
 from runtime.serving.capture import CaptureControlServer, OnlineCaptureController
-from runtime.serving.resources import reserve_serving_devices
+from runtime.serving.resources import cuda_visible_devices, reserve_serving_devices
 
 
 class ServingManager:
@@ -40,10 +40,10 @@ class ServingManager:
     def build_args(self, serving_python, host, port):
         cfg, s = self.cfg, self.cfg["serving"]
         if cfg.get("parallel", {}).get("enabled") and cfg["parallel"]["branch_count"] > 1:
-            from runtime.serving.parallel import artifact_contract
+            from runtime.serving.parallel import scoring_contract
 
             opts = cfg["parallel"]
-            artifact_contract(opts["estimator_ref"], opts["estimator_sha256"], cfg["model"]["fingerprint"])
+            scoring_contract(opts, cfg["model"]["fingerprint"])
         cap = cfg.get("capture", {})
         args = [
             serving_python,
@@ -132,10 +132,10 @@ class ServingManager:
         self.startup_timing["preparation_started_at"] = now()
         cfg, s = self.cfg, self.cfg["serving"]
         if cfg.get("parallel", {}).get("enabled") and cfg["parallel"]["branch_count"] > 1:
-            from runtime.serving.parallel import artifact_contract
+            from runtime.serving.parallel import scoring_contract
 
             options = cfg["parallel"]
-            artifact_contract(options["estimator_ref"], options["estimator_sha256"], cfg["model"]["fingerprint"])
+            scoring_contract(options, cfg["model"]["fingerprint"])
         # ``resolve`` canonicalizes ordinary paths, which would turn a venv's
         # python symlink into the shared interpreter.  Managed serving must use
         # the pinned EasySteer venv, so retain the authoritative raw path.
@@ -227,8 +227,7 @@ class ServingManager:
                 )
                 parallel = cfg.get("parallel", {})
                 if parallel.get("enabled") and parallel["branch_count"] > 1:
-                    contract = artifact_contract(parallel["estimator_ref"], parallel["estimator_sha256"],
-                                                 cfg["model"]["fingerprint"])
+                    contract = scoring_contract(parallel, cfg["model"]["fingerprint"])
                     expected = contract.get("tokenizer_fingerprint")
                     if expected is not None and expected != self.capture_token_inventory["tokenizer_fingerprint"]:
                         raise ValueError("Parallel estimator tokenizer fingerprint mismatch")
@@ -259,6 +258,9 @@ class ServingManager:
                     capture_cfg.get("control_port", 0),
                 ).start()
             env = dict(os.environ)
+            env.pop("DYCON_GENERATION_ENTROPY", None)
+            if (cfg.get("key_steps") or {}).get("mode") == "source":
+                env["DYCON_GENERATION_ENTROPY"] = "1"
             raw_options = capture_cfg.get("logprobs", {})
             env.pop("DYCON_RAW_T1_ENABLED", None)
             env.pop("DYCON_RAW_T1_OPTIONS", None)
@@ -277,10 +279,10 @@ class ServingManager:
                 env['DYCON_CAPTURE_OPEN_IDS'] = json.dumps([opening])
                 env['DYCON_CAPTURE_CLOSE_IDS'] = json.dumps([closing])
             if cfg.get("parallel", {}).get("enabled") and cfg["parallel"]["branch_count"] > 1:
-                from runtime.serving.parallel import artifact_contract
+                from runtime.serving.parallel import scoring_contract
 
                 opts = cfg["parallel"]
-                artifact_contract(opts["estimator_ref"], opts["estimator_sha256"], cfg["model"]["fingerprint"])
+                scoring_contract(opts, cfg["model"]["fingerprint"])
                 env["DYCON_PARALLEL_OPTIONS"] = json.dumps(opts)
                 env["DYCON_PARALLEL_MODEL_FINGERPRINT"] = cfg["model"]["fingerprint"]
             # Both native FULL graphs and online capture compile CUDA graphs
@@ -296,7 +298,7 @@ class ServingManager:
                 )
                 if candidates:
                     env["PATH"] = str(candidates[0].parent) + os.pathsep + env.get("PATH", "")
-            env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, s["gpus"]))
+            env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices(s["gpus"])
             request_control = cfg.get('agent', {}).get('backend') == 'openhands'
             self.runtime['request_control_enabled'] = request_control
             env["VLLM_PLUGINS"] = "dycon_capture" if capture_cfg.get("enabled") or request_control else ""

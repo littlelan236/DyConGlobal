@@ -15,6 +15,7 @@ from core.locking import exclusive_run
 from hidden.archive_online import assert_inactive
 from hidden.publish_online import complete_native, has_publication_subject, publish_online_service
 from hidden.repair_points import recover_points
+from hidden.layer_contract import POINTWISE_CONTRACT
 from rollout.retry import sample_accepted, verify_final
 
 
@@ -142,6 +143,8 @@ def finalize_capture_publication(cfg, run_id, *, items=None, producers=(), no_de
         evidence = RunEvidence(root, run_id).read()
         selection = freeze_selection(cfg, run_id, items if items is not None else
                                      load_plan(root, run_id)['work_items']['items'], evidence)
+        # Corrected audits get new immutable IDs; old failed repairs remain evidence.
+        selection['repair_contract'] = POINTWISE_CONTRACT
         if parallel:
             from hidden.parallel_proof import decision_inventory
             nas = Path(cfg['paths']['nas_root']) / capture['export']['root'] / run_id

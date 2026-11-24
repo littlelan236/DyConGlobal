@@ -1,6 +1,7 @@
 """Small, receipt-friendly objective metrics."""
 
 from .k3_diagnostics import summarize_statistics
+from .signals import summarize_signals
 
 
 def summarize(results):
@@ -45,6 +46,25 @@ def summarize_update(groups):
     output.update(positive_branches=sum(r.get("positive_branches", 0) for r in rows),
                   negative_branches=sum(r.get("negative_branches", 0) for r in rows))
     output.update(summarize_statistics(groups))
+    if all('k3_cap' in row for row in rows):
+        caps = {row['k3_cap'] for row in rows}
+        if len(caps) != 1:
+            raise ValueError("Inconsistent K3 caps in optimizer update")
+        clipped = sum(row['k3_cap_clipped_tokens'] for row in rows)
+        eligible = sum(row['k3_cap_eligible_tokens'] for row in rows)
+        raw_means = [row['k3_raw_penalty_mean'] for row in rows]
+        raw_mean = (sum(sum(row['k3_raw_penalty_mean'] for row in group) / len(group)
+                        for group in groups) / len(groups)
+                    if all(v is not None for v in raw_means) else None)
+        output.update(k3_cap=rows[0]['k3_cap'], k3_cap_clipped_tokens=clipped,
+                      k3_cap_eligible_tokens=eligible,
+                      k3_cap_clipped_fraction=clipped / eligible if eligible else 0.,
+                      k3_raw_penalty_mean=raw_mean,
+                      k3_raw_nonfinite_tokens=sum(row['k3_raw_nonfinite_tokens'] for row in rows),
+                      k3_capped_penalty_max=max(row['k3_capped_penalty_max'] for row in rows))
+    output.update(summarize_signals(groups))
+    from .token_diagnostics import summarize_token_diagnostics
+    output.update(summarize_token_diagnostics(groups))
     return output
 
 

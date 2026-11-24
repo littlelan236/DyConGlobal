@@ -203,8 +203,32 @@ def _change(value, baseline):
     return {"delta": delta, "relative_change": delta / baseline if delta is not None and baseline else None}
 
 
-def compare_runs(root, run_ids, *, baseline=None, repetitions=None):
+def _comparison_resolution(row, evidence, rollout_id, source):
+    """Read the selected evaluation only; never change settled/training labels."""
+    settled = row.get("resolved")
+    if source == "settled":
+        return settled, "settled"
+    evaluation = evidence.get("evaluations", {}).get(row.get("selected_evaluation_id"), {})
+    outcome = evaluation.get("outcomes", {}).get(rollout_id, {})
+    # Official solution booleans take precedence over the raw execution fallback.
+    # The latter also represents confirmed invalid/missing patches without a report.
+    for name in ("official_result", "raw_outcome"):
+        record = outcome.get(name)
+        value = record.get("resolved") if isinstance(record, dict) else None
+        if type(value) is bool:
+            return value, name
+    value = outcome.get("resolved")
+    if type(value) is bool:
+        return value, "evaluation.resolved"
+    if type(settled) is bool:
+        return settled, "settled_fallback"
+    return None, "unknown"
+
+
+def compare_runs(root, run_ids, *, baseline=None, repetitions=None, resolved_source="settled"):
     """Join task x repetition pairs across explicit runs; write no run files."""
+    if resolved_source not in {"settled", "solution"}:
+        raise ValueError("resolved_source must be settled or solution")
     root = Path(root).resolve()
     run_ids = list(run_ids)
     if len(run_ids) < 2 or len(run_ids) != len(set(run_ids)):
@@ -228,11 +252,15 @@ def compare_runs(root, run_ids, *, baseline=None, repetitions=None):
         rows = []
         for key in common:
             row = snapshot["submitted"][key]
+            resolved_value, value_source = _comparison_resolution(
+                row, snapshot["evidence"], snapshot["selected_ids"][key], resolved_source)
             rows.append({"task_key": key[0], "repetition_id": row["repetition_id"],
                          "repetition_index": row["repetition_index"], "paired_repetition_index": key[1],
                          "sample_key": row["sample_key"], "rollout_id": snapshot["selected_ids"][key],
                          "attempt_id": row["attempt_id"], "trajectory_sha256": row["trajectory_sha256"],
-                         "evaluation_status": row["evaluation_status"], "resolved": row["resolved"],
+                         "evaluation_status": row["evaluation_status"], "resolved": resolved_value,
+                         "settled_resolved": row["resolved"], "resolved_value_source": value_source,
+                         "selected_evaluation_id": row.get("selected_evaluation_id"),
                          **_trajectory_metrics(root, row)})
         resolved = sum(row["resolved"] is True for row in rows)
         metrics = {"resolved_count": resolved, "resolved_rate": resolved / count if count else None,
@@ -279,7 +307,7 @@ def compare_runs(root, run_ids, *, baseline=None, repetitions=None):
     token_savings = _token_savings_concentration(
         {row["run_id"]: row["samples"] for row in results}, run_ids, baseline)
     return {"schema_version": 2, "generated_at": now(), "baseline_run_id": baseline,
-            "comparison_mode": mode,
+            "comparison_mode": mode, "resolved_source": resolved_source,
             "common_submitted_task_count": len(task_keys), "common_submitted_tasks": tasks,
             "common_submitted_sample_count": count, "common_submitted_samples": samples,
             "resolved_rate_denominator": count,
@@ -293,8 +321,12 @@ def compare_runs(root, run_ids, *, baseline=None, repetitions=None):
                 "steps": "Canonical assistant messages in the final selected trajectory, including submission.",
                 "tokens": "Persisted canonical responses, including selected FormatError responses; "
                           "exclude unselected parallel candidates, previous attempts and auxiliary requests.",
-                "resolved_rate": "Resolved sample count / common submitted pair count; unknown evaluations remain unknown. "
-                                 "Unique task counts are reported separately, without any-success task aggregation.",
+                "resolved_rate": ("Resolved sample count / common submitted pair count; the denominator includes unknown results. "
+                                  + ("Use settled row labels. " if resolved_source == "settled" else
+                                     "Ignore audit status; use selected evaluation official_result.resolved, then "
+                                     "raw_outcome.resolved, then evaluation.resolved, then settled row fallback; "
+                                     "only boolean values count, missing results stay unknown. ")
+                                  + "Unique task counts are reported separately, without any-success task aggregation."),
                 "changes": "Relative change=(value-baseline)/baseline; null for zero baseline or missing data. "
                            "Resolved percentage-point change=100*(resolved-baseline_resolved)/common_pair_count.",
                 "missing": "Missing token evidence yields null totals with known subtotals; empty cohort has null rates.",
@@ -637,7 +669,10 @@ def format_markdown(report):
     lines = [f"Common submitted tasks (unique): {report['common_submitted_task_count']}",
              f"Common submitted task/repetition pairs: {report['common_submitted_sample_count']} "
              "(resolved rate denominator)",
-             f"Repetition mode: {report['comparison_mode']}"]
+             f"Repetition mode: {report['comparison_mode']}",
+             f"Resolved source: {report.get('resolved_source', 'settled')} (same common submitted denominator)"]
+    if report.get("resolved_source") == "solution":
+        lines.append("Original solution booleans ignore audit status; settled labels and training eligibility are unchanged.")
     for row in report["runs"]:
         lines.append(f"- {row['run_id']}: repeat_count={row['repeat_count']}; "
                      f"selected={','.join(row['selected_repetition_ids'])}")

@@ -5,7 +5,7 @@ from collections import deque
 from pathlib import Path
 
 from minisweagent.agents.default import AgentConfig, DefaultAgent
-from minisweagent.exceptions import FormatError, LimitsExceeded
+from minisweagent.exceptions import FormatError, LimitsExceeded, InterruptAgentFlow
 from pydantic import Field
 
 from core.io import hash_json, write_json
@@ -47,9 +47,39 @@ class DurableAgent(DefaultAgent):
         self._loop_history.clear()
         self._loop_step = 0
         self._loop_hit = None
-        return super().run(task, **kwargs)
+        self.extra_template_vars |= {"task": task, **kwargs}
+        self.messages = []
+        self.add_messages(
+            self.model.format_message(role="system", content=self._render_template(self.config.system_template)),
+            self.model.format_message(role="user", content=self._render_template(self.config.instance_template)))
+        return self.continue_run()
+
+    def continue_run(self):
+        """Native step/exception semantics, shared with fresh tasks; never reset H_t."""
+        while True:
+            try:
+                self.step()
+                self.n_consecutive_format_errors = 0
+            except FormatError as error:
+                self.n_consecutive_format_errors += 1
+                self.add_messages(*error.messages)
+                if 0 < self.config.max_consecutive_format_errors <= self.n_consecutive_format_errors:
+                    self.add_messages({"role":"exit", "content":"RepeatedFormatError",
+                        "extra":{"exit_status":"RepeatedFormatError", "submission":""}})
+            except InterruptAgentFlow as error:
+                self.add_messages(*error.messages)
+            except Exception as error:
+                self.handle_uncaught_exception(error)
+                raise
+            finally:
+                self.save(self.config.output_path)
+            if self.messages[-1].get("role") == "exit":
+                return self.messages[-1].get("extra", {})
 
     def query(self):
+        recorder = getattr(self, "key_step_recorder", None)
+        if recorder is not None:
+            recorder.before_query(self)
         try:
             message = super().query()
         except FormatError:
@@ -101,7 +131,14 @@ class DurableAgent(DefaultAgent):
 
     def serialize(self, *extra_dicts):
         evidence = {"info": {"loop_detection": self._loop_hit}} if self._loop_hit is not None else {}
-        return super().serialize(evidence, *extra_dicts)
+        data = super().serialize(evidence, *extra_dicts)
+        reference = getattr(self, '_continuation_ref', None)
+        if reference is not None:
+            # The full H_t stays in memory for inference. Persist only the
+            # original source pointer and this child's actual suffix.
+            data['messages'] = data['messages'][reference['prefix_message_count']:]
+            data['continuation'] = reference
+        return data
 
     def save(self, path, *extra_dicts):
         data = self.serialize(*extra_dicts)

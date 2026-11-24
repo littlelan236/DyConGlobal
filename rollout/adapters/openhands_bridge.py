@@ -146,6 +146,13 @@ class OpenHandsBridge:
             elif event['event'] == 'sdk_call_failed':
                 state['sdk_exception_types'] = event.get('exception_types', [])
                 state['sdk_failure_phase'] = event.get('phase', 'unknown')
+                if event.get('http_status') is not None:
+                    state['sdk_http_status'] = event.get('http_status')
+                for key in ('http_error_type', 'http_error_code', 'http_error_param',
+                            'http_error_message', 'http_error_body_sha256',
+                            'http_error_body_omitted', 'http_error_body_unavailable'):
+                    if key in event:
+                        state[key] = event[key]
             self._event('sdk_transport_event', state=state,
                         sdk_event=event['event'], http_status=event.get('http_status'),
                         exception_types=','.join(event.get('exception_types', []))[:256],
@@ -448,6 +455,9 @@ class OpenHandsBridge:
                 except BudgetStopped as exc:
                     raise self._budget_stop(exc.reason) from exc
                 body['max_tokens'] = allowance
+                trajectory_capped = (self.token_budget.limit is not None
+                    and self.token_budget.selected_trajectory and role == 'agent_decision'
+                    and allowance == self.token_budget.remaining())
                 if body.get('thinking_token_budget') is not None:
                     body['thinking_token_budget'] = min(body['thinking_token_budget'], max(0, allowance - 1))
                 if body.get('dycon_request_owner'):
@@ -498,18 +508,20 @@ class OpenHandsBridge:
                 if self.token_budget.limit is not None:
                     try:
                         budget_row = self.token_budget.record(api_id, role, usage)
-                        budget_exceeded = budget_row['exhausted']
+                        budget_exceeded = budget_row.get('exhausted', False)
                     except BudgetStopped as exc:
                         budget_error = self._budget_stop(exc.reason)
                     if budget_exceeded:
                         self.limit_reason = "sample_completion_token_budget"
                 call.update(status="completed", response_id=raw_response.get("id"), response=raw_response,
-                            usage=usage, usage_known=bool(usage) and budget_error is None,
+                            usage=usage, usage_known=(isinstance(usage, dict)
+                                and type(usage.get('completion_tokens')) is int
+                                and usage['completion_tokens'] >= 0 and budget_error is None),
                             finished_at=now())
                 if self.token_budget.limit is not None:
                     budget_summary = self.token_budget.snapshot()
                     call['sample_budget'] = {key: budget_summary.get(key) for key in
-                                            ('schema_version', 'scope', 'binding', 'limit',
+                                            ('schema_version', 'scope', 'accounting', 'binding', 'limit',
                                              'completion_tokens', 'by_role', 'exhausted', 'usage_unknown')}
                     call['sample_budget']['ledger_path'] = str(self.token_budget.path)
                 if self.runtime.get('request_control_enabled'):
@@ -532,6 +544,16 @@ class OpenHandsBridge:
                     raise budget_error
                 if budget_exceeded:
                     raise self._budget_stop('sample_completion_token_budget')
+                choices = raw_response.get('choices') or []
+                if (trajectory_capped and choices
+                        and (choices[0].get('finish_reason') == 'length'
+                             or raw_response.get('dycon_native_finish_reason') == 'length')
+                        and isinstance(usage, dict) and usage.get('completion_tokens') == allowance):
+                    # A capped losing candidate must not stop a shorter winner.
+                    # If no candidate survives, the normal policy propagates this.
+                    raise OpenHandsLimit({'content': 'sample_completion_token_budget',
+                        'extra': {'exit_status': 'SampleTokenBudgetExceeded',
+                                  'limit_reason': 'sample_completion_token_budget'}})
                 result = Response(raw_response)
                 self._check()
                 return result
@@ -554,6 +576,22 @@ class OpenHandsBridge:
                         client = CaptureClient(self.runtime["capture_control_url"],
                                                timeout=self.cfg["capture"]["control_seconds"])
                         client.wait_output(metadata["session_id"], metadata["step_id"], raw["id"])
+            if (role == 'agent_decision' and self.token_budget.limit is not None
+                    and self.token_budget.selected_trajectory):
+                selected_calls = [call for call in record['model_calls']
+                                  if call.get('response_id') == raw.get('id')]
+                if len(selected_calls) != 1 or not raw.get('id'):
+                    raise ValueError('Selected response has no unique physical API receipt')
+                try:
+                    budget = self.token_budget.select(record['request_id'], selected_calls[0]['api_attempt_id'])
+                except BudgetStopped as exc:
+                    raise self._budget_stop(exc.reason) from exc
+                record['sample_budget'] = {key: budget.get(key) for key in
+                    ('schema_version', 'scope', 'accounting', 'binding', 'limit',
+                     'completion_tokens', 'by_role', 'exhausted', 'usage_unknown')}
+                self._persist(record)
+                if budget['exhausted']:
+                    raise self._budget_stop('sample_completion_token_budget')
             if self.limit_reason in {'sample_completion_token_budget', 'sample_token_usage_unknown'}:
                 raise self._budget_stop(self.limit_reason)
             if role == "agent_decision":
@@ -590,6 +628,8 @@ class OpenHandsBridge:
                     payload = exc.messages[0].get('extra', {}) if exc.messages else {}
                     self.limit_reason = self.limit_reason or payload.get('limit_reason') or (
                         'reasoning_loop' if payload.get('exit_status') == 'reasoning_loop' else 'generation_limit')
+                    if self.limit_reason in {'sample_completion_token_budget', 'sample_token_usage_unknown'}:
+                        self._budget_stop(self.limit_reason)
                 if isinstance(exc, OpenHandsProtocolError):
                     self.step_loop.clear()
                 calls = record.get('model_calls', [])

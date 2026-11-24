@@ -76,7 +76,17 @@ def prepare(root, run_id, rollout_ids=(), source_run=None, incremental=False):
                      and row.get("evaluation_status") not in {"completed", "running"}
                      and rid not in previously_graded
                      and not row.get("provenance", {}).get("quarantined")}
-        requested = sorted(existing | set(candidates))
+        if rollout_ids:
+            explicit = set(rollout_ids)
+            unknown = explicit - set(run_data["rollouts"])
+            if unknown:
+                raise ValueError(f"Unknown rollout IDs: {sorted(unknown)}")
+            # Explicit incremental requests add only never-evaluated subjects.
+            # Do not carry Review or any existing frozen selection into the batch.
+            requested = sorted(rid for rid in explicit & set(candidates)
+                               if run_data["rollouts"][rid].get("evaluation_status", "not_run") == "not_run")
+        else:
+            requested = sorted(existing | set(candidates))
         selected = {rid: run_data["rollouts"].get(rid, frozen["rollouts"].get(rid)) for rid in requested}
         selected = {rid: row for rid, row in selected.items() if row is not None}
         if not selected:

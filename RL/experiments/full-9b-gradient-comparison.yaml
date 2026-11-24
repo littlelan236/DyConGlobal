@@ -1,0 +1,7 @@
+schema_version: 1
+training_config: RL/experiments/full-9b-fla-fsdp2-native-capacity.yaml
+group_id: g-80eae3da202857131e049cc0c0b00ee7002f6c2e
+output: temp/full-gradient-comparison-20261118/native32-v1
+modes:
+  - fixed_cotangent
+  - shared_reference_grpo

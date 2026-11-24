@@ -76,7 +76,7 @@ def _selection_from_tasks(catalog: Catalog, task_ids=(), partition=None, cfg=Non
 
 def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partition=None, repeat_count=1,
                from_run=None, clone_overrides=(), parallel_config=None,
-               reverse_task_order=False):
+               reverse_task_order=False, key_step_config=None):
 
     run_id = identifier(run_id)
 
@@ -185,6 +185,15 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
     cfg, parallel_input = apply_run_parallel(
         cfg, parallel_config, from_run=from_run, overrides=clone_overrides or cfg.get("overrides", ()))
 
+    if key_step_config is not None:
+        if operation != "rollout" or parallel_config is not None:
+            raise ValueError("--key-step-config requires rollout and cannot combine --parallel-config")
+        from rollout.key_steps.config import prepare as prepare_key_steps
+        cfg = prepare_key_steps(cfg, key_step_config, from_run=from_run)
+        parallel_input = None
+    elif cfg.get("key_steps"):
+        raise ValueError("Cloning a key-step run requires an explicit --key-step-config")
+
     if tasks_file:
 
         payload = read_json(tasks_file)
@@ -260,6 +269,11 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
             k: v for k, v in cfg["parallel"].items() if k != "estimator_sha256"}
     # Human-readable YAML is an input surface; the derived value is recorded
     # only in resolved-config.json and the audit/hash chain.
+    if cfg.get("key_steps"):
+        effective_config["key_steps"] = cfg["key_steps"]
+        effective_config["parallel"] = {k:v for k,v in cfg["parallel"].items() if k != "estimator_sha256"}
+        effective_config["capture"] = cfg["capture"]
+        effective_config["execution"] = cfg["execution"]
     effective_config.get("parallel", {}).pop("max_inflight_branches", None)
 
     (run / "config.yaml").write_text(
@@ -332,7 +346,8 @@ def create_run(cfg, run_id, *, operation, tasks_file=None, task_ids=(), partitio
 
     branch_count = cfg.get("parallel", {}).get("branch_count", 1) if operation == "rollout" else 1
 
-    write_work_items(run, make_work_items(selection, run_id, repeat_count, cfg["generation"]["seed"], branch_count))
+    from rollout.key_steps.config import work_items as planned_work_items
+    write_work_items(run, planned_work_items(cfg, selection, run_id, repeat_count))
 
     if operation == "rollout":
 
@@ -483,14 +498,9 @@ def load_plan(root, run_id, *, allow_incomplete_revision=None, allow_incomplete_
 
         raise ValueError("Run repeat count disagrees with work items")
 
-    expected = make_work_items(
-
-        cfg["selection"], run_id, plan["repeat_count"], cfg["generation"]["seed"],
-
-        cfg.get("parallel", {}).get("branch_count", 1),
-        extension=plan.get("sampling_extension"),
-
-    )
+    from rollout.key_steps.config import work_items as planned_work_items
+    expected = planned_work_items(cfg, cfg["selection"], run_id, plan["repeat_count"],
+                                  extension=plan.get("sampling_extension"))
 
     if expected["items"] != work_items["items"]:
 
