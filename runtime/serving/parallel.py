@@ -50,6 +50,16 @@ def artifact_contract(path, expected_sha=None, model_fingerprint=None):
     return value
 
 
+def scoring_contract(options, model_fingerprint):
+    diagnostic = options.get("branch_probe")
+    if diagnostic is None:
+        return artifact_contract(options["estimator_ref"], options["estimator_sha256"], model_fingerprint)
+    if diagnostic["model_fingerprint"] != model_fingerprint:
+        raise ValueError("Branch probe serving checkpoint mismatch")
+    return artifact_contract(options["estimator_ref"], options["estimator_sha256"],
+                             diagnostic["base_fingerprint"])
+
+
 class ScoringBroker:
     """One bounded CPU worker; a stuck predictor cannot accumulate more work.
 
@@ -60,7 +70,7 @@ class ScoringBroker:
 
     def __init__(self, cfg, model_fingerprint, num_layers):
         self.cfg = cfg
-        self.contract = artifact_contract(cfg["estimator_ref"], cfg["estimator_sha256"], model_fingerprint)
+        self.contract = scoring_contract(cfg, model_fingerprint)
         contract = self.contract
         if any(site >= num_layers for site in contract["sites"]):
             raise ValueError("Predictor site outside checkpoint")

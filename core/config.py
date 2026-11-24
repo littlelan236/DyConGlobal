@@ -595,7 +595,11 @@ class Harbor(Strict):
         return self
 
 
+from rollout.key_steps.config import KeyStepConfig
+
+
 class Config(Strict):
+    key_steps: KeyStepConfig | None = None
     schema_version: Literal[1]
     paths: Paths
     benchmark: Benchmark
@@ -820,6 +824,8 @@ def resolve_values(raw, path, *, overrides=(), run_policy=False, source_sha256=N
     # Preserve old snapshot/config identities when the new optional pilot is absent.
     if "ridge_probe" not in raw.get("difficulty", {}):
         cfg["difficulty"].pop("ridge_probe")
+    if "key_steps" not in raw:
+        cfg.pop("key_steps", None)
     if "parallel" not in raw:
         cfg.pop("parallel")
     elif "reasoning_loop" not in raw["parallel"]:

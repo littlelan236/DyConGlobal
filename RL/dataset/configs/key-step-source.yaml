@@ -1,0 +1,13 @@
+# Run-local B=8 extension. The base run supplies the estimator/model/tasks.
+# Requires managed TP=1, explicit generation seed and native token export.
+schema_version: 1
+mode: source
+branch_count: 8
+backend: initial_replay_v1
+schedule_seed: 20261124
+network_default: unknown-external
+service_interval_seconds: 5.0
+retry_backoff_seconds: 30.0
+# Use identical names for tasks sharing a public service, e.g. httpbin.
+# A task with [] is explicitly local-only; omitted tasks share unknown-external.
+task_services: {}

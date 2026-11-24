@@ -1468,6 +1468,7 @@ class OnlineCaptureController:
                 if receipts:
                     receipt = receipts[0]
                     expected_native = {
+                        **({"generation_entropy": receipt["generation_entropy"]} if "generation_entropy" in receipt else {}),
                         "completion_tokens": len(receipt["output_token_ids"]),
                         "output_sha256": receipt["output_sha256"],
                         "ledger_ref": receipt["ledger_ref"], "ledger_sha256": receipt["ledger_sha256"],
@@ -1600,7 +1601,10 @@ class OnlineCaptureController:
         source = read_json(path)
         from hidden.artifacts import read_request, response_records
 
-        assistant = [row for _, row, _ in response_records(source)]
+        current_responses = [(i,m,r) for i,m,r in response_records(source)
+            if not (m.get("extra") or {}).get("continuation_source")]
+        message_offset = (source.get("continuation") or {}).get("prefix_message_count", 0)
+        assistant = [row for _, row, _ in current_responses]
         native_ids = [
             (row.get("extra", {}).get("response") or {}).get("dycon_native_request_id") for row in assistant
         ]
@@ -1634,11 +1638,11 @@ class OnlineCaptureController:
             }
             action_step = 0
             response_map = {}
-            for (index, message, _), native_id in zip(response_records(source), native_ids, strict=True):
+            for (index, message, _), native_id in zip(current_responses, native_ids, strict=True):
                 valid = message.get("role") == "assistant"
                 response_map[native_id] = {
-                    "message_index": index,
-                    "agent_step_index": action_step,
+                    "message_index": index + message_offset,
+                    "agent_step_index": (self.request_outputs[native_id]["step_id"] if source.get("continuation") else action_step),
                     "is_action_response": valid,
                 }
                 action_step += int(valid)
@@ -1747,7 +1751,9 @@ class OnlineCaptureController:
 
         path = owned_path(self.project_root, str(Path(trajectory_path).resolve()))
         source = read_json(path)
-        rows = list(response_records(source))
+        rows = [(i,m,r) for i,m,r in response_records(source)
+                if not (m.get("extra") or {}).get("continuation_source")]
+        message_offset = (source.get("continuation") or {}).get("prefix_message_count", 0)
 
         def matches(message, response):
             metadata = (message.get("extra", {}).get("request") or {}).get("dycon_capture", {})
@@ -1797,7 +1803,7 @@ class OnlineCaptureController:
                 response.pop("output_token_ids", None)
                 for choice in response.get("choices", []):
                     choice.pop("token_ids", None)
-                message["extra"].setdefault("request", {})["message_index"] = index
+                message["extra"].setdefault("request", {})["message_index"] = index + message_offset
         write_json(path, source)
         return {
             "responses": len(rows),

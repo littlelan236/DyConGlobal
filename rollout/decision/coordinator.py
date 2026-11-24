@@ -415,6 +415,11 @@ class DecisionCoordinator:
             if self.cancellation is not None:
                 self.cancellation.check()
             evidence = self.controller.record_decision(evidence, self.cfg["capture"]["control_seconds"])
+            if (self.cfg.get("key_steps") or {}).get("mode") == "source":
+                for row in evidence["candidates"]:
+                    receipt = self.controller.request_outputs.get(row.get("native_request_id"), {})
+                    if row.get("generation_entropy") != receipt.get("generation_entropy"):
+                        raise ParallelSelectionError("Generation entropy receipt was not sealed into decision")
             if escape_meta is not None:
                 self.loop_escape_history.remember(evidence)
             if selection_error is not None:

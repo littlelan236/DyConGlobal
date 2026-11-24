@@ -249,6 +249,7 @@ def main(argv=None):
     q.add_argument("--from-run", help="Clone frozen rollout configuration and full task selection")
     q.add_argument("--reverse-task-order", action="store_true",
                    help="Reverse the source task order in a frozen run clone")
+    q.add_argument("--key-step-config", type=Path, help="Run-local B=8 source or pure-replay continuation configuration")
     q.add_argument("--parallel-config", type=Path,
                    help="Freeze a run-local consensus/entropy policy YAML; never edits root config")
     q = run_sub.add_parser("show")
@@ -610,6 +611,12 @@ def main(argv=None):
     p.add_argument("--target", required=True, choices=[
         "submission_remaining_reasoning_tokens_log1p", "submission_remaining_reasoning_tokens_linear",
         "submission_remaining_steps_log1p", "submission_remaining_steps_linear"])
+    p = sub.add_parser("difficulty-plot-consensus-spread", help="Plot mean branch-score disagreement across consensus trajectories")
+    p.add_argument("run_id")
+    p.add_argument("plot_id")
+    p.add_argument("--rollout-id", action="append", default=[])
+    p.add_argument("--task-id")
+    p.add_argument("--bins", type=int, default=101)
     p = sub.add_parser("difficulty-plot-parallel", help="Plot stored branch scores on a finalized trajectory")
     p.add_argument("run_id")
     p.add_argument("plot_id", nargs="?")
@@ -635,6 +642,15 @@ def main(argv=None):
     p.add_argument("--bootstrap-samples", type=int, default=2000)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--skip-unavailable", action="store_true")
+    p = sub.add_parser("difficulty-evaluate-consensus-length", help="Compare completion length and score inside each winning consensus group")
+    p.add_argument("run_id")
+    p.add_argument("evaluation_id")
+    p.add_argument("--rollout-id", action="append", default=[])
+    p.add_argument("--bootstrap-samples", type=int, default=2000)
+    p.add_argument("--seed", type=int, default=42)
+    p = sub.add_parser("difficulty-plot-consensus-length", help="Plot length/estimator rank alignment and token-excess ECDF")
+    p.add_argument("plot_id")
+    p.add_argument("--evaluation-id", action="append", default=[], required=True)
     p = sub.add_parser("difficulty-ridge-holdout", help="Dataset Ridge search with outer task holdout and full test evaluation")
     p.add_argument("evaluation_id")
     p.add_argument("--workflow-config", required=True)
@@ -727,6 +743,10 @@ def main(argv=None):
             parser.error("--attempt-id requires --task-id")
     if a.command == "difficulty-evaluate-parallel" and a.attempt_id and not a.task_id:
         parser.error("--attempt-id requires --task-id")
+    if a.command == "difficulty-evaluate-consensus-length" and (a.set or a.analysis_run_id):
+        parser.error("Consensus length uses the explicit source run; do not pass --set or --run-id")
+    if a.command == "difficulty-plot-consensus-length" and (a.set or a.analysis_run_id):
+        parser.error("Consensus plots use existing evaluation artifacts; do not pass --set or --run-id")
     if a.command == "run" and a.run_command != "create" and a.set:
         parser.error("run status/resume/reconcile accepts only the frozen run plan; use run create for overrides")
     if a.command == "run" and a.run_command == "create":
@@ -1400,7 +1420,7 @@ def main(argv=None):
                 cfg, a.run_id, operation=a.operation, tasks_file=a.tasks_file,
                 task_ids=a.task_id, partition=a.partition, repeat_count=a.repeat_count,
                 from_run=a.from_run, clone_overrides=a.set, parallel_config=a.parallel_config,
-                reverse_task_order=a.reverse_task_order))}
+                reverse_task_order=a.reverse_task_order, key_step_config=a.key_step_config))}
         elif a.run_command == "queue-resume":
             from application.execution.queued_resume import enqueue
             result = enqueue(cfg["project_root"], a.run_id, after_run=a.after_run,
@@ -1720,6 +1740,9 @@ def main(argv=None):
                                         reuse_predictions_id=a.reuse_predictions_id,
                                         rollout_ids=a.rollout_id, rollout_list=a.rollout_list,
                                         publication_id=a.publication_id)
+    elif a.command == "difficulty-plot-consensus-spread":
+        from difficulty.evaluation.consensus_spread import plot_consensus_spread
+        result = plot_consensus_spread(cfg, a.run_id, a.plot_id, rollout_ids=a.rollout_id or None, task_id=a.task_id, bins=a.bins)
     elif a.command == "difficulty-plot-parallel":
         from difficulty.evaluation.parallel import list_parallel_trajectories, visualize_parallel
 
@@ -1737,6 +1760,23 @@ def main(argv=None):
             multipliers=a.multipliers, bootstrap_samples=a.bootstrap_samples, seed=a.seed,
             skip_unavailable=a.skip_unavailable,
         )
+    elif a.command == "difficulty-evaluate-consensus-length":
+        from difficulty.evaluation.consensus_length import evaluate_consensus_length
+
+        try:
+            result = evaluate_consensus_length(
+                cfg, a.run_id, a.evaluation_id, rollout_ids=a.rollout_id,
+                bootstrap_samples=a.bootstrap_samples, seed=a.seed,
+            )
+        except (ValueError, OSError, KeyError) as exc:
+            parser.error(str(exc))
+    elif a.command == "difficulty-plot-consensus-length":
+        from difficulty.evaluation.consensus_length_viz import plot_consensus_length
+
+        try:
+            result = plot_consensus_length(cfg, a.plot_id, evaluation_ids=a.evaluation_id)
+        except (ValueError, OSError, KeyError) as exc:
+            parser.error(str(exc))
     else:
         from runtime.containers.recovery import recover
 

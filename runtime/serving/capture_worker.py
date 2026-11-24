@@ -16,6 +16,9 @@ class CaptureWorkerExtension:
     def configure_capture_execution(self):
         from vllm.forward_context import get_forward_context
 
+        import os
+        if os.environ.get("DYCON_GENERATION_ENTROPY") == "1":
+            self.configure_generation_entropy()
         session = self.model_runner.capture_session
         if hasattr(self, "_dycon_execution"):
             return True
@@ -158,3 +161,15 @@ class CaptureWorkerExtension:
         self._dycon_selector = {}
         self._dycon_selector_errors = 0
         return result
+
+    def generation_entropy(self, request_id, token_ids):
+        observer = getattr(self, '_dycon_entropy', None)
+        if observer is None:
+            raise ValueError('Generation entropy observer is unavailable')
+        return observer.take(request_id, token_ids)
+
+    def configure_generation_entropy(self):
+        if not hasattr(self, '_dycon_entropy'):
+            from runtime.serving.generation_entropy import SamplerEntropy
+            self._dycon_entropy = SamplerEntropy(self.model_runner.sampler)
+        return True

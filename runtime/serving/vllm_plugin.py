@@ -34,6 +34,10 @@ NATIVE_CONTEXT = ContextVar("dycon_native_request", default=None)
 CONTROL_DEADLINE = ContextVar("dycon_control_deadline", default=None)
 
 
+def capture_rows_need_processing(raw, export_enabled, scoring_enabled):
+    return bool(raw and any(raw) and (export_enabled or scoring_enabled))
+
+
 class DyConCapturePlugin:
     name = "dycon_capture"
     required_tasks = None
@@ -187,7 +191,9 @@ class DyConCapturePlugin:
     def attach_router(self, app):
         @app.middleware("http")
         async def provenance(request, call_next):
-            if request.method != "POST" or request.url.path != "/v1/chat/completions":
+            native_probe = (request.url.path == "/v1/completions"
+                            and self.parallel_options.get("branch_probe") is not None)
+            if request.method != "POST" or (request.url.path != "/v1/chat/completions" and not native_probe):
                 return await call_next(request)
             body = await request.json()
             metadata = body.pop("dycon_capture", None)
@@ -200,7 +206,8 @@ class DyConCapturePlugin:
             if metadata is not None:
                 metadata = dict(metadata)
                 metadata["capture_select"] = self.select
-                metadata["message_index"] = len(body.get("messages", []))
+                if not native_probe:
+                    metadata["message_index"] = len(body.get("messages", []))
             request._body = json.dumps(body).encode()
             context = REQUEST_CONTEXT.set(metadata)
             owner_context = OWNER_CONTEXT.set(owner)
@@ -734,11 +741,18 @@ class DyConCapturePlugin:
                                 abort_completed=final.outputs[0].finish_reason == "abort")
                     if loop["abort_completed"] and self.scoring is not None:
                         self.scoring.mark_terminated(metadata, state["native_request_id"], loop)
+                generation_entropy = None
+                if os.environ.get("DYCON_GENERATION_ENTROPY") == "1":
+                    stats = await self.engine.collective_rpc("generation_entropy", args=(native_id, generated))
+                    if len(stats) != 1:
+                        raise ValueError("Generation entropy requires TP=1")
+                    generation_entropy = stats[0]
                 await self._receipt_post(
                     "/dycon/capture/request/output",
                     {
                         "metadata": native_state["binding"],
                         "request_id": native_id,
+                        **({"generation_entropy": generation_entropy} if generation_entropy is not None else {}),
                         "external_response_id": final.request_id,
                         "prompt_token_ids": list(final.prompt_token_ids or []),
                         "output_token_ids": generated,
@@ -846,7 +860,8 @@ class DyConCapturePlugin:
                 for request_id, rows in worker.items():
                     self.execution_intervals.setdefault(request_id, []).extend(rows)
             self.worker_statuses = await self.engine.collective_rpc("capture_status", args=(STREAM,))
-            if raw and any(raw) and self.export_options.get("enabled", True):
+            if capture_rows_need_processing(raw, self.export_options.get("enabled", True),
+                                            self.scoring is not None):
                 await self.publish_lane.run(self._publish, raw)
 
     async def _drain_loop(self):

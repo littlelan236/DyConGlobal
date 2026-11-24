@@ -11,7 +11,7 @@ dependencies = ["PyYAML==6.0.3", "pydantic>=2,<3", "requests>=2,<3", "numpy>=2,<
 
 [project.optional-dependencies]
 rl = ["torch==2.13.0", "transformers==5.17.0", "peft==0.21.2", "accelerate==1.15.0", "safetensors==0.8.0", "ijson==3.5.1"]
-runner = ["ijson==3.5.1", "docker>=7,<8", "mini-swe-agent==2.4.5", "swebench==4.1.0"]
+runner = ["numpy>=2,<2.5", "scipy==1.15.3", "ijson==3.5.1", "docker>=7,<8", "mini-swe-agent==2.4.5", "swebench==4.1.0"]
 analysis = ["ijson==3.5.1", "tensorboard==2.20.0", "torch>=2.7", "transformers>=5,<6", "accelerate>=1", "matplotlib>=3.9", "safetensors>=0.5", "scikit-learn==1.7.2", "umap-learn==0.5.9.post2"]
 action = ["tree-sitter==0.26.0", "tree-sitter-bash==0.25.1"]
 test = ["pytest>=8", "ruff>=0.11"]

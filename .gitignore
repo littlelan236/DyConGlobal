@@ -274,3 +274,6 @@ events.out.tfevents.*
 /migration/releases/
 /runtime/backend-snapshots/
 /runtime/resource-cache-runtime/
+
+# Legacy one-off source patch helper; maintained changes belong in modules
+/patch_remote.py
